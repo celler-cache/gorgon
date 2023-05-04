@@ -20,7 +20,7 @@ struct Args {
     quiet: u8,
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_logging(&args);
