@@ -20,11 +20,13 @@ struct Args {
     quiet: u8,
 }
 
-fn main() {
+#[async_std::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_logging(&args);
 
     info!("Hello, world!");
+    Ok(())
 }
 
 fn init_logging(args: &Args) {
