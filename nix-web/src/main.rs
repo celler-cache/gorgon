@@ -2,8 +2,12 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use askama::Template;
+use axum::routing::get;
 use clap::Parser;
 use tracing::info;
+
+use anyhow::Result;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -12,27 +16,46 @@ struct Args {
     db_path: std::path::PathBuf,
 
     /// Increase log level.
-    #[arg(short, long, action=clap::ArgAction::Count)]
+    #[arg(long, short, action=clap::ArgAction::Count)]
     verbose: u8,
 
     /// Decrease log level.
-    #[arg(short, long, action=clap::ArgAction::Count)]
+    #[arg(long, short, action=clap::ArgAction::Count)]
     quiet: u8,
+
+    /// Listen address.
+    #[arg(long, short = 'L', default_value = "[::]:8000")]
+    http_listen: std::net::SocketAddr,
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
 
-    info!("Hello, world!");
+    let app = axum::Router::new()
+        .route("/", get(get_index))
+        .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    info!(addr = ?&args.http_listen, "Listening!");
+    axum::Server::bind(&args.http_listen)
+        .serve(app.into_make_service())
+        .await?;
     Ok(())
+}
+
+#[derive(Template)]
+#[template(path = "index.html")]
+struct IndexTemplate<'a> {
+    blah: &'a str,
+}
+
+async fn get_index() -> IndexTemplate<'static> {
+    IndexTemplate { blah: "im gay" }
 }
 
 fn init_logging(args: &Args) {
     tracing_subscriber::fmt()
-        .without_time()
-        .with_target(false)
         .with_max_level(match 2 + args.verbose - args.quiet {
             0 => tracing::Level::ERROR,
             1 => tracing::Level::WARN,
