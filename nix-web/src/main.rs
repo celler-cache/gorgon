@@ -3,11 +3,27 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use askama::Template;
-use axum::routing::get;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use clap::Parser;
 use tracing::info;
 
-use anyhow::Result;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Hyper(#[from] hyper::Error),
+}
+
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self)).into_response()
+    }
+}
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -50,8 +66,8 @@ struct IndexTemplate<'a> {
     blah: &'a str,
 }
 
-async fn get_index() -> IndexTemplate<'static> {
-    IndexTemplate { blah: "im gay" }
+async fn get_index() -> Result<IndexTemplate<'static>> {
+    Ok(IndexTemplate { blah: "im gay" })
 }
 
 fn init_logging(args: &Args) {
