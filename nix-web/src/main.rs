@@ -13,6 +13,7 @@ use tracing::info;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -44,6 +45,18 @@ struct Args {
     http_listen: std::net::SocketAddr,
 }
 
+fn init_logging(args: &Args) {
+    tracing_subscriber::fmt()
+        .with_max_level(match 2 + args.verbose - args.quiet {
+            0 => tracing::Level::ERROR,
+            1 => tracing::Level::WARN,
+            2 => tracing::Level::INFO,
+            3 => tracing::Level::DEBUG,
+            4.. => tracing::Level::TRACE,
+        })
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -68,16 +81,4 @@ struct IndexTemplate<'a> {
 
 async fn get_index() -> Result<IndexTemplate<'static>> {
     Ok(IndexTemplate { blah: "im gay" })
-}
-
-fn init_logging(args: &Args) {
-    tracing_subscriber::fmt()
-        .with_max_level(match 2 + args.verbose - args.quiet {
-            0 => tracing::Level::ERROR,
-            1 => tracing::Level::WARN,
-            2 => tracing::Level::INFO,
-            3 => tracing::Level::DEBUG,
-            4.. => tracing::Level::TRACE,
-        })
-        .init();
 }
