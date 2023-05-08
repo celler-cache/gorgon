@@ -4,16 +4,19 @@
 
 use askama::Template;
 use axum::{
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
 };
 use clap::Parser;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
+/// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -26,11 +29,15 @@ impl IntoResponse for Error {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 struct Args {
     /// Path to the nix database.
-    #[arg(long, short, default_value = "/nix/var/nix/db/db.sqlite")]
-    db_path: std::path::PathBuf,
+    #[arg(long, short = 'D', default_value = "/nix/var/nix/db/db.sqlite")]
+    nix_db_path: PathBuf,
+
+    /// Path to the nix store.
+    #[arg(long, short = 'S', default_value = "/nix/store")]
+    nix_store_path: PathBuf,
 
     /// Increase log level.
     #[arg(long, short, action=clap::ArgAction::Count)]
@@ -57,13 +64,21 @@ fn init_logging(args: &Args) {
         .init();
 }
 
+#[derive(Debug, Clone)]
+struct AppState {
+    args: Args,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
+    let state = Arc::new(AppState { args: args.clone() });
 
     let app = axum::Router::new()
         .route("/", get(get_index))
+        .route("/nix/store/:id", get(get_derivation))
+        .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     info!(addr = ?&args.http_listen, "Listening!");
@@ -81,4 +96,19 @@ struct IndexTemplate<'a> {
 
 async fn get_index() -> Result<IndexTemplate<'static>> {
     Ok(IndexTemplate { blah: "im gay" })
+}
+
+#[derive(Template)]
+#[template(path = "derivation.html")]
+struct DerivationTemplate {
+    path: PathBuf,
+    id: String,
+}
+
+async fn get_derivation<'a>(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<DerivationTemplate> {
+    let path = state.args.nix_store_path.join(&id);
+    Ok(DerivationTemplate { path, id })
 }
