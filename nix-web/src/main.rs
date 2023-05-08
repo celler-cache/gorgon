@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 
     let app = axum::Router::new()
         .route("/", get(get_index))
-        .route("/nix/store/:id", get(get_derivation))
+        .route("/nix/store/*path", get(get_derivation))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -135,11 +135,11 @@ pub struct Output {
 
 async fn get_derivation<'a>(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    Path(store_path): Path<String>,
 ) -> Result<DerivationTemplate> {
     let output = Command::new("nix")
         .arg("show-derivation")
-        .arg(state.args.nix_store_path.join(&id))
+        .arg(state.args.nix_store_path.join(&store_path))
         .output()
         .await?;
     if !output.status.success() {
