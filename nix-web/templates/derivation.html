@@ -1,0 +1,19 @@
+{#
+SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+
+SPDX-License-Identifier: EUPL-1.2
+#}
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>nix-web</title>
+</head>
+<body>
+
+{% for drv in drvs %}
+<h3>{{ drv._path }}</h3>
+<pre>{{ drv|json }}</pre>
+{% endfor %}
+
+</body>

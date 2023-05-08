@@ -10,8 +10,11 @@ use axum::{
     routing::get,
 };
 use clap::Parser;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::process::Command;
 use tracing::info;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -19,8 +22,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("nix command exited with code {0}")]
+    NixCommandExitCode(i32),
+
+    #[error(transparent)]
+    JSON(#[from] serde_json::Error),
     #[error(transparent)]
     Hyper(#[from] hyper::Error),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
 }
 
 impl IntoResponse for Error {
@@ -32,11 +42,11 @@ impl IntoResponse for Error {
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// Path to the nix database.
-    #[arg(long, short = 'D', default_value = "/nix/var/nix/db/db.sqlite")]
+    #[arg(long, default_value = "/nix/var/nix/db/db.sqlite")]
     nix_db_path: PathBuf,
 
     /// Path to the nix store.
-    #[arg(long, short = 'S', default_value = "/nix/store")]
+    #[arg(long, default_value = "/nix/store")]
     nix_store_path: PathBuf,
 
     /// Increase log level.
@@ -101,14 +111,46 @@ async fn get_index() -> Result<IndexTemplate<'static>> {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate {
-    path: PathBuf,
-    id: String,
+    drvs: Vec<Derivation>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Derivation {
+    #[serde(default)]
+    pub _path: String,
+    pub args: Vec<String>,
+    pub builder: String,
+    pub env: HashMap<String, String>,
+    #[serde(rename = "inputDrvs")]
+    pub input_drvs: HashMap<String, Vec<String>>,
+    #[serde(rename = "inputSrcs")]
+    pub input_srcs: Vec<String>,
+    pub outputs: HashMap<String, Output>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Output {
+    pub path: String,
 }
 
 async fn get_derivation<'a>(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<DerivationTemplate> {
-    let path = state.args.nix_store_path.join(&id);
-    Ok(DerivationTemplate { path, id })
+    let output = Command::new("nix")
+        .arg("show-derivation")
+        .arg(state.args.nix_store_path.join(&id))
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
+    }
+    let drvs = serde_json::from_slice::<HashMap<String, Derivation>>(&output.stdout)?
+        .drain()
+        .map(|(path, mut drv)| {
+            drv._path = path;
+            drv
+        })
+        .collect();
+    Ok(DerivationTemplate { drvs })
 }
