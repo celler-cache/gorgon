@@ -139,6 +139,7 @@ async fn get_derivation<'a>(
 ) -> Result<DerivationTemplate> {
     let output = Command::new("nix")
         .arg("show-derivation")
+        .arg("-r")
         .arg(state.args.nix_store_path.join(&store_path))
         .output()
         .await?;

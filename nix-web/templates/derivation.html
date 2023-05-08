@@ -12,8 +12,10 @@ SPDX-License-Identifier: EUPL-1.2
 <body>
 
 {% for drv in drvs %}
-<h3>{{ drv._path }}</h3>
-<pre>{{ drv|json }}</pre>
+<details>
+  <summary>{{ drv._path }}</summary>
+  <pre>{{ drv|json }}</pre>
+</details>
 {% endfor %}
 
 </body>
