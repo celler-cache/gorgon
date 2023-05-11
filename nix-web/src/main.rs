@@ -6,7 +6,7 @@ use askama::Template;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use clap::Parser;
@@ -123,10 +123,22 @@ pub struct PathInfo {
     pub registration_time: u64, // TODO: Parse timestamp.
 }
 
+#[derive(Template)]
+#[template(path = "derivation.html")]
+struct DerivationTemplate<'a> {
+    root_tmpls: Vec<DerivationItemTemplate<'a>>,
+}
+
+#[derive(Template)]
+#[template(path = "derivation_item.html")]
+struct DerivationItemTemplate<'a> {
+    path_info: &'a PathInfo,
+}
+
 async fn get_derivation(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
-) -> Result<String> {
+) -> Result<Html<String>> {
     let output = Command::new("nix")
         .arg("--experimental-features")
         .arg("nix-command")
@@ -148,7 +160,15 @@ async fn get_derivation(
             .collect();
     let mut roots = find_tree_roots(&path_infos);
     roots.sort_by(|a, b| a.registration_time.cmp(&b.registration_time));
-    Ok(serde_json::to_string_pretty(&roots)?)
+    Ok(Html(
+        DerivationTemplate {
+            root_tmpls: roots
+                .iter()
+                .map(|path_info| DerivationItemTemplate { path_info })
+                .collect(),
+        }
+        .render()?,
+    ))
 }
 
 fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<&'a PathInfo> {
