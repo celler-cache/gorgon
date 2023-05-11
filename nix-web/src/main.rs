@@ -133,6 +133,7 @@ struct DerivationTemplate<'a> {
 #[template(path = "derivation_item.html")]
 struct DerivationItemTemplate<'a> {
     path_info: &'a PathInfo,
+    reference_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
 async fn get_derivation(
@@ -164,7 +165,17 @@ async fn get_derivation(
         DerivationTemplate {
             root_tmpls: roots
                 .iter()
-                .map(|path_info| DerivationItemTemplate { path_info })
+                .map(|path_info| DerivationItemTemplate {
+                    path_info,
+                    reference_tmpls: path_info
+                        .references
+                        .iter()
+                        .map(|path| DerivationItemTemplate {
+                            path_info: &path_infos[path],
+                            reference_tmpls: vec![],
+                        })
+                        .collect(),
+                })
                 .collect(),
         }
         .render()?,
