@@ -11,7 +11,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -110,7 +110,7 @@ async fn get_index() -> Result<IndexTemplate<'static>> {
     Ok(IndexTemplate { blah: "im gay" })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PathInfo {
     pub ca: String,
     #[serde(rename = "narHash")]
@@ -141,10 +141,22 @@ async fn get_derivation(
     if !output.status.success() {
         return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
     }
-    let pathinfos: HashMap<String, PathInfo> =
+    let path_infos: HashMap<String, PathInfo> =
         serde_json::from_slice::<Vec<PathInfo>>(&output.stdout)?
             .iter()
             .map(|pi| (pi.path.clone(), pi.clone()))
             .collect();
-    Ok(serde_json::to_string_pretty(&pathinfos)?)
+    let mut roots = find_tree_roots(&path_infos);
+    roots.sort_by(|a, b| a.registration_time.cmp(&b.registration_time));
+    Ok(serde_json::to_string_pretty(&roots)?)
+}
+
+fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<&'a PathInfo> {
+    let mut root_set = HashSet::<&'a str>::from_iter(nodes.keys().map(String::as_str));
+    for (_, n) in nodes {
+        for r in &n.references {
+            root_set.remove(r.as_str());
+        }
+    }
+    root_set.iter().map(|&path| &nodes[path]).collect()
 }
