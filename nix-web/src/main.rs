@@ -26,6 +26,8 @@ pub enum Error {
     NixCommandExitCode(i32),
 
     #[error(transparent)]
+    Askama(#[from] askama::Error),
+    #[error(transparent)]
     JSON(#[from] serde_json::Error),
     #[error(transparent)]
     Hyper(#[from] hyper::Error),
@@ -108,50 +110,41 @@ async fn get_index() -> Result<IndexTemplate<'static>> {
     Ok(IndexTemplate { blah: "im gay" })
 }
 
-#[derive(Template)]
-#[template(path = "derivation.html")]
-struct DerivationTemplate {
-    drvs: Vec<Derivation>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Derivation {
-    #[serde(default)]
-    pub _path: String,
-    pub args: Vec<String>,
-    pub builder: String,
-    pub env: HashMap<String, String>,
-    #[serde(rename = "inputDrvs")]
-    pub input_drvs: HashMap<String, Vec<String>>,
-    #[serde(rename = "inputSrcs")]
-    pub input_srcs: Vec<String>,
-    pub outputs: HashMap<String, Output>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Output {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathInfo {
+    pub ca: String,
+    #[serde(rename = "narHash")]
+    pub nar_hash: String,
+    #[serde(rename = "narSize")]
+    pub nar_size: usize,
     pub path: String,
+    pub references: Vec<String>,
+    #[serde(rename = "registrationTime")]
+    pub registration_time: u64, // TODO: Parse timestamp.
 }
 
-async fn get_derivation<'a>(
+async fn get_derivation(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
-) -> Result<DerivationTemplate> {
+) -> Result<String> {
     let output = Command::new("nix")
-        .arg("show-derivation")
+        .arg("--experimental-features")
+        .arg("nix-command")
+        .arg("path-info")
+        .arg("--offline")
+        .arg("--json")
         .arg("-r")
-        .arg(state.args.nix_store_path.join(&store_path))
+        .arg("--derivation")
+        .arg(state.args.nix_store_path.join(store_path))
         .output()
         .await?;
     if !output.status.success() {
         return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
     }
-    let drvs = serde_json::from_slice::<HashMap<String, Derivation>>(&output.stdout)?
-        .drain()
-        .map(|(path, mut drv)| {
-            drv._path = path;
-            drv
-        })
-        .collect();
-    Ok(DerivationTemplate { drvs })
+    let pathinfos: HashMap<String, PathInfo> =
+        serde_json::from_slice::<Vec<PathInfo>>(&output.stdout)?
+            .iter()
+            .map(|pi| (pi.path.clone(), pi.clone()))
+            .collect();
+    Ok(serde_json::to_string_pretty(&pathinfos)?)
 }
