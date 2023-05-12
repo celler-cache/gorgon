@@ -11,7 +11,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, LinkedList};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -136,6 +136,31 @@ struct DerivationItemTemplate<'a> {
     reference_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
+impl<'a> DerivationItemTemplate<'a> {
+    fn build(
+        path_infos: &'a HashMap<String, PathInfo>,
+        path_info: &'a PathInfo,
+        mut parents: LinkedList<&'a str>,
+    ) -> Self {
+        Self {
+            path_info,
+            reference_tmpls: if !parents.contains(&path_info.path.as_str()) {
+                parents.push_back(&path_info.path);
+                if parents.len() > 50 {
+                    panic!("{:#?}", parents);
+                }
+                path_info
+                    .references
+                    .iter()
+                    .map(|path| Self::build(path_infos, &path_infos[path], parents.clone()))
+                    .collect()
+            } else {
+                vec![]
+            },
+        }
+    }
+}
+
 async fn get_derivation(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
@@ -159,23 +184,12 @@ async fn get_derivation(
             .iter()
             .map(|pi| (pi.path.clone(), pi.clone()))
             .collect();
-    let mut roots = find_tree_roots(&path_infos);
-    roots.sort_by(|a, b| a.registration_time.cmp(&b.registration_time));
+    let roots = find_tree_roots(&path_infos);
     Ok(Html(
         DerivationTemplate {
             root_tmpls: roots
                 .iter()
-                .map(|path_info| DerivationItemTemplate {
-                    path_info,
-                    reference_tmpls: path_info
-                        .references
-                        .iter()
-                        .map(|path| DerivationItemTemplate {
-                            path_info: &path_infos[path],
-                            reference_tmpls: vec![],
-                        })
-                        .collect(),
-                })
+                .map(|root| DerivationItemTemplate::build(&path_infos, root, LinkedList::new()))
                 .collect(),
         }
         .render()?,

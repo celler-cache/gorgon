@@ -1,0 +1,13 @@
+{#
+SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+
+SPDX-License-Identifier: EUPL-1.2
+#}
+
+<ul>
+{% for tmpl in root_tmpls %}
+  <li>
+    {{ tmpl|safe }}
+  </li>
+{% endfor %}
+</ul>
