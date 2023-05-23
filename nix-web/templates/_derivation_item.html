@@ -1,0 +1,20 @@
+{#
+SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+
+SPDX-License-Identifier: EUPL-1.2
+#}
+
+{% if ref_tmpls.len() > 0 %}
+<details>
+  <summary>
+{% endif %}
+  {{ path_info.path }}{% if is_seen_before %} […]{% endif %}
+{% if ref_tmpls.len() > 0 %}
+  </summary>
+  <ul>
+    {% for ref_tmpl in ref_tmpls %}
+    <li>{{ ref_tmpl|safe }}</li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}

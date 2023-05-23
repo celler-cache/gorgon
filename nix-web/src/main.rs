@@ -11,7 +11,7 @@ use axum::{
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, LinkedList};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -126,38 +126,47 @@ pub struct PathInfo {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
+    roots: &'a Vec<&'a PathInfo>,
     root_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
 #[derive(Template)]
-#[template(path = "derivation_item.html")]
+#[template(path = "_derivation_item.html")]
 struct DerivationItemTemplate<'a> {
     path_info: &'a PathInfo,
-    reference_tmpls: Vec<DerivationItemTemplate<'a>>,
+    ref_tmpls: Vec<DerivationItemTemplate<'a>>,
+    is_seen_before: bool,
 }
 
 impl<'a> DerivationItemTemplate<'a> {
     fn build(
         path_infos: &'a HashMap<String, PathInfo>,
-        path_info: &'a PathInfo,
-        mut parents: LinkedList<&'a str>,
-    ) -> Self {
-        Self {
-            path_info,
-            reference_tmpls: if !parents.contains(&path_info.path.as_str()) {
-                parents.push_back(&path_info.path);
-                if parents.len() > 50 {
-                    panic!("{:#?}", parents);
-                }
-                path_info
-                    .references
-                    .iter()
-                    .map(|path| Self::build(path_infos, &path_infos[path], parents.clone()))
-                    .collect()
-            } else {
-                vec![]
+        path: &'a str,
+        mut seen: HashSet<&'a str>,
+    ) -> (Self, HashSet<&'a str>) {
+        let path_info = &path_infos[path];
+
+        let is_seen_before = seen.contains(path);
+        let ref_tmpls = if !is_seen_before {
+            seen.insert(path);
+            let mut ref_tmpls = Vec::with_capacity(path_info.references.len());
+            for rf in path_info.references.iter() {
+                let (tmpl, seen_) = Self::build(path_infos, rf, seen);
+                ref_tmpls.push(tmpl);
+                seen = seen_;
+            }
+            ref_tmpls
+        } else {
+            Vec::new()
+        };
+        (
+            Self {
+                path_info,
+                ref_tmpls,
+                is_seen_before,
             },
-        }
+            seen,
+        )
     }
 }
 
@@ -187,9 +196,12 @@ async fn get_derivation(
     let roots = find_tree_roots(&path_infos);
     Ok(Html(
         DerivationTemplate {
+            roots: &roots,
             root_tmpls: roots
                 .iter()
-                .map(|root| DerivationItemTemplate::build(&path_infos, root, LinkedList::new()))
+                .map(|root| {
+                    DerivationItemTemplate::build(&path_infos, &root.path, HashSet::new()).0
+                })
                 .collect(),
         }
         .render()?,
