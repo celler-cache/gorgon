@@ -4,12 +4,13 @@
 
 use askama::Template;
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    extract::{Path, Query, State},
+    http::{HeaderName, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 use clap::Parser;
+use hyper::header;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -89,6 +90,8 @@ async fn main() -> Result<()> {
 
     let app = axum::Router::new()
         .route("/", get(get_index))
+        .route("/style.css", get(get_style_css))
+        .route("/goto", get(get_goto))
         .route("/nix/store/*path", get(get_derivation))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
@@ -108,6 +111,22 @@ struct IndexTemplate<'a> {
 
 async fn get_index() -> Result<IndexTemplate<'static>> {
     Ok(IndexTemplate { blah: "im gay" })
+}
+
+async fn get_style_css() -> ([(HeaderName, &'static str); 1], &'static str) {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../static/style.css"),
+    )
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct GotoQuery {
+    path: String,
+}
+
+async fn get_goto(query: Query<GotoQuery>) -> Response {
+    Redirect::to(&query.path).into_response()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

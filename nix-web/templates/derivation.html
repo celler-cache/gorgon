@@ -6,10 +6,11 @@ SPDX-License-Identifier: EUPL-1.2
 
 {% extends "_base.html" %}
 {% block title %}{{ roots.first().unwrap().path }} | nix-web{% endblock %}
+{% block goto %}{{ roots.first().unwrap().path }}{% endblock %}
 {% block content %}
 <ul>
   {% for root_tmpl in root_tmpls %}
-  <li>{{ root_tmpl|safe }}</li>
+  {{ root_tmpl|safe }}
   {% endfor %}
 </ul>
 {% endblock %}
