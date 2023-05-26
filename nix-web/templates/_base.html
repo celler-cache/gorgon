@@ -19,7 +19,7 @@ SPDX-License-Identifier: EUPL-1.2
   <div class="container">
     <a class="navbar-brand" href="/">nix-web</a>
     <form class="d-flex" role="search" action="/goto">
-      <input name="path" class="form-control me-2" type="search" placeholder="/nix/store/..." value="{% block goto %}{% endblock %}" aria-label="Path" />
+      <input name="path" class="form-control me-2" type="search" placeholder="/nix/store/..." value="{% block goto %}{% endblock %}" aria-label="Path" autofocus />
       <button class="btn btn-outline-success" type="submit">Go</button>
     </form>
   </div>
