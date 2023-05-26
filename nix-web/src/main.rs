@@ -189,7 +189,36 @@ impl<'a> DerivationItemTemplate<'a> {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub enum GetDerivationPage {
+    #[serde(rename = "info")]
+    Info,
+    #[serde(rename = "log")]
+    Log,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+pub struct GetDerivationQuery {
+    #[serde(rename = "p")]
+    page: Option<GetDerivationPage>,
+}
+
 async fn get_derivation(
+    State(state): State<Arc<AppState>>,
+    Path(store_path): Path<String>,
+    Query(query): Query<GetDerivationQuery>,
+) -> Result<Response> {
+    match query.page.unwrap_or(GetDerivationPage::Info) {
+        GetDerivationPage::Info => Ok(get_derivation_info(State(state), Path(store_path))
+            .await?
+            .into_response()),
+        GetDerivationPage::Log => Ok(get_derivation_log(State(state), Path(store_path))
+            .await?
+            .into_response()),
+    }
+}
+
+async fn get_derivation_info(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
 ) -> Result<Html<String>> {
@@ -235,4 +264,21 @@ fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<&'a PathInfo
         }
     }
     root_set.iter().map(|&path| &nodes[path]).collect()
+}
+
+async fn get_derivation_log(
+    State(state): State<Arc<AppState>>,
+    Path(store_path): Path<String>,
+) -> Result<String> {
+    let output = Command::new("nix")
+        .arg("--experimental-features")
+        .arg("nix-command")
+        .arg("log")
+        .arg(state.args.nix_store_path.join(store_path))
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into())
 }
