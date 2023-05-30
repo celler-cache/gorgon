@@ -7,3 +7,16 @@
 .derivation a.badge {
     text-decoration: none;
 }
+
+.derivation.wait {
+    list-style-type: circle;
+}
+.derivation.succ {
+    list-style-type: disc;
+}
+.derivation.fail {
+    list-style-type: disc;
+}
+.derivation.fail::marker {
+    color: #f00;
+}

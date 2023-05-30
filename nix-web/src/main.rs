@@ -131,15 +131,79 @@ async fn get_goto(query: Query<GotoQuery>) -> Response {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PathInfo {
-    pub ca: String,
-    #[serde(rename = "narHash")]
-    pub nar_hash: String,
-    #[serde(rename = "narSize")]
-    pub nar_size: usize,
     pub path: String,
-    pub references: Vec<String>,
+    // Only present (as the only item alongside path) for invalid paths.
+    #[serde(default = "PathInfo::default_valid")]
+    pub valid: bool,
+
+    pub deriver: Option<String>,
+    pub ca: Option<String>,
+    #[serde(rename = "narHash")]
+    pub nar_hash: Option<String>,
+    #[serde(rename = "narSize")]
+    pub nar_size: Option<usize>,
+    pub references: Option<Vec<String>>,
     #[serde(rename = "registrationTime")]
-    pub registration_time: u64, // TODO: Parse timestamp.
+    pub registration_time: Option<u64>, // TODO: Parse timestamp.
+    pub signatures: Option<Vec<String>>,
+}
+
+impl PathInfo {
+    fn default_valid() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DerivationStatus {
+    #[serde(rename = "????")]
+    Unknown,
+    #[serde(rename = "wait")]
+    Wait,
+    #[serde(rename = "succ")]
+    Success,
+    #[serde(rename = "fail")]
+    Failure,
+}
+
+impl Default for DerivationStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl std::fmt::Display for DerivationStatus {
+    fn fmt<'w>(&self, w: &mut std::fmt::Formatter<'w>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => write!(w, "????"),
+            Self::Wait => write!(w, "wait"),
+            Self::Success => write!(w, "succ"),
+            Self::Failure => write!(w, "fail"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Derivation {
+    #[serde(default)]
+    pub path: String, // Filled in from the map key.
+    #[serde(default)]
+    pub status: DerivationStatus,
+
+    // From `nix show-derivation`.
+    pub args: Vec<String>,
+    pub builder: String,
+    pub env: HashMap<String, String>,
+    #[serde(rename = "inputDrvs")]
+    pub input_drvs: HashMap<String, Vec<String>>,
+    #[serde(rename = "inputSrcs")]
+    pub input_srcs: Vec<String>,
+    pub outputs: HashMap<String, HashMap<String, String>>,
+    pub system: String,
+
+    // From `nix path-info`.
+    pub drv_path_info: Option<PathInfo>,
+    pub out_path_info: Option<Vec<PathInfo>>,
 }
 
 #[derive(Template)]
@@ -152,37 +216,37 @@ struct DerivationTemplate<'a> {
 #[derive(Template)]
 #[template(path = "_derivation_item.html")]
 struct DerivationItemTemplate<'a> {
-    path_info: &'a PathInfo,
+    drv: &'a Derivation,
     ref_tmpls: Vec<DerivationItemTemplate<'a>>,
     is_seen_before: bool,
 }
 
 impl<'a> DerivationItemTemplate<'a> {
     // Recursively builds a batch of DerivationItemTemplates, shallow-first.
-    fn build_batch(
-        path_infos: &'a HashMap<String, PathInfo>,
-        paths: &'a Vec<String>,
+    fn build_batch<P: Iterator<Item = &'a String>>(
+        drvs: &'a HashMap<String, Derivation>,
+        paths: P,
         mut seen: HashSet<&'a str>,
     ) -> (Vec<Self>, HashSet<&'a str>) {
-        let mut batch = Vec::with_capacity(paths.len());
+        let mut batch = Vec::new();
 
         // Fill the batch and flag each derivation as seen, shallow-first.
         for path in paths {
-            let path_info = &path_infos[path];
+            let drv = &drvs[path];
             let is_seen_before = seen.contains(&path.as_str());
             if !is_seen_before {
                 seen.insert(path);
             }
             batch.push(Self {
-                path_info,
+                drv,
                 is_seen_before,
-                ref_tmpls: Vec::with_capacity(path_info.references.len()),
+                ref_tmpls: Vec::with_capacity(drv.input_drvs.len()),
             });
         }
 
         // Fill in references for derivations we haven't seen before.
         for tmpl in batch.iter_mut().filter(|t| !t.is_seen_before) {
-            let (tmpls, seen_) = Self::build_batch(path_infos, &tmpl.path_info.references, seen);
+            let (tmpls, seen_) = Self::build_batch(drvs, tmpl.drv.input_drvs.keys(), seen);
             tmpl.ref_tmpls = tmpls;
             seen = seen_;
         }
@@ -223,39 +287,102 @@ async fn get_derivation_info(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
 ) -> Result<Html<String>> {
-    let output = Command::new("nix")
-        .arg("--experimental-features")
-        .arg("nix-command")
-        .arg("path-info")
-        .arg("--offline")
-        .arg("--json")
-        .arg("-r")
-        .arg("--derivation")
-        .arg(state.args.nix_store_path.join(store_path))
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
+    // Collect info from nix.
+    let (drv_cmd, drv_pi_cmd, out_pi_cmd) = {
+        let path = state.args.nix_store_path.join(&store_path);
+        let drv_cmd = Command::new("nix")
+            .arg("--experimental-features")
+            .arg("nix-command")
+            .arg("show-derivation")
+            .arg("--derivation")
+            .arg("--offline")
+            .arg("-r")
+            .arg(&path)
+            .output();
+        let drv_pi_cmd = Command::new("nix")
+            .arg("--experimental-features")
+            .arg("nix-command")
+            .arg("path-info")
+            .arg("--derivation")
+            .arg("--offline")
+            .arg("--json")
+            .arg("-r")
+            .arg(&path)
+            .output();
+        let out_pi_cmd = Command::new("nix")
+            .arg("--experimental-features")
+            .arg("nix-command")
+            .arg("path-info")
+            .arg("--offline")
+            .arg("--json")
+            .arg("-r")
+            .arg(&path)
+            .output();
+        (drv_cmd.await?, drv_pi_cmd.await?, out_pi_cmd.await?)
+    };
+    // The only one that has to succeed is the `show-derivation` call.
+    if !drv_cmd.status.success() {
+        return Err(Error::NixCommandExitCode(
+            drv_cmd.status.code().unwrap_or(0),
+        ));
     }
-    let path_infos: HashMap<String, PathInfo> =
-        serde_json::from_slice::<Vec<PathInfo>>(&output.stdout)?
+
+    // Derivation PathInfos.
+    let drv_pis: HashMap<String, PathInfo> = if drv_pi_cmd.status.success() {
+        serde_json::from_slice::<Vec<PathInfo>>(&drv_pi_cmd.stdout)?
             .iter()
+            .filter(|pi| pi.valid)
             .map(|pi| (pi.path.clone(), pi.clone()))
-            .collect();
-    let roots = find_tree_roots(&path_infos);
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    // Output PathInfos, grouped by deriver.
+    let out_pis: HashMap<String, Vec<PathInfo>> = if out_pi_cmd.status.success() {
+        let mut pis = HashMap::<String, Vec<PathInfo>>::new();
+        for pi in serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)? {
+            let deriver = pi.deriver.as_ref().unwrap();
+            if let Some(outs) = pis.get_mut(deriver) {
+                outs.push(pi.clone())
+            } else {
+                pis.insert(deriver.to_string(), vec![pi.clone()]);
+            }
+        }
+        pis
+    } else {
+        HashMap::new()
+    };
+
+    // Aggregate it all into Derivations.
+    let mut drvs: HashMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
+    for (path, drv) in drvs.iter_mut() {
+        drv.path = path.clone();
+        drv.drv_path_info = drv_pis.get(path).cloned();
+        drv.out_path_info = out_pis.get(path).cloned();
+
+        // Figure out what the status of this derivation is.
+        drv.status = if drv.out_path_info.is_some() {
+            DerivationStatus::Success
+        } else {
+            DerivationStatus::Failure
+        };
+    }
+
+    let roots = find_tree_roots(&drvs);
     Ok(Html(
         DerivationTemplate {
             roots: &roots,
-            root_tmpls: DerivationItemTemplate::build_batch(&path_infos, &roots, HashSet::new()).0,
+            root_tmpls: DerivationItemTemplate::build_batch(&drvs, roots.iter(), HashSet::new()).0,
         }
         .render()?,
     ))
 }
 
-fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<String> {
+fn find_tree_roots<'a>(nodes: &'a HashMap<String, Derivation>) -> Vec<String> {
     let mut root_set = HashSet::<&'a str>::from_iter(nodes.keys().map(String::as_str));
     for (_, n) in nodes {
-        for r in &n.references {
+        for r in n.input_drvs.keys() {
             root_set.remove(r.as_str());
         }
     }

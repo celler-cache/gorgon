@@ -4,10 +4,10 @@ SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 SPDX-License-Identifier: EUPL-1.2
 #}
 
-<li class="derivation {% if ref_tmpls.len() > 0 %}branch{% else %}leaf{% endif %}">
-  <a href="{{ path_info.path }}">{{ path_info.path }}</a>
+<li class="derivation {% if ref_tmpls.len() > 0 %}branch{% else %}leaf{% endif %} {{ drv.status }}">
+  <a href="{{ drv.path }}">{{ drv.path }}</a>
   {% if is_seen_before %} […]{% endif %}
-  <a href="{{ path_info.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
+  <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
 
   {% if ref_tmpls.len() > 0 %}
   <details>
