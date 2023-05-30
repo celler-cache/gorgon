@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{debug, debug_span, info};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -355,19 +355,59 @@ async fn get_derivation_info(
     };
 
     // Aggregate it all into Derivations.
-    let mut drvs: HashMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
-    for (path, drv) in drvs.iter_mut() {
-        drv.path = path.clone();
-        drv.drv_path_info = drv_pis.get(path).cloned();
-        drv.out_path_info = out_pis.get(path).cloned();
+    let drvs: HashMap<String, Derivation> = {
+        let span = debug_span!("drvs");
+        let _enter = span.enter();
 
-        // Figure out what the status of this derivation is.
-        drv.status = if drv.out_path_info.is_some() {
-            DerivationStatus::Success
-        } else {
-            DerivationStatus::Failure
-        };
-    }
+        let mut drvs: HashMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
+        let mut nix_log_cmds = HashMap::new();
+        for (path, drv) in drvs.iter_mut() {
+            let span = debug_span!("drv", path);
+            let _enter = span.enter();
+
+            drv.path = path.clone();
+            drv.drv_path_info = drv_pis.get(path).cloned();
+            drv.out_path_info = out_pis.get(path).cloned();
+
+            // Figure out what the status of this derivation is.
+            drv.status = if drv.out_path_info.is_some() {
+                // There's an output; it's a success.
+                DerivationStatus::Success
+            } else {
+                // There's no output - spawn a `nix log` and see if there's a log.
+                debug!("No output exists; checking for log...");
+                nix_log_cmds.insert(
+                    path.clone(),
+                    Command::new("nix")
+                        .arg("--experimental-features")
+                        .arg("nix-command")
+                        .arg("log")
+                        .arg(&path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?,
+                );
+                DerivationStatus::Unknown
+            };
+        }
+        // Wait for any `nix log` commands to finish.
+        for (path, drv) in drvs.iter_mut() {
+            if let Some(child) = nix_log_cmds.get_mut(path) {
+                let span = debug_span!("wait_log", path);
+                let _enter = span.enter();
+
+                drv.status = if child.wait().await?.success() {
+                    debug!("Has log, no output -- assuming build failure");
+                    DerivationStatus::Failure
+                } else {
+                    debug!("No log, no output -- assuming currently building");
+                    DerivationStatus::Wait
+                };
+            }
+        }
+        drvs
+    };
 
     let roots = find_tree_roots(&drvs);
     Ok(Html(
