@@ -145,7 +145,7 @@ pub struct PathInfo {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
-    roots: &'a Vec<&'a PathInfo>,
+    roots: &'a Vec<String>,
     root_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
@@ -158,34 +158,35 @@ struct DerivationItemTemplate<'a> {
 }
 
 impl<'a> DerivationItemTemplate<'a> {
-    fn build(
+    // Recursively builds a batch of DerivationItemTemplates, shallow-first.
+    fn build_batch(
         path_infos: &'a HashMap<String, PathInfo>,
-        path: &'a str,
+        paths: &'a Vec<String>,
         mut seen: HashSet<&'a str>,
-    ) -> (Self, HashSet<&'a str>) {
-        let path_info = &path_infos[path];
+    ) -> (Vec<Self>, HashSet<&'a str>) {
+        let mut batch = Vec::with_capacity(paths.len());
 
-        let is_seen_before = seen.contains(path);
-        let ref_tmpls = if !is_seen_before {
-            seen.insert(path);
-            let mut ref_tmpls = Vec::with_capacity(path_info.references.len());
-            for rf in path_info.references.iter() {
-                let (tmpl, seen_) = Self::build(path_infos, rf, seen);
-                ref_tmpls.push(tmpl);
-                seen = seen_;
+        // Fill the batch and flag each derivation as seen, shallow-first.
+        for path in paths {
+            let path_info = &path_infos[path];
+            let is_seen_before = seen.contains(&path.as_str());
+            if !is_seen_before {
+                seen.insert(path);
             }
-            ref_tmpls
-        } else {
-            Vec::new()
-        };
-        (
-            Self {
+            batch.push(Self {
                 path_info,
-                ref_tmpls,
                 is_seen_before,
-            },
-            seen,
-        )
+                ref_tmpls: Vec::with_capacity(path_info.references.len()),
+            });
+        }
+
+        // Fill in references for derivations we haven't seen before.
+        for tmpl in batch.iter_mut().filter(|t| !t.is_seen_before) {
+            let (tmpls, seen_) = Self::build_batch(path_infos, &tmpl.path_info.references, seen);
+            tmpl.ref_tmpls = tmpls;
+            seen = seen_;
+        }
+        (batch, seen)
     }
 }
 
@@ -245,25 +246,20 @@ async fn get_derivation_info(
     Ok(Html(
         DerivationTemplate {
             roots: &roots,
-            root_tmpls: roots
-                .iter()
-                .map(|root| {
-                    DerivationItemTemplate::build(&path_infos, &root.path, HashSet::new()).0
-                })
-                .collect(),
+            root_tmpls: DerivationItemTemplate::build_batch(&path_infos, &roots, HashSet::new()).0,
         }
         .render()?,
     ))
 }
 
-fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<&'a PathInfo> {
+fn find_tree_roots<'a>(nodes: &'a HashMap<String, PathInfo>) -> Vec<String> {
     let mut root_set = HashSet::<&'a str>::from_iter(nodes.keys().map(String::as_str));
     for (_, n) in nodes {
         for r in &n.references {
             root_set.remove(r.as_str());
         }
     }
-    root_set.iter().map(|&path| &nodes[path]).collect()
+    root_set.iter().map(|&path| path.to_string()).collect()
 }
 
 async fn get_derivation_log(
