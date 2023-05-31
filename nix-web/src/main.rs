@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
-use tracing::{debug, debug_span, info};
+use tracing::{debug, debug_span, info, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -360,7 +360,7 @@ async fn get_derivation_info(
         let _enter = span.enter();
 
         let mut drvs: HashMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
-        let mut nix_log_cmds = HashMap::new();
+        let mut need_pathinfo_check = HashSet::<&String>::new();
         for (path, drv) in drvs.iter_mut() {
             let span = debug_span!("drv", path);
             let _enter = span.enter();
@@ -374,38 +374,49 @@ async fn get_derivation_info(
                 // There's an output; it's a success.
                 DerivationStatus::Success
             } else {
-                // There's no output - spawn a `nix log` and see if there's a log.
-                debug!("No output exists; checking for log...");
-                nix_log_cmds.insert(
-                    path.clone(),
-                    Command::new("nix")
-                        .arg("--experimental-features")
-                        .arg("nix-command")
-                        .arg("log")
-                        .arg(&path)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn()?,
-                );
+                // There's no output - this may mean a build dependency, or it's missing.
+                // Only one way to find out; flag it for a 2nd round of `nix path-info`.
+                need_pathinfo_check.insert(&path);
                 DerivationStatus::Unknown
             };
         }
-        // Wait for any `nix log` commands to finish.
-        for (path, drv) in drvs.iter_mut() {
-            if let Some(child) = nix_log_cmds.get_mut(path) {
-                let span = debug_span!("wait_log", path);
-                let _enter = span.enter();
 
-                drv.status = if child.wait().await?.success() {
-                    debug!("Has log, no output -- assuming build failure");
-                    DerivationStatus::Failure
-                } else {
-                    debug!("No log, no output -- assuming currently building");
-                    DerivationStatus::Wait
-                };
+        // Run a second round of `nix path-info` checks on outputs we're unsure about.
+        if need_pathinfo_check.len() > 0 {
+            let span = debug_span!("pathinfo2");
+            let _enter = span.enter();
+            debug!(
+                count = need_pathinfo_check.len(),
+                "running secondary `nix path-info`"
+            );
+
+            let pi_cmd2 = Command::new("nix")
+                .arg("--experimental-features")
+                .arg("nix-command")
+                .arg("path-info")
+                .arg("--derivation")
+                .arg("--json")
+                .args(need_pathinfo_check)
+                .output()
+                .await?;
+            if !pi_cmd2.status.success() {
+                warn!(
+                    "second round of `nix path-info` failed with status {:?}",
+                    pi_cmd2.status.code(),
+                );
+            } else {
+                for pi in serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd2.stdout)?
+                    .iter()
+                    .filter(|pi| pi.valid)
+                {
+                    if let Some(drv) = drvs.get_mut(&pi.path) {
+                        debug!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
+                        drv.status = DerivationStatus::Success
+                    }
+                }
             }
         }
+
         drvs
     };
 
