@@ -203,7 +203,7 @@ pub struct Derivation {
 
     // From `nix path-info`.
     pub drv_path_info: Option<PathInfo>,
-    pub out_path_info: Option<Vec<PathInfo>>,
+    pub out_path_info: Option<PathInfo>,
 }
 
 #[derive(Template)]
@@ -295,7 +295,6 @@ async fn get_derivation_info(
             .arg("nix-command")
             .arg("show-derivation")
             .arg("--derivation")
-            .arg("--offline")
             .arg("-r")
             .arg(&path)
             .output();
@@ -327,7 +326,7 @@ async fn get_derivation_info(
         ));
     }
 
-    // Derivation PathInfos.
+    // Map PathInfos.
     let drv_pis: HashMap<String, PathInfo> = if drv_pi_cmd.status.success() {
         serde_json::from_slice::<Vec<PathInfo>>(&drv_pi_cmd.stdout)?
             .iter()
@@ -337,19 +336,12 @@ async fn get_derivation_info(
     } else {
         HashMap::new()
     };
-
-    // Output PathInfos, grouped by deriver.
-    let out_pis: HashMap<String, Vec<PathInfo>> = if out_pi_cmd.status.success() {
-        let mut pis = HashMap::<String, Vec<PathInfo>>::new();
-        for pi in serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)? {
-            let deriver = pi.deriver.as_ref().unwrap();
-            if let Some(outs) = pis.get_mut(deriver) {
-                outs.push(pi.clone())
-            } else {
-                pis.insert(deriver.to_string(), vec![pi.clone()]);
-            }
-        }
-        pis
+    let out_pis: HashMap<String, PathInfo> = if out_pi_cmd.status.success() {
+        serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)?
+            .iter()
+            .filter(|pi| pi.valid)
+            .map(|pi| (pi.path.clone(), pi.clone()))
+            .collect()
     } else {
         HashMap::new()
     };
@@ -372,6 +364,10 @@ async fn get_derivation_info(
             // Figure out what the status of this derivation is.
             drv.status = if drv.out_path_info.is_some() {
                 // There's an output; it's a success.
+                debug!(
+                    path = drv.path,
+                    "confirmed by primary `nix path-info` -- marking as success"
+                );
                 DerivationStatus::Success
             } else {
                 // There's no output - this may mean a build dependency, or it's missing.
