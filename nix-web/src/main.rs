@@ -156,7 +156,7 @@ impl PathInfo {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DerivationStatus {
-    #[serde(rename = "????")]
+    #[serde(rename = "unknown")]
     Unknown,
     #[serde(rename = "wait")]
     Wait,
@@ -175,7 +175,7 @@ impl Default for DerivationStatus {
 impl std::fmt::Display for DerivationStatus {
     fn fmt<'w>(&self, w: &mut std::fmt::Formatter<'w>) -> std::fmt::Result {
         match self {
-            Self::Unknown => write!(w, "????"),
+            Self::Unknown => write!(w, "unknown"),
             Self::Wait => write!(w, "wait"),
             Self::Success => write!(w, "succ"),
             Self::Failure => write!(w, "fail"),
@@ -198,12 +198,13 @@ pub struct Derivation {
     pub input_drvs: HashMap<String, Vec<String>>,
     #[serde(rename = "inputSrcs")]
     pub input_srcs: Vec<String>,
-    pub outputs: HashMap<String, HashMap<String, String>>,
+    pub outputs: HashMap<String, DerivationOutput>,
     pub system: String,
+}
 
-    // From `nix path-info`.
-    pub drv_path_info: Option<PathInfo>,
-    pub out_path_info: Option<PathInfo>,
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DerivationOutput {
+    pub path: String,
 }
 
 #[derive(Template)]
@@ -288,23 +289,13 @@ async fn get_derivation_info(
     Path(store_path): Path<String>,
 ) -> Result<Html<String>> {
     // Collect info from nix.
-    let (drv_cmd, drv_pi_cmd, out_pi_cmd) = {
+    let (drv_cmd, out_pi_cmd) = {
         let path = state.args.nix_store_path.join(&store_path);
         let drv_cmd = Command::new("nix")
             .arg("--experimental-features")
             .arg("nix-command")
             .arg("show-derivation")
             .arg("--derivation")
-            .arg("-r")
-            .arg(&path)
-            .output();
-        let drv_pi_cmd = Command::new("nix")
-            .arg("--experimental-features")
-            .arg("nix-command")
-            .arg("path-info")
-            .arg("--derivation")
-            .arg("--offline")
-            .arg("--json")
             .arg("-r")
             .arg(&path)
             .output();
@@ -317,7 +308,7 @@ async fn get_derivation_info(
             .arg("-r")
             .arg(&path)
             .output();
-        (drv_cmd.await?, drv_pi_cmd.await?, out_pi_cmd.await?)
+        (drv_cmd.await?, out_pi_cmd.await?)
     };
     // The only one that has to succeed is the `show-derivation` call.
     if !drv_cmd.status.success() {
@@ -326,16 +317,6 @@ async fn get_derivation_info(
         ));
     }
 
-    // Map PathInfos.
-    let drv_pis: HashMap<String, PathInfo> = if drv_pi_cmd.status.success() {
-        serde_json::from_slice::<Vec<PathInfo>>(&drv_pi_cmd.stdout)?
-            .iter()
-            .filter(|pi| pi.valid)
-            .map(|pi| (pi.path.clone(), pi.clone()))
-            .collect()
-    } else {
-        HashMap::new()
-    };
     let out_pis: HashMap<String, PathInfo> = if out_pi_cmd.status.success() {
         serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)?
             .iter()
@@ -358,11 +339,13 @@ async fn get_derivation_info(
             let _enter = span.enter();
 
             drv.path = path.clone();
-            drv.drv_path_info = drv_pis.get(path).cloned();
-            drv.out_path_info = out_pis.get(path).cloned();
 
-            // Figure out what the status of this derivation is.
-            drv.status = if drv.out_path_info.is_some() {
+            // If the initial `nix path-info` has one of our outputs, it's a success.
+            drv.status = if drv
+                .outputs
+                .iter()
+                .any(|(_, DerivationOutput { path })| out_pis.contains_key(path))
+            {
                 // There's an output; it's a success.
                 debug!(
                     path = drv.path,
@@ -370,8 +353,11 @@ async fn get_derivation_info(
                 );
                 DerivationStatus::Success
             } else {
-                // There's no output - this may mean a build dependency, or it's missing.
-                // Only one way to find out; flag it for a 2nd round of `nix path-info`.
+                // The initial `nix path-info` didn't include any outputs - this may mean
+                // that it failed, that it's still building, or just that it's a build
+                // dependency that isn't referenced by the final product.
+                //
+                // The only way to find out is a second round of `nix path-info`.
                 need_pathinfo_check.insert(&path);
                 DerivationStatus::Unknown
             };
@@ -390,7 +376,6 @@ async fn get_derivation_info(
                 .arg("--experimental-features")
                 .arg("nix-command")
                 .arg("path-info")
-                .arg("--derivation")
                 .arg("--json")
                 .args(need_pathinfo_check)
                 .output()
@@ -408,6 +393,12 @@ async fn get_derivation_info(
                     if let Some(drv) = drvs.get_mut(&pi.path) {
                         debug!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
                         drv.status = DerivationStatus::Success
+                    }
+                    if let Some(deriver) = &pi.deriver {
+                        if let Some(drv) = drvs.get_mut(deriver) {
+                            debug!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
+                            drv.status = DerivationStatus::Success
+                        }
                     }
                 }
             }

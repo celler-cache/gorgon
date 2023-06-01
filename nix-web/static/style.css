@@ -8,6 +8,9 @@
     text-decoration: none;
 }
 
+.derivation.unknown {
+    list-style-type: '? ';
+}
 .derivation.wait {
     list-style-type: circle;
 }
