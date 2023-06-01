@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinSet};
 use tracing::{debug, debug_span, info, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -400,6 +400,37 @@ async fn get_derivation_info(
                             drv.status = DerivationStatus::Success
                         }
                     }
+                }
+            }
+        }
+
+        // Finally, disambiguate failed builds (no outputs, has log) from not yet built.
+        {
+            let mut log_check_tasks = JoinSet::new();
+            for path in drvs
+                .iter()
+                .filter(|(_, drv)| drv.status == DerivationStatus::Unknown)
+                .map(|(path, _)| path.clone())
+            {
+                let mut process = Command::new("nix")
+                    .arg("--experimental-features")
+                    .arg("nix-command")
+                    .arg("log")
+                    .arg(path.clone())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()?;
+                log_check_tasks.spawn(async move { (path, process.wait().await) });
+            }
+            while let Some(res) = log_check_tasks.join_next().await {
+                let (path, status) = res.unwrap();
+                if let Some(drv) = drvs.get_mut(&path) {
+                    drv.status = if status?.success() {
+                        DerivationStatus::Failure
+                    } else {
+                        DerivationStatus::Wait
+                    };
                 }
             }
         }
