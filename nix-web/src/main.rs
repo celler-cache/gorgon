@@ -406,12 +406,15 @@ async fn get_derivation_info(
 
         // Finally, disambiguate failed builds (no outputs, has log) from not yet built.
         {
+            let span = debug_span!("logs");
+            let _enter = span.enter();
             let mut log_check_tasks = JoinSet::new();
             for path in drvs
                 .iter()
                 .filter(|(_, drv)| drv.status == DerivationStatus::Unknown)
                 .map(|(path, _)| path.clone())
             {
+                debug!(path, "missing output, checking for build logs...");
                 let mut process = Command::new("nix")
                     .arg("--experimental-features")
                     .arg("nix-command")
@@ -423,12 +426,20 @@ async fn get_derivation_info(
                     .spawn()?;
                 log_check_tasks.spawn(async move { (path, process.wait().await) });
             }
+            if !log_check_tasks.is_empty() {
+                debug!(
+                    count = log_check_tasks.len(),
+                    "waiting for `nix log` tasks..."
+                );
+            }
             while let Some(res) = log_check_tasks.join_next().await {
                 let (path, status) = res.unwrap();
                 if let Some(drv) = drvs.get_mut(&path) {
                     drv.status = if status?.success() {
+                        debug!(path, "build has logs, but no outputs -- marking as failed");
                         DerivationStatus::Failure
                     } else {
+                        debug!(path, "build has no logs or outputs -- marking as waiting");
                         DerivationStatus::Wait
                     };
                 }
