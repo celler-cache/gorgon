@@ -11,15 +11,9 @@
 .derivation.unknown {
     list-style-type: '? ';
 }
-.derivation.wait {
+.derivation.miss {
     list-style-type: circle;
 }
 .derivation.succ {
     list-style-type: disc;
-}
-.derivation.fail {
-    list-style-type: disc;
-}
-.derivation.fail::marker {
-    color: #f00;
 }

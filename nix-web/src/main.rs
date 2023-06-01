@@ -158,12 +158,10 @@ impl PathInfo {
 pub enum DerivationStatus {
     #[serde(rename = "unknown")]
     Unknown,
-    #[serde(rename = "wait")]
-    Wait,
+    #[serde(rename = "miss")]
+    Missing,
     #[serde(rename = "succ")]
     Success,
-    #[serde(rename = "fail")]
-    Failure,
 }
 
 impl Default for DerivationStatus {
@@ -176,9 +174,8 @@ impl std::fmt::Display for DerivationStatus {
     fn fmt<'w>(&self, w: &mut std::fmt::Formatter<'w>) -> std::fmt::Result {
         match self {
             Self::Unknown => write!(w, "unknown"),
-            Self::Wait => write!(w, "wait"),
+            Self::Missing => write!(w, "miss"),
             Self::Success => write!(w, "succ"),
-            Self::Failure => write!(w, "fail"),
         }
     }
 }
@@ -359,7 +356,7 @@ async fn get_derivation_info(
                 //
                 // The only way to find out is a second round of `nix path-info`.
                 need_pathinfo_check.insert(&path);
-                DerivationStatus::Unknown
+                DerivationStatus::Missing
             };
         }
 
@@ -400,48 +397,6 @@ async fn get_derivation_info(
                             drv.status = DerivationStatus::Success
                         }
                     }
-                }
-            }
-        }
-
-        // Finally, disambiguate failed builds (no outputs, has log) from not yet built.
-        {
-            let span = debug_span!("logs");
-            let _enter = span.enter();
-            let mut log_check_tasks = JoinSet::new();
-            for path in drvs
-                .iter()
-                .filter(|(_, drv)| drv.status == DerivationStatus::Unknown)
-                .map(|(path, _)| path.clone())
-            {
-                debug!(path, "missing output, checking for build logs...");
-                let mut process = Command::new("nix")
-                    .arg("--experimental-features")
-                    .arg("nix-command")
-                    .arg("log")
-                    .arg(path.clone())
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()?;
-                log_check_tasks.spawn(async move { (path, process.wait().await) });
-            }
-            if !log_check_tasks.is_empty() {
-                debug!(
-                    count = log_check_tasks.len(),
-                    "waiting for `nix log` tasks..."
-                );
-            }
-            while let Some(res) = log_check_tasks.join_next().await {
-                let (path, status) = res.unwrap();
-                if let Some(drv) = drvs.get_mut(&path) {
-                    drv.status = if status?.success() {
-                        debug!(path, "build has logs, but no outputs -- marking as failed");
-                        DerivationStatus::Failure
-                    } else {
-                        debug!(path, "build has no logs or outputs -- marking as waiting");
-                        DerivationStatus::Wait
-                    };
                 }
             }
         }
