@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::{process::Command, task::JoinSet};
+use tokio::process::Command;
 use tracing::{debug, debug_span, info, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
