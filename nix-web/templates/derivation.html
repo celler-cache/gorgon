@@ -9,8 +9,8 @@ SPDX-License-Identifier: EUPL-1.2
 {% block goto %}{{ roots.first().unwrap() }}{% endblock %}
 {% block content %}
 <ul>
-  {% for root_tmpl in root_tmpls %}
-  {{ root_tmpl|safe }}
+  {% for tmpl in root_tmpls %}
+  {{ tmpl|safe }}
   {% endfor %}
 </ul>
 {% endblock %}

@@ -8,12 +8,12 @@
     text-decoration: none;
 }
 
-.derivation.unknown {
+li.unknown {
     list-style-type: '? ';
 }
-.derivation.miss {
+li.miss {
     list-style-type: circle;
 }
-.derivation.succ {
+li.succ {
     list-style-type: disc;
 }

@@ -4,17 +4,31 @@ SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 SPDX-License-Identifier: EUPL-1.2
 #}
 
-<li class="derivation {% if ref_tmpls.len() > 0 %}branch{% else %}leaf{% endif %} {{ drv.status }}">
+<li class="derivation {{ drv.status }}">
   <a href="{{ drv.path }}">{{ drv.path }}</a>
   {% if is_seen_before %} […]{% endif %}
   <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
 
-  {% if ref_tmpls.len() > 0 %}
+  {% if outputs.len() > 0 %}
+  <details>
+    <summary>Outputs</summary>
+    <ul class="outputs">
+      {% for (name, path, pi) in outputs %}
+      <li class="{% if pi.is_some() %}succ{% else %}miss{% endif %}">
+        <span class="badge rounded-pill bg-secondary">{{ name }}</span>
+        <a href="{{ path }}">{{ path }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {% if input_tmpls.len() > 0 %}
   <details>
     <summary>Inputs</summary>
-    <ul>
-      {% for ref_tmpl in ref_tmpls %}
-      {{ ref_tmpl|safe }}
+    <ul class="inputs">
+      {% for tmpl in input_tmpls %}
+      {{ tmpl|safe }}
       {% endfor %}
     </ul>
   </details>

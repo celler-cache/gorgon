@@ -207,7 +207,7 @@ pub struct DerivationOutput {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
-    roots: &'a Vec<String>,
+    roots: &'a Vec<&'a String>,
     root_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
@@ -215,7 +215,8 @@ struct DerivationTemplate<'a> {
 #[template(path = "_derivation_item.html")]
 struct DerivationItemTemplate<'a> {
     drv: &'a Derivation,
-    ref_tmpls: Vec<DerivationItemTemplate<'a>>,
+    outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
+    input_tmpls: Vec<DerivationItemTemplate<'a>>,
     is_seen_before: bool,
 }
 
@@ -223,6 +224,7 @@ impl<'a> DerivationItemTemplate<'a> {
     // Recursively builds a batch of DerivationItemTemplates, shallow-first.
     fn build_batch<P: Iterator<Item = &'a String>>(
         drvs: &'a HashMap<String, Derivation>,
+        out_pis: &'a HashMap<String, PathInfo>,
         paths: P,
         mut seen: HashSet<&'a str>,
     ) -> (Vec<Self>, HashSet<&'a str>) {
@@ -235,17 +237,24 @@ impl<'a> DerivationItemTemplate<'a> {
             if !is_seen_before {
                 seen.insert(path);
             }
+            let mut outputs = drv
+                .outputs
+                .iter()
+                .map(|(name, out)| (name, &out.path, out_pis.get(&out.path)))
+                .collect::<Vec<_>>();
+            outputs.sort_unstable_by_key(|v| v.0);
             batch.push(Self {
                 drv,
+                outputs,
+                input_tmpls: Vec::with_capacity(drv.input_drvs.len()),
                 is_seen_before,
-                ref_tmpls: Vec::with_capacity(drv.input_drvs.len()),
             });
         }
 
         // Fill in references for derivations we haven't seen before.
         for tmpl in batch.iter_mut().filter(|t| !t.is_seen_before) {
-            let (tmpls, seen_) = Self::build_batch(drvs, tmpl.drv.input_drvs.keys(), seen);
-            tmpl.ref_tmpls = tmpls;
+            let (tmpls, seen_) = Self::build_batch(drvs, out_pis, tmpl.drv.input_drvs.keys(), seen);
+            tmpl.input_tmpls = tmpls;
             seen = seen_;
         }
         (batch, seen)
@@ -314,7 +323,7 @@ async fn get_derivation_info(
         ));
     }
 
-    let out_pis: HashMap<String, PathInfo> = if out_pi_cmd.status.success() {
+    let mut out_pis: HashMap<String, PathInfo> = if out_pi_cmd.status.success() {
         serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)?
             .iter()
             .filter(|pi| pi.valid)
@@ -384,7 +393,7 @@ async fn get_derivation_info(
                 );
             } else {
                 for pi in serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd2.stdout)?
-                    .iter()
+                    .drain(..)
                     .filter(|pi| pi.valid)
                 {
                     if let Some(drv) = drvs.get_mut(&pi.path) {
@@ -397,6 +406,7 @@ async fn get_derivation_info(
                             drv.status = DerivationStatus::Success
                         }
                     }
+                    out_pis.insert(pi.path.clone(), pi);
                 }
             }
         }
@@ -408,20 +418,26 @@ async fn get_derivation_info(
     Ok(Html(
         DerivationTemplate {
             roots: &roots,
-            root_tmpls: DerivationItemTemplate::build_batch(&drvs, roots.iter(), HashSet::new()).0,
+            root_tmpls: DerivationItemTemplate::build_batch(
+                &drvs,
+                &out_pis,
+                roots.iter().cloned(),
+                HashSet::new(),
+            )
+            .0,
         }
         .render()?,
     ))
 }
 
-fn find_tree_roots<'a>(nodes: &'a HashMap<String, Derivation>) -> Vec<String> {
-    let mut root_set = HashSet::<&'a str>::from_iter(nodes.keys().map(String::as_str));
+fn find_tree_roots<'a>(nodes: &'a HashMap<String, Derivation>) -> Vec<&'a String> {
+    let mut root_set = HashSet::<&'a String>::from_iter(nodes.keys());
     for (_, n) in nodes {
         for r in n.input_drvs.keys() {
-            root_set.remove(r.as_str());
+            root_set.remove(r);
         }
     }
-    root_set.iter().map(|&path| path.to_string()).collect()
+    root_set.drain().collect()
 }
 
 async fn get_derivation_log(
