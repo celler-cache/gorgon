@@ -5,12 +5,30 @@ SPDX-License-Identifier: EUPL-1.2
 #}
 
 {% extends "_base.html" %}
-{% block title %}{{ roots.first().unwrap() }} | nix-web{% endblock %}
-{% block goto %}{{ roots.first().unwrap() }}{% endblock %}
+{% block title %}{{ root.path }} | nix-web{% endblock %}
+{% block goto %}{{ root.path }}{% endblock %}
 {% block content %}
-<ul>
-  {% for tmpl in root_tmpls %}
-  {{ tmpl|safe }}
-  {% endfor %}
-</ul>
+<div class="derivation {{ root.status }} card border-{% if root.status == DerivationStatus::Success %}success{% else %}danger{% endif %}" style="margin-bottom: 10px;">
+  <div class="card-header">
+    <div class="float-start"><code>{{ root.path }}</code></div>
+    <ul class="nav nav-tabs card-header-tabs justify-content-end">
+      <li class="nav-item">
+        <a class="nav-link active" aria-current="page">Derivation</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="{{ root.path }}?p=log">Log</a>
+      </li>
+    </ul>
+  </div>
+  <ul class="list-group list-group-flush">
+    <ul class="list-group-item">
+      <pre>{{ root|json }}</pre>
+    </ul>
+    <ul class="list-group-item">
+      <h5>Inputs</h5>
+      {% for tmpl in root_input_tmpls %}
+      {{ tmpl|safe }}
+      {% endfor %}
+    </ul>
+</div>
 {% endblock %}

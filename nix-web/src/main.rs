@@ -182,9 +182,9 @@ impl std::fmt::Display for DerivationStatus {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Derivation {
-    #[serde(default)]
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub path: String, // Filled in from the map key.
-    #[serde(default)]
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub status: DerivationStatus,
 
     // From `nix show-derivation`.
@@ -207,8 +207,8 @@ pub struct DerivationOutput {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
-    roots: &'a Vec<&'a String>,
-    root_tmpls: Vec<DerivationItemTemplate<'a>>,
+    root: &'a Derivation,
+    root_input_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
 #[derive(Template)]
@@ -414,14 +414,14 @@ async fn get_derivation_info(
         drvs
     };
 
-    let roots = find_tree_roots(&drvs);
+    let root = &drvs[find_tree_root(&drvs)];
     Ok(Html(
         DerivationTemplate {
-            roots: &roots,
-            root_tmpls: DerivationItemTemplate::build_batch(
+            root,
+            root_input_tmpls: DerivationItemTemplate::build_batch(
                 &drvs,
                 &out_pis,
-                roots.iter().cloned(),
+                root.input_drvs.keys(),
                 HashSet::new(),
             )
             .0,
@@ -430,14 +430,14 @@ async fn get_derivation_info(
     ))
 }
 
-fn find_tree_roots<'a>(nodes: &'a HashMap<String, Derivation>) -> Vec<&'a String> {
+fn find_tree_root<'a>(nodes: &'a HashMap<String, Derivation>) -> &'a String {
     let mut root_set = HashSet::<&'a String>::from_iter(nodes.keys());
     for (_, n) in nodes {
         for r in n.input_drvs.keys() {
             root_set.remove(r);
         }
     }
-    root_set.drain().collect()
+    root_set.iter().next().unwrap()
 }
 
 async fn get_derivation_log(

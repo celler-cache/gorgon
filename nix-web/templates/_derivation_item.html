@@ -4,7 +4,7 @@ SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 SPDX-License-Identifier: EUPL-1.2
 #}
 
-<li class="derivation {{ drv.status }}">
+<li class="derivation-item {{ drv.status }}">
   <a href="{{ drv.path }}">{{ drv.path }}</a>
   {% if is_seen_before %} […]{% endif %}
   <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
