@@ -8,11 +8,11 @@ SPDX-License-Identifier: EUPL-1.2
 {% block title %}{{ root.path }} | nix-web{% endblock %}
 {% block goto %}{{ root.path }}{% endblock %}
 {% block content %}
-<div class="derivation {{ root.status }} card border-{% if root.status == DerivationStatus::Success %}success{% else %}danger{% endif %}" style="margin-bottom: 10px;">
+<div class="derivation {{ root.status }} card border-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 10px;">
   <div class="card-header d-flex">
-    <h5 class="flex-grow-1 text-{% if root.status == DerivationStatus::Success %}success{% else %}danger{% endif %}" style="margin-bottom: 0;">
+    <h5 class="flex-grow-1 text-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 0;">
       <!-- TODO: I don't know how to make these symbols screen reader accessible -->
-      <span>{% if root.status == DerivationStatus::Success %}⊕{% else %}⊗{% endif %}</span>
+      <span>{% if root.status.is_succ() %}⊕{% else %}⊗{% endif %}</span>
       <code style="color: inherit;">{{ root.path }}</code>
     </h5>
     <ul class="nav nav-tabs card-header-tabs justify-content-end">

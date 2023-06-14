@@ -164,6 +164,12 @@ pub enum DerivationStatus {
     Success,
 }
 
+impl DerivationStatus {
+    pub fn is_succ(&self) -> bool {
+        self == &Self::Success
+    }
+}
+
 impl Default for DerivationStatus {
     fn default() -> Self {
         Self::Unknown
