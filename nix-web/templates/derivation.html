@@ -24,15 +24,87 @@ SPDX-License-Identifier: EUPL-1.2
       </li>
     </ul>
   </div>
-  <ul class="list-group list-group-flush">
-    <ul class="list-group-item">
-      <pre>{{ root|json }}</pre>
-    </ul>
-    <ul class="list-group-item">
-      <h5>Inputs</h5>
-      {% for tmpl in root_input_tmpls %}
-      {{ tmpl|safe }}
-      {% endfor %}
-    </ul>
+  <table class="table table-responsive">
+    <tr>
+      <th scope="row">System</th>
+      <td>{{ root.system }}</td>
+    </tr>
+    <tr>
+      <th scope="row">Builder</th>
+      <td><a href="{{ root.builder }}">{{ root.builder }}</a></td>
+    </tr>
+    <tr>
+      <th scope="row">Args</th>
+      <td>
+        <ul class="list-group list-group-flush">
+          {% for arg in root.args %}
+          <li class="list-group-item">
+            {% if arg.starts_with("/nix/store/") %}<a href="{{ arg }}">{{ arg }}</a>{% else %}{{ arg }}{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Environment</th>
+      <td>
+        <table class="table table-responsive">
+          {% for (key, value) in root.env %}
+          <tr>
+            <th scope="row">{{ key }}</th>
+            <td>
+              {% if value.contains("\n") %}
+                <pre style="white-space: pre-wrap;">{{ value }}</pre>
+              {% else %}
+                {{ value }}
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Sources</th>
+      <td>
+        <ul class="list-group list-group-flush">
+          {% for src in root.input_srcs %}
+          <li class="list-group-item">
+            <a href="{{ src }}">{{ src }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Inputs</th>
+      <td>
+        <ul class="list-group list-group-flush">
+          {% for tmpl in root_input_tmpls %}
+          {{ tmpl|safe }}
+          {% endfor %}
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Outputs</th>
+      <td>
+        <table class="table table-responsive">
+          <thead>
+            <th scope="col">Name</th>
+            <th scope="col">Path</th>
+          </thead>
+          <tbody>
+            {% for (name, out) in root.outputs  %}
+            <tr>
+              <td>{{ name }}</td>
+              <td>{{ out.path }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  </table>
 </div>
 {% endblock %}
