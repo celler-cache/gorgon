@@ -32,20 +32,14 @@ SPDX-License-Identifier: EUPL-1.2
     <tr>
       <th scope="row">Outputs</th>
       <td>
-        <table class="table table-responsive">
-          <thead>
-            <th scope="col">Name</th>
-            <th scope="col">Path</th>
-          </thead>
-          <tbody>
-            {% for (name, out) in root.outputs  %}
-            <tr>
-              <td>{{ name }}</td>
-              <td>{{ out.path }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+        <ul class="list-group list-group-flush">
+          {% for (name, path, pi) in root_outputs %}
+          <li class="list-group-item {% if pi.is_some() %}list-group-item-success{% endif %}">
+            <span class="badge rounded-pill bg-secondary">{{ name }}</span>
+            <a href="{{ path }}">{{ path }}</a>
+          </li>
+          {% endfor %}
+        </ul>
       </td>
     </tr>
     <tr>

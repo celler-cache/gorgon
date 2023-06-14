@@ -214,6 +214,7 @@ pub struct DerivationOutput {
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
     root: &'a Derivation,
+    root_outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
     root_input_tmpls: Vec<DerivationItemTemplate<'a>>,
 }
 
@@ -243,15 +244,9 @@ impl<'a> DerivationItemTemplate<'a> {
             if !is_seen_before {
                 seen.insert(path);
             }
-            let mut outputs = drv
-                .outputs
-                .iter()
-                .map(|(name, out)| (name, &out.path, out_pis.get(&out.path)))
-                .collect::<Vec<_>>();
-            outputs.sort_unstable_by_key(|v| v.0);
             batch.push(Self {
                 drv,
-                outputs,
+                outputs: find_outputs(out_pis, drv),
                 input_tmpls: Vec::with_capacity(drv.input_drvs.len()),
                 is_seen_before,
             });
@@ -424,6 +419,7 @@ async fn get_derivation_info(
     Ok(Html(
         DerivationTemplate {
             root,
+            root_outputs: find_outputs(&out_pis, root),
             root_input_tmpls: DerivationItemTemplate::build_batch(
                 &drvs,
                 &out_pis,
@@ -434,6 +430,19 @@ async fn get_derivation_info(
         }
         .render()?,
     ))
+}
+
+fn find_outputs<'a>(
+    out_pis: &'a HashMap<String, PathInfo>,
+    drv: &'a Derivation,
+) -> Vec<(&'a String, &'a String, Option<&'a PathInfo>)> {
+    let mut outputs = drv
+        .outputs
+        .iter()
+        .map(|(name, out)| (name, &out.path, out_pis.get(&out.path)))
+        .collect::<Vec<_>>();
+    outputs.sort_unstable_by_key(|v| v.0);
+    outputs
 }
 
 fn find_tree_root<'a>(nodes: &'a HashMap<String, Derivation>) -> &'a String {
