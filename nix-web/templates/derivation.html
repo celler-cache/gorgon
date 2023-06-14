@@ -30,6 +30,47 @@ SPDX-License-Identifier: EUPL-1.2
       <td>{{ root.system }}</td>
     </tr>
     <tr>
+      <th scope="row">Outputs</th>
+      <td>
+        <table class="table table-responsive">
+          <thead>
+            <th scope="col">Name</th>
+            <th scope="col">Path</th>
+          </thead>
+          <tbody>
+            {% for (name, out) in root.outputs  %}
+            <tr>
+              <td>{{ name }}</td>
+              <td>{{ out.path }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Sources</th>
+      <td>
+        <ul class="list-group list-group-flush">
+          {% for src in root.input_srcs %}
+          <li class="list-group-item">
+            <a href="{{ src }}">{{ src }}</a>
+          </li>
+          {% endfor %}
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th scope="row">Inputs</th>
+      <td>
+        <ul class="list-group list-group-flush">
+          {% for tmpl in root_input_tmpls %}
+          {{ tmpl|safe }}
+          {% endfor %}
+        </ul>
+      </td>
+    </tr>
+    <tr>
       <th scope="row">Builder</th>
       <td><a href="{{ root.builder }}">{{ root.builder }}</a></td>
     </tr>
@@ -61,47 +102,6 @@ SPDX-License-Identifier: EUPL-1.2
             </td>
           </tr>
           {% endfor %}
-        </table>
-      </td>
-    </tr>
-    <tr>
-      <th scope="row">Sources</th>
-      <td>
-        <ul class="list-group list-group-flush">
-          {% for src in root.input_srcs %}
-          <li class="list-group-item">
-            <a href="{{ src }}">{{ src }}</a>
-          </li>
-          {% endfor %}
-        </ul>
-      </td>
-    </tr>
-    <tr>
-      <th scope="row">Inputs</th>
-      <td>
-        <ul class="list-group list-group-flush">
-          {% for tmpl in root_input_tmpls %}
-          {{ tmpl|safe }}
-          {% endfor %}
-        </ul>
-      </td>
-    </tr>
-    <tr>
-      <th scope="row">Outputs</th>
-      <td>
-        <table class="table table-responsive">
-          <thead>
-            <th scope="col">Name</th>
-            <th scope="col">Path</th>
-          </thead>
-          <tbody>
-            {% for (name, out) in root.outputs  %}
-            <tr>
-              <td>{{ name }}</td>
-              <td>{{ out.path }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
         </table>
       </td>
     </tr>
