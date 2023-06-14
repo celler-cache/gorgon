@@ -9,12 +9,16 @@ SPDX-License-Identifier: EUPL-1.2
 {% block goto %}{{ root.path }}{% endblock %}
 {% block content %}
 <div class="derivation {{ root.status }} card border-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 10px;">
-  <div class="card-header d-flex">
+  <div class="card-header d-flex align-items-center">
     <h5 class="flex-grow-1 text-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 0;">
       <!-- TODO: I don't know how to make these symbols screen reader accessible -->
       <span>{% if root.status.is_succ() %}⊕{% else %}⊗{% endif %}</span>
       <code style="color: inherit;">{{ root.path }}</code>
     </h5>
+    <div>
+      <small class="badge rounded-pill bg-secondary">{{ root.system }}</small>
+      &nbsp;&nbsp;&nbsp; <!-- alignment hack -->
+    </div>
     <ul class="nav nav-tabs card-header-tabs justify-content-end">
       <li class="nav-item">
         <a class="nav-link active" aria-current="page">Derivation</a>
@@ -25,10 +29,6 @@ SPDX-License-Identifier: EUPL-1.2
     </ul>
   </div>
   <table class="table table-responsive">
-    <tr>
-      <th scope="row">System</th>
-      <td>{{ root.system }}</td>
-    </tr>
     <tr>
       <th scope="row">Outputs</th>
       <td>
