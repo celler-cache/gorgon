@@ -92,7 +92,10 @@ async fn main() -> Result<()> {
         .route("/", get(get_index))
         .route("/style.css", get(get_style_css))
         .route("/goto", get(get_goto))
-        .route("/nix/store/*path", get(get_derivation))
+        .route(
+            &args.nix_store_path.join("*path").to_string_lossy(),
+            get(get_derivation),
+        )
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
