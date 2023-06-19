@@ -5,9 +5,16 @@ SPDX-License-Identifier: EUPL-1.2
 #}
 
 <li class="list-group-item {% if !drv.status.is_succ() %}list-group-item-danger{% endif %}">
-  <a href="{{ drv.path }}">{{ drv.path }}</a>
-  {% if is_seen_before %} […]{% endif %}
-  <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
+  <span>
+    {% if drv.status.is_succ() %}
+      <span aria-label="Present">☑</span>
+    {% else %}
+      <span aria-label="Absent">☐</span>
+    {% endif %}
+    <a href="{{ drv.path }}">{{ drv.path }}</a>
+    {% if is_seen_before %} […]{% endif %}
+    <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
+  </span>
 
   {% if outputs.len() > 0 %}
   <details>
@@ -15,6 +22,13 @@ SPDX-License-Identifier: EUPL-1.2
     <table class="table table-responsive">
       {% for (name, path, pi) in outputs %}
       <tr class="{% if pi.is_some() %}table-success{% endif %}">
+        <td style="text-align: right; width: 0;">
+          {% if pi.is_some() %}
+            <span aria-label="Present">☑</span>
+          {% else %}
+            <span aria-label="Absent">☐</span>
+          {% endif %}
+        </td>
         <td style="text-align: right; width: 0;">
           <span class="badge rounded-pill bg-secondary">{{ name }}</span>
         </td>

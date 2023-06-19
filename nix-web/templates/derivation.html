@@ -12,7 +12,11 @@ SPDX-License-Identifier: EUPL-1.2
   <div class="card-header d-flex align-items-center">
     <h5 class="flex-grow-1 text-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 0;">
       <!-- TODO: I don't know how to make these symbols screen reader accessible -->
-      <span>{% if root.status.is_succ() %}⊕{% else %}⊗{% endif %}</span>
+      {% if root.status.is_succ() %}
+        <span aria-label="Present">☑</span>
+      {% else %}
+        <span aria-label="Absent">☐</span>
+      {% endif %}
       <code style="color: inherit;">{{ root.path }}</code>
     </h5>
     <div>
@@ -35,6 +39,13 @@ SPDX-License-Identifier: EUPL-1.2
         <table class="table table-responsive">
           {% for (name, path, pi) in root_outputs %}
           <tr class="{% if pi.is_some() %}table-success{% endif %}">
+            <td style="text-align: right; width: 0;">
+              {% if pi.is_some() %}
+                <span aria-label="Present">☑</span>
+              {% else %}
+                <span aria-label="Absent">☐</span>
+              {% endif %}
+            </td>
             <td style="text-align: right; width: 0;">
               <span class="badge rounded-pill bg-secondary">{{ name }}</span>
             </td>
