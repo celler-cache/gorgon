@@ -13,7 +13,7 @@ use clap::Parser;
 use hyper::header;
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, Row};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -146,7 +146,7 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     if !pi_cmd.status.success() {
         return Err(Error::NixCommandExitCode(pi_cmd.status.code().unwrap_or(0)));
     }
-    let mut all_pis: HashMap<String, PathInfo> =
+    let mut all_pis: BTreeMap<String, PathInfo> =
         serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd.stdout)?
             .iter()
             .filter(|pi| pi.valid)
@@ -244,12 +244,12 @@ pub struct Derivation {
     // From `nix show-derivation`.
     pub args: Vec<String>,
     pub builder: String,
-    pub env: HashMap<String, String>,
+    pub env: BTreeMap<String, String>,
     #[serde(rename = "inputDrvs")]
-    pub input_drvs: HashMap<String, Vec<String>>,
+    pub input_drvs: BTreeMap<String, Vec<String>>,
     #[serde(rename = "inputSrcs")]
     pub input_srcs: Vec<String>,
-    pub outputs: HashMap<String, DerivationOutput>,
+    pub outputs: BTreeMap<String, DerivationOutput>,
     pub system: String,
 }
 
@@ -278,8 +278,8 @@ struct DerivationItemTemplate<'a> {
 impl<'a> DerivationItemTemplate<'a> {
     // Recursively builds a batch of DerivationItemTemplates, shallow-first.
     fn build_batch<P: Iterator<Item = &'a String>>(
-        drvs: &'a HashMap<String, Derivation>,
-        out_pis: &'a HashMap<String, PathInfo>,
+        drvs: &'a BTreeMap<String, Derivation>,
+        out_pis: &'a BTreeMap<String, PathInfo>,
         paths: P,
         mut seen: HashSet<&'a str>,
     ) -> (Vec<Self>, HashSet<&'a str>) {
@@ -372,22 +372,22 @@ async fn get_derivation_info(
         ));
     }
 
-    let mut out_pis: HashMap<String, PathInfo> = if out_pi_cmd.status.success() {
+    let mut out_pis: BTreeMap<String, PathInfo> = if out_pi_cmd.status.success() {
         serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)?
             .iter()
             .filter(|pi| pi.valid)
             .map(|pi| (pi.path.clone(), pi.clone()))
             .collect()
     } else {
-        HashMap::new()
+        BTreeMap::new()
     };
 
     // Aggregate it all into Derivations.
-    let drvs: HashMap<String, Derivation> = {
+    let drvs: BTreeMap<String, Derivation> = {
         let span = debug_span!("drvs");
         let _enter = span.enter();
 
-        let mut drvs: HashMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
+        let mut drvs: BTreeMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
         let mut need_pathinfo_check = HashSet::<&String>::new();
         for (path, drv) in drvs.iter_mut() {
             let span = debug_span!("drv", path);
@@ -481,7 +481,7 @@ async fn get_derivation_info(
 }
 
 fn find_outputs<'a>(
-    out_pis: &'a HashMap<String, PathInfo>,
+    out_pis: &'a BTreeMap<String, PathInfo>,
     drv: &'a Derivation,
 ) -> Vec<(&'a String, &'a String, Option<&'a PathInfo>)> {
     let mut outputs = drv
@@ -493,7 +493,7 @@ fn find_outputs<'a>(
     outputs
 }
 
-fn find_tree_root<'a>(nodes: &'a HashMap<String, Derivation>) -> &'a String {
+fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
     let mut root_set = HashSet::<&'a String>::from_iter(nodes.keys());
     for (_, n) in nodes {
         for r in n.input_drvs.keys() {
