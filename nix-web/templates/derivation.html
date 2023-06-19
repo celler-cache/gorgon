@@ -97,16 +97,10 @@ SPDX-License-Identifier: EUPL-1.2
       <th scope="row">Environment</th>
       <td>
         <table class="table table-responsive">
-          {% for (key, value) in root.env %}
+          {% for (key, value) in root_env_html %}
           <tr>
             <th scope="row">{{ key }}</th>
-            <td>
-              {% if value.contains("\n") %}
-                <pre style="white-space: pre-wrap;">{{ value }}</pre>
-              {% else %}
-                {{ value }}
-              {% endif %}
-            </td>
+            <td>{{ value|safe }}</td>
           </tr>
           {% endfor %}
         </table>

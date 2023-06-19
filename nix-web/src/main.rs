@@ -21,6 +21,9 @@ use tracing::{debug, debug_span, info, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+// TODO: Is there a way to make this a Path or PathBuf?
+const NIX_STORE_PATH: &str = "/nix/store";
+
 /// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -95,10 +98,7 @@ async fn main() -> Result<()> {
         .route("/", get(get_index))
         .route("/style.css", get(get_style_css))
         .route("/goto", get(get_goto))
-        .route(
-            &args.nix_store_path.join("*path").to_string_lossy(),
-            get(get_derivation),
-        )
+        .route("/nix/store/*path", get(get_derivation))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
@@ -264,6 +264,7 @@ struct DerivationTemplate<'a> {
     root: &'a Derivation,
     root_outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
     root_input_tmpls: Vec<DerivationItemTemplate<'a>>,
+    root_env_html: Vec<(&'a String, String)>,
 }
 
 #[derive(Template)]
@@ -325,27 +326,19 @@ pub struct GetDerivationQuery {
 }
 
 async fn get_derivation(
-    State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
     Query(query): Query<GetDerivationQuery>,
 ) -> Result<Response> {
     match query.page.unwrap_or(GetDerivationPage::Info) {
-        GetDerivationPage::Info => Ok(get_derivation_info(State(state), Path(store_path))
-            .await?
-            .into_response()),
-        GetDerivationPage::Log => Ok(get_derivation_log(State(state), Path(store_path))
-            .await?
-            .into_response()),
+        GetDerivationPage::Info => Ok(get_derivation_info(Path(store_path)).await?.into_response()),
+        GetDerivationPage::Log => Ok(get_derivation_log(Path(store_path)).await?.into_response()),
     }
 }
 
-async fn get_derivation_info(
-    State(state): State<Arc<AppState>>,
-    Path(store_path): Path<String>,
-) -> Result<Html<String>> {
+async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<String>> {
     // Collect info from nix.
     let (drv_cmd, out_pi_cmd) = {
-        let path = state.args.nix_store_path.join(&store_path);
+        let path = PathBuf::from(NIX_STORE_PATH).join(&store_path);
         let drv_cmd = Command::new("nix")
             .arg("--experimental-features")
             .arg("nix-command")
@@ -475,9 +468,42 @@ async fn get_derivation_info(
                 HashSet::new(),
             )
             .0,
+            root_env_html: root
+                .env
+                .iter()
+                .map(|(key, value)| (key, env_value_to_html(&value)))
+                .collect(),
         }
         .render()?,
     ))
+}
+
+fn env_value_to_html(unescaped_value: &String) -> String {
+    // HTML escape the value.
+    let mut escaped = {
+        use askama_escape::Escaper;
+        let mut s = String::new();
+        (askama_escape::Html {})
+            .write_escaped(&mut s, &unescaped_value)
+            .unwrap();
+        s
+    };
+
+    // Link nix store paths.
+    lazy_static::lazy_static! {
+        static ref LINK_RE: regex::Regex = regex::Regex::new(
+            r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[0-9a-zA-Z+._?=-]+").unwrap();
+    };
+    escaped = LINK_RE
+        .replace_all(&escaped, "<a href=\"$0\">$0</a>")
+        .into();
+
+    // Wrap multi-line values in <pre> tags.
+    if escaped.contains("\n") {
+        format!("<pre style=\"white-space: pre-wrap;\">{}</pre>", escaped)
+    } else {
+        escaped
+    }
 }
 
 fn find_outputs<'a>(
@@ -503,19 +529,58 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
     root_set.iter().next().unwrap()
 }
 
-async fn get_derivation_log(
-    State(state): State<Arc<AppState>>,
-    Path(store_path): Path<String>,
-) -> Result<String> {
+async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
     let output = Command::new("nix")
         .arg("--experimental-features")
         .arg("nix-command")
         .arg("log")
-        .arg(state.args.nix_store_path.join(store_path))
+        .arg(PathBuf::from(NIX_STORE_PATH).join(store_path))
         .output()
         .await?;
     if !output.status.success() {
         return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_env_value_to_html_nop() {
+        assert_eq!(env_value_to_html(&"hello world".into()), "hello world");
+    }
+
+    #[test]
+    fn test_env_value_to_html_sneaky() {
+        assert_eq!(
+            env_value_to_html(&"<blink>hello world</blink>".into()),
+            "&lt;blink&gt;hello world&lt;/blink&gt;"
+        );
+    }
+
+    #[test]
+    fn test_env_value_to_html_multiline() {
+        assert_eq!(
+            env_value_to_html(&"hello\nworld".into()),
+            "<pre style=\"white-space: pre-wrap;\">hello\nworld</pre>"
+        );
+    }
+
+    #[test]
+    fn test_env_value_to_html_store_path() {
+        assert_eq!(
+            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin".into()),
+            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>"
+        );
+    }
+
+    #[test]
+    fn test_env_value_to_html_store_path_subpath() {
+        assert_eq!(
+            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin/bin/sqlite3".into()),
+            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>/bin/sqlite3"
+        );
+    }
 }
