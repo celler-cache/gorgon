@@ -12,6 +12,7 @@ use axum::{
 use clap::Parser;
 use hyper::header;
 use serde::{Deserialize, Serialize};
+use sqlx::{Connection, Row};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +33,8 @@ pub enum Error {
     JSON(#[from] serde_json::Error),
     #[error(transparent)]
     Hyper(#[from] hyper::Error),
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     IO(#[from] std::io::Error),
 }
@@ -108,12 +111,54 @@ async fn main() -> Result<()> {
 
 #[derive(Template)]
 #[template(path = "index.html")]
-struct IndexTemplate<'a> {
-    blah: &'a str,
+struct IndexTemplate {
+    last_paths: Vec<PathInfo>,
 }
 
-async fn get_index() -> Result<IndexTemplate<'static>> {
-    Ok(IndexTemplate { blah: "im gay" })
+async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> {
+    // Find the last registered paths in the store, sorted by most-recent-first.
+    let last_path_paths: Vec<String> = {
+        // Open the database as immutable, or we start fighting the daemon over the WAL.
+        // This may cause problems if the database changes while the query is running.
+        let mut conn = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&state.args.nix_db_path)
+                .immutable(true),
+        )
+        .await?;
+        sqlx::query("SELECT path FROM ValidPaths ORDER BY registrationTime DESC LIMIT 10")
+            .map(|row: sqlx::sqlite::SqliteRow| row.get(0))
+            .fetch_all(&mut conn)
+            .await?
+    };
+
+    // Query `nix path-info` for those paths.
+    let pi_cmd = Command::new("nix")
+        .arg("--experimental-features")
+        .arg("nix-command")
+        .arg("path-info")
+        .arg("--offline")
+        .arg("--json")
+        .arg("-r")
+        .args(&last_path_paths)
+        .output()
+        .await?;
+    if !pi_cmd.status.success() {
+        return Err(Error::NixCommandExitCode(pi_cmd.status.code().unwrap_or(0)));
+    }
+    let mut all_pis: HashMap<String, PathInfo> =
+        serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd.stdout)?
+            .iter()
+            .filter(|pi| pi.valid)
+            .map(|pi| (pi.path.clone(), pi.clone()))
+            .collect();
+
+    Ok(IndexTemplate {
+        last_paths: last_path_paths
+            .iter()
+            .map(|path| all_pis.remove(path).unwrap())
+            .collect(),
+    })
 }
 
 async fn get_style_css() -> ([(HeaderName, &'static str); 1], &'static str) {
