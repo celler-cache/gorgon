@@ -4,5 +4,11 @@
 
 { pkgs ? import <nixpkgs> {} }:
 pkgs.mkShell {
-  buildInputs = with pkgs; [ stdenv ];
+  buildInputs = with pkgs; [
+    # build dependencies
+    stdenv # C/C++ compiler and deps for crates with bindings
+
+    # repo tools
+    reuse # check license compliance
+  ];
 }
