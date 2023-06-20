@@ -839,6 +839,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix-supervisor"
+version = "0.1.0"
+
+[[package]]
 name = "nix-web"
 version = "0.1.0"
 dependencies = [
