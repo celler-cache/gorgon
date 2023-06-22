@@ -343,7 +343,6 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
             .arg("--experimental-features")
             .arg("nix-command")
             .arg("show-derivation")
-            .arg("--derivation")
             .arg("-r")
             .arg(&path)
             .output();
