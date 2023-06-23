@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+pub mod nix_cli;
+
+use crate::nix_cli::{Derivation, DerivationOutput, DerivationStatus, PathInfo};
 use askama::Template;
 use axum::{
     extract::{Path, Query, State},
@@ -11,13 +14,13 @@ use axum::{
 };
 use clap::Parser;
 use hyper::header;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
-use tracing::{debug, debug_span, info, warn};
+use tracing::{debug_span, info, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -177,87 +180,6 @@ async fn get_goto(query: Query<GotoQuery>) -> Response {
     Redirect::to(&query.path).into_response()
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PathInfo {
-    pub path: String,
-    // Only present (as the only item alongside path) for invalid paths.
-    #[serde(default = "PathInfo::default_valid")]
-    pub valid: bool,
-
-    pub deriver: Option<String>,
-    pub ca: Option<String>,
-    #[serde(rename = "narHash")]
-    pub nar_hash: Option<String>,
-    #[serde(rename = "narSize")]
-    pub nar_size: Option<usize>,
-    pub references: Option<Vec<String>>,
-    #[serde(rename = "registrationTime")]
-    pub registration_time: Option<u64>, // TODO: Parse timestamp.
-    pub signatures: Option<Vec<String>>,
-}
-
-impl PathInfo {
-    fn default_valid() -> bool {
-        true
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum DerivationStatus {
-    #[serde(rename = "unknown")]
-    Unknown,
-    #[serde(rename = "miss")]
-    Missing,
-    #[serde(rename = "succ")]
-    Success,
-}
-
-impl DerivationStatus {
-    pub fn is_succ(&self) -> bool {
-        self == &Self::Success
-    }
-}
-
-impl Default for DerivationStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
-impl std::fmt::Display for DerivationStatus {
-    fn fmt<'w>(&self, w: &mut std::fmt::Formatter<'w>) -> std::fmt::Result {
-        match self {
-            Self::Unknown => write!(w, "unknown"),
-            Self::Missing => write!(w, "miss"),
-            Self::Success => write!(w, "succ"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Derivation {
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub path: String, // Filled in from the map key.
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub status: DerivationStatus,
-
-    // From `nix show-derivation`.
-    pub args: Vec<String>,
-    pub builder: String,
-    pub env: BTreeMap<String, String>,
-    #[serde(rename = "inputDrvs")]
-    pub input_drvs: BTreeMap<String, Vec<String>>,
-    #[serde(rename = "inputSrcs")]
-    pub input_srcs: Vec<String>,
-    pub outputs: BTreeMap<String, DerivationOutput>,
-    pub system: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DerivationOutput {
-    pub path: String,
-}
-
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
@@ -337,123 +259,76 @@ async fn get_derivation(
 
 async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<String>> {
     // Collect info from nix.
-    let (drv_cmd, out_pi_cmd) = {
-        let path = PathBuf::from(NIX_STORE_PATH).join(&store_path);
-        let drv_cmd = Command::new("nix")
-            .arg("--experimental-features")
-            .arg("nix-command")
-            .arg("show-derivation")
-            .arg("-r")
-            .arg(&path)
-            .output();
-        let out_pi_cmd = Command::new("nix")
-            .arg("--experimental-features")
-            .arg("nix-command")
-            .arg("path-info")
-            .arg("--offline")
-            .arg("--json")
-            .arg("-r")
-            .arg(&path)
-            .output();
-        (drv_cmd.await?, out_pi_cmd.await?)
-    };
-    // The only one that has to succeed is the `show-derivation` call.
-    if !drv_cmd.status.success() {
-        return Err(Error::NixCommandExitCode(
-            drv_cmd.status.code().unwrap_or(0),
-        ));
-    }
-
-    let mut out_pis: BTreeMap<String, PathInfo> = if out_pi_cmd.status.success() {
-        serde_json::from_slice::<Vec<PathInfo>>(&out_pi_cmd.stdout)?
-            .iter()
-            .filter(|pi| pi.valid)
-            .map(|pi| (pi.path.clone(), pi.clone()))
-            .collect()
-    } else {
-        BTreeMap::new()
+    let (mut drvs, mut out_pis) = {
+        let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
+        let path = path_buf.to_str().unwrap();
+        let drvs = nix_cli::Derivation::get(["-r", path]);
+        let out_pis = nix_cli::PathInfo::get(["-r", path]);
+        (
+            drvs.await?,
+            match out_pis.await {
+                Ok(v) => v,
+                // If this is an invalid path, still render the page.
+                Err(Error::NixCommandExitCode(_)) => BTreeMap::new(),
+                Err(e) => return Err(e),
+            },
+        )
     };
 
-    // Aggregate it all into Derivations.
-    let drvs: BTreeMap<String, Derivation> = {
-        let span = debug_span!("drvs");
+    // Correlate Derivations and PathInfos.
+    let mut need_pathinfo_check = HashSet::<&String>::new();
+    for (path, drv) in drvs.iter_mut() {
+        let span = debug_span!("drv", path);
         let _enter = span.enter();
 
-        let mut drvs: BTreeMap<String, Derivation> = serde_json::from_slice(&drv_cmd.stdout)?;
-        let mut need_pathinfo_check = HashSet::<&String>::new();
-        for (path, drv) in drvs.iter_mut() {
-            let span = debug_span!("drv", path);
-            let _enter = span.enter();
+        drv.path = path.clone();
 
-            drv.path = path.clone();
-
-            // If the initial `nix path-info` has one of our outputs, it's a success.
-            drv.status = if drv
-                .outputs
-                .iter()
-                .any(|(_, DerivationOutput { path })| out_pis.contains_key(path))
-            {
-                // There's an output; it's a success.
-                debug!(
-                    path = drv.path,
-                    "confirmed by primary `nix path-info` -- marking as success"
-                );
-                DerivationStatus::Success
-            } else {
-                // The initial `nix path-info` didn't include any outputs - this may mean
-                // that it failed, that it's still building, or just that it's a build
-                // dependency that isn't referenced by the final product.
-                //
-                // The only way to find out is a second round of `nix path-info`.
-                need_pathinfo_check.insert(&path);
-                DerivationStatus::Missing
-            };
-        }
-
-        // Run a second round of `nix path-info` checks on outputs we're unsure about.
-        if need_pathinfo_check.len() > 0 {
-            let span = debug_span!("pathinfo2");
-            let _enter = span.enter();
-            debug!(
-                count = need_pathinfo_check.len(),
-                "running secondary `nix path-info`"
+        // If the initial `nix path-info` has one of our outputs, it's a success.
+        drv.status = if drv
+            .outputs
+            .iter()
+            .any(|(_, DerivationOutput { path })| out_pis.contains_key(path))
+        {
+            // There's an output; it's a success.
+            trace!(
+                path = drv.path,
+                "confirmed by primary `nix path-info` -- marking as success"
             );
+            DerivationStatus::Success
+        } else {
+            // The initial `nix path-info` didn't include any outputs - this may mean
+            // that it failed, that it's still building, or just that it's a build
+            // dependency that isn't referenced by the final product.
+            //
+            // The only way to find out is a second round of `nix path-info`.
+            need_pathinfo_check.insert(&path);
+            DerivationStatus::Missing
+        };
+    }
 
-            let pi_cmd2 = Command::new("nix")
-                .arg("--experimental-features")
-                .arg("nix-command")
-                .arg("path-info")
-                .arg("--json")
-                .args(need_pathinfo_check)
-                .output()
-                .await?;
-            if !pi_cmd2.status.success() {
-                warn!(
-                    "second round of `nix path-info` failed with status {:?}",
-                    pi_cmd2.status.code(),
-                );
-            } else {
-                for pi in serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd2.stdout)?
-                    .drain(..)
-                    .filter(|pi| pi.valid)
-                {
-                    if let Some(drv) = drvs.get_mut(&pi.path) {
-                        debug!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
-                        drv.status = DerivationStatus::Success
-                    }
-                    if let Some(deriver) = &pi.deriver {
-                        if let Some(drv) = drvs.get_mut(deriver) {
-                            debug!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
-                            drv.status = DerivationStatus::Success
-                        }
-                    }
-                    out_pis.insert(pi.path.clone(), pi);
+    // Run a second round of `nix path-info` checks on outputs we're unsure about.
+    if need_pathinfo_check.len() > 0 {
+        let span = debug_span!("pathinfo2");
+        let _enter = span.enter();
+        trace!(
+            count = need_pathinfo_check.len(),
+            "running secondary `nix path-info`"
+        );
+
+        for (_, pi) in nix_cli::PathInfo::get(need_pathinfo_check).await? {
+            if let Some(drv) = drvs.get_mut(&pi.path) {
+                trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
+                drv.status = DerivationStatus::Success
+            }
+            if let Some(deriver) = &pi.deriver {
+                if let Some(drv) = drvs.get_mut(deriver) {
+                    trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
+                    drv.status = DerivationStatus::Success
                 }
             }
+            out_pis.insert(pi.path.clone(), pi);
         }
-
-        drvs
-    };
+    }
 
     let root = &drvs[find_tree_root(&drvs)];
     Ok(Html(
