@@ -5,6 +5,9 @@
 , lib ? pkgs.lib
 , srcOverride ? builtins.fetchGit ../.
 }:
+let
+  cargoPackageFlags = [ "-p" "nix-web" ];
+in
 pkgs.rustPlatform.buildRustPackage {
   pname = "nix-web";
   version = let
@@ -13,4 +16,7 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
+
+  cargoBuildFlags = cargoPackageFlags;
+  cargoTestFlags = cargoPackageFlags;
 }
