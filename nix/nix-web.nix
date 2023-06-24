@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 
 { pkgs ? import ./nixpkgs.default.nix
-, src ? builtins.fetchGit ../.
 , lib ? pkgs.lib
+, srcOverride ? builtins.fetchGit ../.
 }:
 pkgs.rustPlatform.buildRustPackage {
   pname = "nix-web";
@@ -11,6 +11,6 @@ pkgs.rustPlatform.buildRustPackage {
     head = lib.last (lib.splitString ": " (lib.removeSuffix "\n" (builtins.readFile ../.git/HEAD)));
   in lib.removeSuffix "\n" (builtins.readFile (../.git + "/${head}"));
 
-  inherit src;
+  src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
 }
