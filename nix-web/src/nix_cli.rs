@@ -8,6 +8,11 @@ use std::collections::BTreeMap;
 use tokio::process::Command;
 use tracing::{debug, debug_span, instrument, warn};
 
+/// Path to the nix binary.
+///
+/// Substituted verbatim in `nix/nix-web.nix`; if changing this line, change it there too.
+pub const NIX_CLI_PATH: &str = "nix";
+
 #[instrument(name = "nix", skip_all)]
 async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {
     let cmd = cmd.stdin(std::process::Stdio::null());
@@ -52,7 +57,7 @@ impl Derivation {
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice(
             &exec(
-                Command::new("nix")
+                Command::new(NIX_CLI_PATH)
                     .arg("--experimental-features")
                     .arg("nix-command")
                     .arg("show-derivation")
@@ -126,7 +131,7 @@ impl PathInfo {
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice::<Vec<PathInfo>>(
             &exec(
-                Command::new("nix")
+                Command::new(NIX_CLI_PATH)
                     .arg("--experimental-features")
                     .arg("nix-command")
                     .arg("path-info")

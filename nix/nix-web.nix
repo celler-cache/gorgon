@@ -3,6 +3,7 @@
 
 { pkgs ? import ./nixpkgs.default.nix
 , lib ? pkgs.lib
+, nix ? pkgs.nix
 , srcOverride ? builtins.fetchGit ../.
 }:
 let
@@ -16,6 +17,17 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
+
+  postPatch = ''
+    substituteInPlace nix-web/src/nix_cli.rs \
+      --replace 'pub const NIX_CLI_PATH: &str = "nix"' \
+                'pub const NIX_CLI_PATH: &str = "${nix}/bin/nix"'
+    substituteInPlace nix-web/nix-web.service \
+      --replace 'ExecStart=nix-web' "ExecStart=$out/bin/nix-web"
+  '';
+  postInstall = ''
+    install -m 644 -D nix-web/nix-web.service $out/lib/systemd/system/nix-web.service
+  '';
 
   cargoBuildFlags = cargoPackageFlags;
   cargoTestFlags = cargoPackageFlags;

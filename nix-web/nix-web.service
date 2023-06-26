@@ -1,0 +1,36 @@
+[Unit]
+Description=Nix Web UI
+After=network.target
+
+[Service]
+ExecStart=nix-web -v
+
+TemporaryFileSystem=/nix
+BindPaths=/nix/var
+BindReadOnlyPaths=/nix/store
+
+DynamicUser=true
+PrivateUsers=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectProc=ptraceable
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service ~@privileged ~@resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

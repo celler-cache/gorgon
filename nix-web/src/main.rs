@@ -136,7 +136,8 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     };
 
     // Query `nix path-info` for those paths.
-    let pi_cmd = Command::new("nix")
+    // FIXME: This should be a nix_cli call.
+    let pi_cmd = Command::new(nix_cli::NIX_CLI_PATH)
         .arg("--experimental-features")
         .arg("nix-command")
         .arg("path-info")
@@ -404,7 +405,8 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
 }
 
 async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
-    let output = Command::new("nix")
+    // FIXME: This should be a nix_cli call.
+    let output = Command::new(nix_cli::NIX_CLI_PATH)
         .arg("--experimental-features")
         .arg("nix-command")
         .arg("log")
