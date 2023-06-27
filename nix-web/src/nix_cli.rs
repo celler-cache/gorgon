@@ -8,10 +8,8 @@ use std::collections::BTreeMap;
 use tokio::process::Command;
 use tracing::{debug, debug_span, instrument, warn};
 
-/// Path to the nix binary.
-///
-/// Substituted verbatim in `nix/nix-web.nix`; if changing this line, change it there too.
-pub const NIX_CLI_PATH: &str = "nix";
+/// Path to the nix binary. Default set in: .cargo/config.toml
+pub const NIX_CLI_PATH: &str = env!("NIX_WEB_BUILD_NIX_CLI_PATH");
 
 #[instrument(name = "nix", skip_all)]
 async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {

@@ -19,9 +19,6 @@ pkgs.rustPlatform.buildRustPackage {
   cargoLock.lockFile = ../Cargo.lock;
 
   postPatch = ''
-    substituteInPlace nix-web/src/nix_cli.rs \
-      --replace 'pub const NIX_CLI_PATH: &str = "nix"' \
-                'pub const NIX_CLI_PATH: &str = "${nix}/bin/nix"'
     substituteInPlace nix-web/nix-web.service \
       --replace 'ExecStart=nix-web' "ExecStart=$out/bin/nix-web"
   '';
@@ -31,4 +28,6 @@ pkgs.rustPlatform.buildRustPackage {
 
   cargoBuildFlags = cargoPackageFlags;
   cargoTestFlags = cargoPackageFlags;
+
+  NIX_WEB_BUILD_NIX_CLI_PATH = "${nix}/bin/nix";
 }
