@@ -42,7 +42,8 @@ MemoryDenyWriteExecute=true
 
 CapabilityBoundingSet=
 SystemCallArchitectures=native
-SystemCallFilter=@system-service ~@privileged ~@resources
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
