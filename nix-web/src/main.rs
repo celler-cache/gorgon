@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
 
     let app = axum::Router::new()
         .route("/", get(get_index))
-        .route("/style.css", get(get_style_css))
+        .route("/static/*path", get(get_static))
         .route("/goto", get(get_goto))
         .route("/nix/store/*path", get(get_derivation))
         .with_state(state)
@@ -175,11 +175,31 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     })
 }
 
-async fn get_style_css() -> ([(HeaderName, &'static str); 1], &'static str) {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../static/style.css"),
-    )
+async fn get_static(
+    Path(path): Path<String>,
+) -> (StatusCode, [(HeaderName, &'static str); 1], &'static str) {
+    match path.as_str() {
+        "style.css" => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            include_str!("../static/style.css"),
+        ),
+        "bootstrap.css" => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            include_str!("../../lib/bootstrap/dist/css/bootstrap.css"),
+        ),
+        "bootstrap.js" => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+            include_str!("../../lib/bootstrap/dist/js/bootstrap.js"),
+        ),
+        _ => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "not found",
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
