@@ -3,7 +3,7 @@ Description=Nix Web UI
 After=network.target
 
 [Socket]
-ListenStream=8649
+ListenStream=[::1]:8649
 
 [Install]
 WantedBy=sockets.target
