@@ -14,13 +14,14 @@ use axum::{
 };
 use clap::Parser;
 use hyper::header;
+use listenfd::ListenFd;
 use serde::Deserialize;
 use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::process::Command;
-use tracing::{debug_span, info, trace};
+use tracing::{debug, debug_span, info, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -105,10 +106,19 @@ async fn main() -> Result<()> {
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
-    info!(addr = ?&args.http_listen, "Listening!");
-    axum::Server::bind(&args.http_listen)
-        .serve(app.into_make_service())
-        .await?;
+    // Take an external FD if we were socket activated, else listen normally.
+    let mut listen_fds = ListenFd::from_env();
+    let srv = if listen_fds.len() > 0 {
+        // This unwrap() can only fail if the FD has already been used.
+        info!("Socket activated, using external FD 0...");
+        axum::Server::from_tcp(listen_fds.take_tcp_listener(0)?.unwrap())?
+    } else {
+        debug!(addr = ?&args.http_listen, "Binding...");
+        axum::Server::try_bind(&args.http_listen)?
+    }
+    .serve(app.into_make_service());
+    info!(addr = ?srv.local_addr(), "Listening!");
+    srv.await?;
     Ok(())
 }
 

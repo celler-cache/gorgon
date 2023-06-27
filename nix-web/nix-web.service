@@ -1,6 +1,8 @@
 [Unit]
 Description=Nix Web UI
 After=network.target
+After=nix-web.socket
+Requires=nix-web.socket
 
 [Service]
 ExecStart=nix-web -v
@@ -10,6 +12,7 @@ BindPaths=/nix/var
 BindReadOnlyPaths=/nix/store
 
 DynamicUser=true
+PrivateNetwork=true
 PrivateUsers=true
 PrivateDevices=true
 PrivateTmp=true
