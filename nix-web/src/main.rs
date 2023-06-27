@@ -70,7 +70,7 @@ struct Args {
     quiet: u8,
 
     /// Listen address.
-    #[arg(long, short = 'L', default_value = "[::]:8000")]
+    #[arg(long, short = 'L', default_value = "[::]:8649")]
     http_listen: std::net::SocketAddr,
 }
 
