@@ -171,22 +171,22 @@ async fn get_static(
         "bootstrap.css" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-            include_str!("../../lib/bootstrap/dist/css/bootstrap.css"),
+            include_str!("../../vendor/bootstrap/css/bootstrap.css"),
         ),
         "bootstrap.css.map" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            include_str!("../../lib/bootstrap/dist/css/bootstrap.css.map"),
+            include_str!("../../vendor/bootstrap/css/bootstrap.css.map"),
         ),
         "bootstrap.js" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-            include_str!("../../lib/bootstrap/dist/js/bootstrap.js"),
+            include_str!("../../vendor/bootstrap/js/bootstrap.js"),
         ),
         "bootstrap.js.map" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            include_str!("../../lib/bootstrap/dist/js/bootstrap.js.map"),
+            include_str!("../../vendor/bootstrap/js/bootstrap.js.map"),
         ),
         _ => (
             StatusCode::NOT_FOUND,
