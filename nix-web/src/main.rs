@@ -145,7 +145,7 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     };
 
     // Query `nix path-info` for those paths.
-    let mut all_pis = nix_cli::PathInfo::get_recursive(&last_path_paths).await?;
+    let mut all_pis = nix_cli::PathInfo::get(["-r"], &last_path_paths).await?;
 
     Ok(IndexTemplate {
         last_paths: last_path_paths
@@ -287,8 +287,8 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
     let (mut drvs, mut out_pis) = {
         let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
         let path = path_buf.to_str().unwrap();
-        let drvs = nix_cli::Derivation::get(["-r", path]);
-        let out_pis = nix_cli::PathInfo::get(["-r", path]);
+        let drvs = nix_cli::Derivation::get(["-r"], [path]);
+        let out_pis = nix_cli::PathInfo::get(["-r", "--derivation"], [path]);
         (
             drvs.await?,
             match out_pis.await {
@@ -340,7 +340,7 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
             "running secondary `nix path-info`"
         );
 
-        for (_, pi) in nix_cli::PathInfo::get(need_pathinfo_check).await? {
+        for (_, pi) in nix_cli::PathInfo::get(["--"], need_pathinfo_check).await? {
             if let Some(drv) = drvs.get_mut(&pi.path) {
                 trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
                 drv.status = DerivationStatus::Success
@@ -429,7 +429,7 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
 }
 
 async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
-    Ok(nix_cli::log([store_path]).await?)
+    Ok(nix_cli::log([""], store_path).await?)
 }
 
 #[cfg(test)]

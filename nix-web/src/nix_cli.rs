@@ -32,14 +32,18 @@ async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {
 }
 
 /// Returns logs for a derivation.
-pub async fn log<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(args: I) -> Result<String> {
+pub async fn log<AI: IntoIterator<Item = A>, A: AsRef<OsStr>, P: AsRef<OsStr>>(
+    args: AI,
+    path: P,
+) -> Result<String> {
     Ok(String::from_utf8_lossy(
         &exec(
             Command::new(NIX_CLI_PATH)
                 .arg("--experimental-features")
                 .arg("nix-command")
                 .arg("log")
-                .args(args),
+                .args(args)
+                .arg(path),
         )
         .await?[..],
     )
@@ -66,8 +70,14 @@ pub struct Derivation {
 }
 
 impl Derivation {
-    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
-        args: I,
+    pub async fn get<
+        AI: IntoIterator<Item = A>,
+        A: AsRef<OsStr>,
+        PI: IntoIterator<Item = PS>,
+        PS: AsRef<OsStr>,
+    >(
+        args: AI,
+        paths: PI,
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice(
             &exec(
@@ -76,7 +86,8 @@ impl Derivation {
                     .arg("nix-command")
                     .arg("show-derivation")
                     .arg("-r")
-                    .args(args),
+                    .args(args)
+                    .args(paths),
             )
             .await?[..],
         )?)
@@ -140,8 +151,14 @@ pub struct PathInfo {
 }
 
 impl PathInfo {
-    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
-        args: I,
+    pub async fn get<
+        AI: IntoIterator<Item = A>,
+        A: AsRef<OsStr>,
+        PI: IntoIterator<Item = PS>,
+        PS: AsRef<OsStr>,
+    >(
+        args: AI,
+        paths: PI,
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice::<Vec<PathInfo>>(
             &exec(
@@ -150,28 +167,8 @@ impl PathInfo {
                     .arg("nix-command")
                     .arg("path-info")
                     .arg("--json")
-                    .args(args),
-            )
-            .await?[..],
-        )?
-        .drain(..)
-        .filter(|pi| pi.valid)
-        .map(|pi| (pi.path.clone(), pi))
-        .collect())
-    }
-
-    pub async fn get_recursive<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
-        args: I,
-    ) -> Result<BTreeMap<String, Self>> {
-        Ok(serde_json::from_slice::<Vec<PathInfo>>(
-            &exec(
-                Command::new(NIX_CLI_PATH)
-                    .arg("--experimental-features")
-                    .arg("nix-command")
-                    .arg("path-info")
-                    .arg("--json")
-                    .arg("-r")
-                    .args(args),
+                    .args(args)
+                    .args(paths),
             )
             .await?[..],
         )?
