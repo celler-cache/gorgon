@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT-0
 # SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 
-{ pkgs ? import ./nixpkgs.default.nix
+{ pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
 , nix ? pkgs.nix
 , srcOverride ? builtins.fetchGit { url = ../.; submodules = true; }
