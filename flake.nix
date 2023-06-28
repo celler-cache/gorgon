@@ -5,6 +5,11 @@
   outputs =
     { self, nixpkgs }:
     nixpkgs.lib.foldAttrs nixpkgs.lib.mergeAttrs {} (map (system: {
+      packages.${system}.nix-web = import ./nix-web {
+        pkgs = nixpkgs.legacyPackages.${system};
+        srcOverride = self;
+      };
+
       checks.${system}.reuse = import nix/reuse.nix {
         pkgs = nixpkgs.legacyPackages.${system};
         src = self;
