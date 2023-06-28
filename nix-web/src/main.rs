@@ -340,7 +340,14 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
             "running secondary `nix path-info`"
         );
 
-        for (_, pi) in nix_cli::PathInfo::get(["--"], need_pathinfo_check).await? {
+        for (_, pi) in nix_cli::PathInfo::get(
+            ["--"],
+            need_pathinfo_check
+                .drain()
+                .map(|path| format!("{}^*", path)),
+        )
+        .await?
+        {
             if let Some(drv) = drvs.get_mut(&pi.path) {
                 trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
                 drv.status = DerivationStatus::Success
