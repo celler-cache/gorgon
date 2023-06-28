@@ -218,7 +218,6 @@ struct DerivationTemplate<'a> {
 #[template(path = "_derivation_item.html")]
 struct DerivationItemTemplate<'a> {
     drv: &'a Derivation,
-    outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
     input_tmpls: Vec<DerivationItemTemplate<'a>>,
     is_seen_before: bool,
 }
@@ -242,7 +241,6 @@ impl<'a> DerivationItemTemplate<'a> {
             }
             batch.push(Self {
                 drv,
-                outputs: find_outputs(out_pis, drv),
                 input_tmpls: Vec::with_capacity(drv.input_drvs.len()),
                 is_seen_before,
             });

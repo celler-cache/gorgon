@@ -4,7 +4,12 @@ SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
 SPDX-License-Identifier: EUPL-1.2
 #}
 
-<li class="list-group-item {% if !drv.status.is_succ() %}list-group-item-danger{% endif %}">
+<li class="list-group-item {% if drv.status.is_succ() %}list-group-item-success{% endif %}">
+  {% if input_tmpls.len() > 0 %}
+  <details>
+      <summary>
+  {% endif %}
+
   <span>
     {% if drv.status.is_succ() %}
       <span aria-label="Present">☑</span>
@@ -16,32 +21,8 @@ SPDX-License-Identifier: EUPL-1.2
     <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
   </span>
 
-  {% if outputs.len() > 0 %}
-  <details>
-    <summary>Outputs</summary>
-    <table class="table table-responsive">
-      {% for (name, path, pi) in outputs %}
-      <tr class="{% if pi.is_some() %}table-success{% endif %}">
-        <td style="text-align: right; width: 0;">
-          {% if pi.is_some() %}
-            <span aria-label="Present">☑</span>
-          {% else %}
-            <span aria-label="Absent">☐</span>
-          {% endif %}
-        </td>
-        <td style="text-align: right; width: 0;">
-          <span class="badge rounded-pill bg-secondary">{{ name }}</span>
-        </td>
-        <td>{{ path }}</td>
-      </tr>
-      {% endfor %}
-    </table>
-  </details>
-  {% endif %}
-
   {% if input_tmpls.len() > 0 %}
-  <details>
-    <summary>Inputs</summary>
+  </summary>
     <ul class="list-group list-group-flush">
       {% for tmpl in input_tmpls %}
       {{ tmpl|safe }}
