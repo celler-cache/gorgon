@@ -145,12 +145,16 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     };
 
     // Query `nix path-info` for those paths.
-    let mut all_pis = nix_cli::PathInfo::get(&last_path_paths).await?;
+    let mut all_pis = nix_cli::PathInfo::get_recursive(&last_path_paths).await?;
 
     Ok(IndexTemplate {
         last_paths: last_path_paths
             .iter()
-            .map(|path| all_pis.remove(path).unwrap())
+            .map(|path| {
+                all_pis
+                    .remove(path)
+                    .expect(&format!("no PathInfo for {}", &path))
+            })
             .collect(),
     })
 }

@@ -160,6 +160,27 @@ impl PathInfo {
         .collect())
     }
 
+    pub async fn get_recursive<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
+        args: I,
+    ) -> Result<BTreeMap<String, Self>> {
+        Ok(serde_json::from_slice::<Vec<PathInfo>>(
+            &exec(
+                Command::new(NIX_CLI_PATH)
+                    .arg("--experimental-features")
+                    .arg("nix-command")
+                    .arg("path-info")
+                    .arg("--json")
+                    .arg("-r")
+                    .args(args),
+            )
+            .await?[..],
+        )?
+        .drain(..)
+        .filter(|pi| pi.valid)
+        .map(|pi| (pi.path.clone(), pi))
+        .collect())
+    }
+
     fn default_valid() -> bool {
         true
     }
