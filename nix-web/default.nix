@@ -24,7 +24,6 @@ pkgs.rustPlatform.buildRustPackage {
   '';
   postInstall = ''
     install -m 644 -D nix-web/nix-web.service $out/lib/systemd/system/nix-web.service
-    install -m 644 -D nix-web/nix-web.socket $out/lib/systemd/system/nix-web.socket
   '';
 
   cargoBuildFlags = cargoPackageFlags;
