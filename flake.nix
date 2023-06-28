@@ -4,17 +4,31 @@
 {
   outputs =
     { self, nixpkgs }:
-    nixpkgs.lib.foldAttrs nixpkgs.lib.mergeAttrs {} (map (system: {
-      packages.${system}.nix-web = import ./nix-web {
-        pkgs = nixpkgs.legacyPackages.${system};
-        srcOverride = self;
-      };
+    nixpkgs.lib.foldAttrs nixpkgs.lib.mergeAttrs {} (map (system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowAliases = false;
+        };
+      in {
+        packages.${system}.nix-web = import ./nix-web {
+          inherit pkgs;
+          srcOverride = self;
+        };
 
-      checks.${system}.reuse = import nix/reuse.nix {
-        pkgs = nixpkgs.legacyPackages.${system};
-        src = self;
-      };
-    }) [
+        checks.${system} = {
+          nix-web = import nix-web/tests.nix {
+            inherit pkgs;
+            inherit (self.packages.${system}) nix-web;
+          };
+
+          reuse = import nix/reuse.nix {
+            inherit pkgs;
+            src = self;
+          };
+        };
+      }
+    ) [
       "aarch64-linux"
       "armv7l-linux"
       "i686-linux"

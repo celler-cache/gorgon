@@ -6,4 +6,6 @@ with (fromJSON (readFile ../flake.lock)).nodes.nixpkgs.locked;
 import (fetchTarball {
   url = "https://github.com/${owner}/${repo}/tarball/${rev}";
   sha256 = narHash;
-}) {}
+}) {
+  config.allowAliases = false;
+}
