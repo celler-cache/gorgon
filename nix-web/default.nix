@@ -4,7 +4,7 @@
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
 , nix ? pkgs.nix
-, srcOverride ? builtins.fetchGit { url = ../.; submodules = true; }
+, srcOverride ? import ../nix/src.nix { inherit lib; }
 }:
 let
   cargoPackageFlags = [ "-p" "nix-web" ];
