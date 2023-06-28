@@ -434,7 +434,7 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
 }
 
 async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
-    Ok(nix_cli::log([""], store_path).await?)
+    Ok(nix_cli::log(format!("{}/{}", NIX_STORE_PATH, store_path)).await?)
 }
 
 #[cfg(test)]

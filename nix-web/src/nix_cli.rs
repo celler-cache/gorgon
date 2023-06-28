@@ -32,17 +32,13 @@ async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {
 }
 
 /// Returns logs for a derivation.
-pub async fn log<AI: IntoIterator<Item = A>, A: AsRef<OsStr>, P: AsRef<OsStr>>(
-    args: AI,
-    path: P,
-) -> Result<String> {
+pub async fn log<P: AsRef<OsStr>>(path: P) -> Result<String> {
     Ok(String::from_utf8_lossy(
         &exec(
             Command::new(NIX_CLI_PATH)
                 .arg("--experimental-features")
                 .arg("nix-command")
                 .arg("log")
-                .args(args)
                 .arg(path),
         )
         .await?[..],
