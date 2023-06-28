@@ -11,9 +11,7 @@ let
 in
 pkgs.rustPlatform.buildRustPackage {
   pname = "nix-web";
-  version = let
-    head = lib.last (lib.splitString ": " (lib.removeSuffix "\n" (builtins.readFile ../.git/HEAD)));
-  in lib.removeSuffix "\n" (builtins.readFile (../.git + "/${head}"));
+  inherit ((lib.importTOML ./Cargo.toml).package) version;
 
   src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
