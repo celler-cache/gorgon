@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: CC0-1.0
+
 [submodule "lib/bootstrap"]
 	path = lib/bootstrap
 	url = https://github.com/twbs/bootstrap
