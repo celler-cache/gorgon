@@ -20,7 +20,6 @@ use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::process::Command;
 use tracing::{debug, debug_span, info, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -146,26 +145,7 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     };
 
     // Query `nix path-info` for those paths.
-    // FIXME: This should be a nix_cli call.
-    let pi_cmd = Command::new(nix_cli::NIX_CLI_PATH)
-        .arg("--experimental-features")
-        .arg("nix-command")
-        .arg("path-info")
-        .arg("--offline")
-        .arg("--json")
-        .arg("-r")
-        .args(&last_path_paths)
-        .output()
-        .await?;
-    if !pi_cmd.status.success() {
-        return Err(Error::NixCommandExitCode(pi_cmd.status.code().unwrap_or(0)));
-    }
-    let mut all_pis: BTreeMap<String, PathInfo> =
-        serde_json::from_slice::<Vec<PathInfo>>(&pi_cmd.stdout)?
-            .iter()
-            .filter(|pi| pi.valid)
-            .map(|pi| (pi.path.clone(), pi.clone()))
-            .collect();
+    let mut all_pis = nix_cli::PathInfo::get(&last_path_paths).await?;
 
     Ok(IndexTemplate {
         last_paths: last_path_paths
@@ -445,18 +425,7 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
 }
 
 async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
-    // FIXME: This should be a nix_cli call.
-    let output = Command::new(nix_cli::NIX_CLI_PATH)
-        .arg("--experimental-features")
-        .arg("nix-command")
-        .arg("log")
-        .arg(PathBuf::from(NIX_STORE_PATH).join(store_path))
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(Error::NixCommandExitCode(output.status.code().unwrap_or(0)));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into())
+    Ok(nix_cli::log([store_path]).await?)
 }
 
 #[cfg(test)]

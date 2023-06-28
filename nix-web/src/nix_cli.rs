@@ -5,6 +5,7 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use tokio::process::Command;
 use tracing::{debug, debug_span, instrument, warn};
 
@@ -30,6 +31,21 @@ async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Returns logs for a derivation.
+pub async fn log<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(args: I) -> Result<String> {
+    Ok(String::from_utf8_lossy(
+        &exec(
+            Command::new(NIX_CLI_PATH)
+                .arg("--experimental-features")
+                .arg("nix-command")
+                .arg("log")
+                .args(args),
+        )
+        .await?[..],
+    )
+    .into())
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Derivation {
     #[serde(default, skip_serializing, skip_deserializing)]
@@ -50,7 +66,7 @@ pub struct Derivation {
 }
 
 impl Derivation {
-    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(
+    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
         args: I,
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice(
@@ -124,7 +140,7 @@ pub struct PathInfo {
 }
 
 impl PathInfo {
-    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(
+    pub async fn get<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(
         args: I,
     ) -> Result<BTreeMap<String, Self>> {
         Ok(serde_json::from_slice::<Vec<PathInfo>>(
