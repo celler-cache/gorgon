@@ -20,7 +20,7 @@ use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, debug_span, info, trace};
+use tracing::{debug, debug_span, info, trace, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -150,10 +150,12 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     Ok(IndexTemplate {
         last_paths: last_path_paths
             .iter()
-            .map(|path| {
-                all_pis
-                    .remove(path)
-                    .expect(&format!("no PathInfo for {}", &path))
+            .filter_map(|path| match all_pis.remove(path) {
+                None => {
+                    warn!(?path, "Recently registered an invalid path");
+                    None
+                }
+                Some(v) => Some(v),
             })
             .collect(),
     })
