@@ -20,7 +20,7 @@ use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, debug_span, info, trace, warn};
+use tracing::{debug, debug_span, info, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
-    last_paths: Vec<PathInfo>,
+    last_paths: Vec<String>,
 }
 
 async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> {
@@ -144,20 +144,8 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
             .await?
     };
 
-    // Query `nix path-info` for those paths.
-    let mut all_pis = nix_cli::PathInfo::get(["--offline"], &last_path_paths).await?;
-
     Ok(IndexTemplate {
-        last_paths: last_path_paths
-            .iter()
-            .filter_map(|path| match all_pis.remove(path) {
-                None => {
-                    warn!(?path, "Recently registered an invalid path");
-                    None
-                }
-                Some(v) => Some(v),
-            })
-            .collect(),
+        last_paths: last_path_paths,
     })
 }
 
