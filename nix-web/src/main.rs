@@ -145,7 +145,7 @@ async fn get_index(State(state): State<Arc<AppState>>) -> Result<IndexTemplate> 
     };
 
     // Query `nix path-info` for those paths.
-    let mut all_pis = nix_cli::PathInfo::get(["-r"], &last_path_paths).await?;
+    let mut all_pis = nix_cli::PathInfo::get(["--offline"], &last_path_paths).await?;
 
     Ok(IndexTemplate {
         last_paths: last_path_paths
