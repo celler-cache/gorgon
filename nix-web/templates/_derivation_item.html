@@ -7,10 +7,11 @@ SPDX-License-Identifier: EUPL-1.2
 <li class="list-group-item {% if drv.status.is_succ() %}list-group-item-success{% endif %}">
   {% if input_tmpls.len() > 0 %}
   <details>
-      <summary>
+    <summary>
+  {% else %}
+  <span style="margin-left: 14pt;">
   {% endif %}
 
-  <span>
     {% if drv.status.is_succ() %}
       <span aria-label="Present">☑</span>
     {% else %}
@@ -19,7 +20,6 @@ SPDX-License-Identifier: EUPL-1.2
     <a href="{{ drv.path }}">{{ drv.path }}</a>
     {% if is_seen_before %} […]{% endif %}
     <a href="{{ drv.path }}?p=log" class="badge rounded-pill bg-secondary">log</a>
-  </span>
 
   {% if input_tmpls.len() > 0 %}
   </summary>
@@ -29,5 +29,7 @@ SPDX-License-Identifier: EUPL-1.2
       {% endfor %}
     </ul>
   </details>
+  {% else %}
+  </span>
   {% endif %}
 </li>
