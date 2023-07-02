@@ -8,9 +8,9 @@ SPDX-License-Identifier: EUPL-1.2
 {% block title %}{{ root.path }} | nix-web{% endblock %}
 {% block goto %}{{ root.path }}{% endblock %}
 {% block content %}
-<div class="derivation {{ root.status }} card border-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 10px;">
+<div class="derivation {{ root.status }} card {% if root.status.is_succ() %}border-success{% endif %}" style="margin-bottom: 10px;">
   <div class="card-header d-flex align-items-center">
-    <h5 class="flex-grow-1 text-{% if root.status.is_succ() %}success{% else %}danger{% endif %}" style="margin-bottom: 0;">
+    <h5 class="flex-grow-1 {% if root.status.is_succ() %}text-success{% endif %}" style="margin-bottom: 0;">
       <!-- TODO: I don't know how to make these symbols screen reader accessible -->
       {% if root.status.is_succ() %}
         <span aria-label="Present">☑</span>
