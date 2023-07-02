@@ -13,9 +13,9 @@ SPDX-License-Identifier: EUPL-1.2
   {% endif %}
 
     {% if drv.status.is_succ() %}
-      <span aria-label="Present">☑</span>
+      <span title="Has output(s) in store">☑</span>
     {% else %}
-      <span aria-label="Absent">☐</span>
+      <span title="No output(s) in store">☐</span>
     {% endif %}
     <a href="{{ drv.path }}">{{ drv.path }}</a>
     {% if is_seen_before %} […]{% endif %}

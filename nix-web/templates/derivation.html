@@ -11,11 +11,10 @@ SPDX-License-Identifier: EUPL-1.2
 <div class="derivation {{ root.status }} card {% if root.status.is_succ() %}border-success{% endif %}" style="margin-bottom: 10px;">
   <div class="card-header d-flex align-items-center">
     <h5 class="flex-grow-1 {% if root.status.is_succ() %}text-success{% endif %}" style="margin-bottom: 0;">
-      <!-- TODO: I don't know how to make these symbols screen reader accessible -->
       {% if root.status.is_succ() %}
-        <span aria-label="Present">☑</span>
+        <span title="Has output(s) in store">☑</span>
       {% else %}
-        <span aria-label="Absent">☐</span>
+        <span title="No output(s) in store">☐</span>
       {% endif %}
       <code style="color: inherit;">{{ root.path }}</code>
     </h5>
