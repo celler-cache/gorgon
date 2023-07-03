@@ -56,7 +56,12 @@ struct ErrorTemplate {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        Html(ErrorTemplate { error: self }.render().unwrap()).into_response()
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(ErrorTemplate { error: self }.render().unwrap())
+            .unwrap()
+            .into_response()
     }
 }
 
