@@ -45,9 +45,15 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
+#[derive(Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    error: Error,
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self)).into_response()
+        Html(ErrorTemplate { error: self }.render().unwrap()).into_response()
     }
 }
 
