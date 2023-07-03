@@ -43,6 +43,9 @@ pub enum Error {
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+
+    #[error("request handler panicked - this is a bug: {0}")]
+    Panic(String),
 }
 
 #[derive(Template)]
@@ -55,6 +58,17 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         Html(ErrorTemplate { error: self }.render().unwrap()).into_response()
     }
+}
+
+fn handle_panic(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    Error::Panic(if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "[UNKNOWN PANIC MESSAGE]".to_string()
+    })
+    .into_response()
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -109,7 +123,10 @@ async fn main() -> Result<()> {
         .route("/goto", get(get_goto))
         .route("/nix/store/*path", get(get_derivation))
         .with_state(state)
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            handle_panic,
+        ));
 
     // Take an external FD if we were socket activated, else listen normally.
     let mut listen_fds = ListenFd::from_env();
