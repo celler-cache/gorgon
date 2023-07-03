@@ -19,14 +19,17 @@ async fn exec(cmd: &mut Command) -> Result<Vec<u8>> {
 
     let out = cmd.output().await?;
     if !out.status.success() {
-        if out.stderr.len() > 0 {
-            debug_span!("stderr").in_scope(|| {
-                for line in String::from_utf8_lossy(&out.stderr).lines() {
-                    warn!("{}", line);
-                }
-            })
-        }
-        return Err(Error::NixCommandExitCode(out.status.code().unwrap_or(0)));
+        let last_line = debug_span!("stderr").in_scope(|| {
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .inspect(|line| warn!("{}", line))
+                .last()
+                .map(|s| s.strip_prefix("error:").unwrap_or(s).trim().to_string())
+        });
+        return Err(Error::NixCommandError(
+            out.status.code().unwrap_or(0),
+            last_line.unwrap_or("".into()),
+        ));
     }
     Ok(out.stdout)
 }

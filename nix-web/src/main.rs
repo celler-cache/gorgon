@@ -30,8 +30,8 @@ const NIX_STORE_PATH: &str = "/nix/store";
 /// Error wrapper. Can be returned from a handler and turned into a 500 Internal Server Error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("nix command exited with code {0}")]
-    NixCommandExitCode(i32),
+    #[error("nix command exited with code {0}: {1}")]
+    NixCommandError(i32, String),
 
     #[error(transparent)]
     Askama(#[from] askama::Error),
@@ -282,7 +282,7 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
             match out_pis.await {
                 Ok(v) => v,
                 // If this is an invalid path, still render the page.
-                Err(Error::NixCommandExitCode(_)) => BTreeMap::new(),
+                Err(Error::NixCommandError(..)) => BTreeMap::new(),
                 Err(e) => return Err(e),
             },
         )
