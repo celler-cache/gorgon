@@ -1,5 +1,6 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 <!-- SPDX-FileCopyrightText: 2023 Alyssa Ross <hi@alyssa.is> -->
+<!-- SPDX-FileCopyrightText: 2023 embr <git@liclac.eu> -->
 
 # nix-web
 
@@ -37,10 +38,14 @@ nix --extra-experimental-features 'nix-command flakes' run 'git+https://codeberg
 }
 ```
 
-## Contributing
+Contributing
+------------
 
-Open pull requests at <https://codeberg.org/gorgon/gorgon/pulls>.
+Please see the [main README](..#contributing).
 
-Please sign off your commits (`git commit -s`) to indicate your
-certification of the [Developer Certificate of
-Origin](../DCO-1.1.txt).
+---
+
+[<img src="https://nlnet.nl/logo/banner.svg" width="200" alt="NLNet Foundation logo" />](https://nlnet.nl/)
+[<img src="https://nlnet.nl/image/logos/NGI0Entrust_tag.svg" width="200" alt="NGI Zero Entrust logo" />](https://nlnet.nl/NGI0/)
+
+This project was funded through the NGI0 Entrust Fund, a fund established by NLnet with financial support from the European Commission's Next Generation Internet programme, under the aegis of DG Communications Networks, Content and Technology under grant agreement Nº 101069594.
