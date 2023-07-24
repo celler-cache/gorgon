@@ -153,7 +153,7 @@ async fn handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             proto_major,
             proto_minor
         );
-        if proto_major != 1 || proto_minor != 34 {
+        if proto_major != 1 || proto_minor != 35 {
             bail!(
                 "Unsupported Protocol Version: {:}.{:02}",
                 proto_major,
