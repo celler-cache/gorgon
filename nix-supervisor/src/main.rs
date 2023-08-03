@@ -196,7 +196,40 @@ async fn handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             .context("Step 3.2 (Obsolete reserved space)")?;
         debug!(reserved, "-> [v11] read obsolete reserved space");
     }
+
+    // It's the daemon's turn to speak!
     flush(&mut buf, &mut c2d).await?;
+
+    // Step 4.0: Daemon's nix version string.
+    if client_ver >= 33 {
+        let nix_version_len = take_u64(&mut buf, d2c)
+            .await
+            .context("Step 4.0a (Daemon Nix version length) failed")?
+            as usize;
+        debug!(nix_version_len, "<- [v33] read nix version length");
+        let nix_version_str = tee_len(&mut buf, &mut d2c, padded_len(nix_version_len), |b| {
+            Ok(String::from_utf8_lossy(&b[..nix_version_len]).to_string())
+        })
+        .await
+        .context("Step 4.0b (Daemon Nix version string) failed")?;
+        debug!(nix_version_str, "<- [v33] read nix version string");
+    }
+
+    // Step 4.1: Is the client trusted?
+    if client_ver >= 35 {
+        let client_trusted: Option<bool> = match take_u8(&mut buf, &mut d2c)
+            .await
+            .context("Step 4.1 (Client trust flag) failed")?
+        {
+            0 => None,
+            1 => Some(true),
+            2 => Some(false),
+            v => bail!("Step 4.1 (Client trust flag) has invalid value: {}", v),
+        };
+        debug!(client_trusted, "<- [v35] read client trust flag");
+    }
+
+    flush(&mut buf, &mut d2c).await?;
 
     Ok(())
 }
@@ -225,6 +258,10 @@ async fn process<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             conn.w.write_buf(&mut buf).await?;
         }
     }
+}
+
+fn padded_len(len: usize) -> usize {
+    len + if len % 8 > 0 { 8 - (len % 8) } else { 0 }
 }
 
 async fn tee_len<
@@ -263,6 +300,13 @@ async fn tee_len<
     Ok(ret)
 }
 
+async fn take_u8<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    buf: &mut BytesMut,
+    conn: &mut Conn<R, W>,
+) -> Result<u8> {
+    tee_len(buf, conn, 1, |mut b| Ok(b.get_u8())).await
+}
+
 async fn take_u64<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     buf: &mut BytesMut,
     conn: &mut Conn<R, W>,
@@ -280,4 +324,30 @@ async fn flush<B: Buf, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         conn.w.write_buf(buf).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_padded_len() {
+        assert_eq!(0, padded_len(0));
+        assert_eq!(8, padded_len(1));
+        assert_eq!(8, padded_len(2));
+        assert_eq!(8, padded_len(3));
+        assert_eq!(8, padded_len(4));
+        assert_eq!(8, padded_len(5));
+        assert_eq!(8, padded_len(6));
+        assert_eq!(8, padded_len(7));
+        assert_eq!(8, padded_len(8));
+        assert_eq!(16, padded_len(9));
+        assert_eq!(16, padded_len(10));
+        assert_eq!(16, padded_len(11));
+        assert_eq!(16, padded_len(12));
+        assert_eq!(16, padded_len(13));
+        assert_eq!(16, padded_len(14));
+        assert_eq!(16, padded_len(15));
+        assert_eq!(16, padded_len(16));
+    }
 }
