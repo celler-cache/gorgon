@@ -2,16 +2,20 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::{bail, Context, Result};
-use bytes::{Buf, BytesMut};
-use clap::Parser;
-use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, error, info, instrument, trace};
+mod daemon_proto;
 
-const WORKER_MAGIC_1: u64 = 0x6e697863;
-const WORKER_MAGIC_2: u64 = 0x6478696f;
+use anyhow::{Context, Result};
+use clap::Parser;
+use daemon_proto::{Direction, Stream};
+use std::path::PathBuf;
+use tap::TapFallible;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    net::{UnixListener, UnixStream},
+    select,
+    time::{timeout, Duration},
+};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -23,6 +27,7 @@ struct Args {
     #[arg(long, short, action=clap::ArgAction::Count)]
     quiet: u8,
 
+    /// Path to the real nix daemon socket.
     #[arg(long, short = 'S', default_value = "/nix/var/nix/daemon-socket/socket")]
     nix_daemon_sock: PathBuf,
 
@@ -48,306 +53,133 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
 
-    let listener = UnixListener::bind(&args.sock).context("Couldn't open socket for listening")?;
+    let listener = UnixListener::bind(&args.sock)
+        .tap_err(|err| error!(?err, ?args.sock, "Couldn't bind to socket"))
+        .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?;
     loop {
         match listener.accept().await {
-            Ok((cstream, _)) => run_session(&args, cstream).await?,
-            Err(err) => {
-                error!(?err, "Client connection failed");
+            Ok((cstream, addr)) => {
+                info!(?addr, "Client connected");
+                run_session(&args, cstream).await?;
             }
+            Err(err) => error!(?err, "Couldn't accept connection"),
         }
     }
 }
 
 #[instrument(skip_all)]
 async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
-    info!("<- Client connected!");
-
+    // We've got a client connection already; connect to the daemon on their behalf.
+    debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
     let mut dstream = UnixStream::connect(&args.nix_daemon_sock)
         .await
-        .context("Couldn't connect to daemon")?;
-    debug!("-> Connected to Daemon");
+        .tap_err(|err| error!(?err, ?args.nix_daemon_sock, "Couldn't connect to nix daemon socket"))
+        .with_context(|| {
+            format!(
+                "Couldn't connect to nix daemon socket: {}",
+                args.nix_daemon_sock.to_string_lossy()
+            )
+        })?;
 
+    // Split the connections up into a client-to-daemon and a daemon-to-client stream.
     let (mut c2d, mut d2c) = {
         let (cr, cw) = cstream.split();
         let (dr, dw) = dstream.split();
-        let c2d = Conn {
-            dir: Direction::ClientToDaemon,
-            r: cr,
-            w: dw,
+        let c2d = daemon_proto::Stream {
+            dir: daemon_proto::Direction::ClientToDaemon,
+            r: BufReader::new(cr),
+            w: BufWriter::new(dw),
         };
-        let d2c = Conn {
-            dir: Direction::DaemonToClient,
-            r: dr,
-            w: cw,
+        let d2c = daemon_proto::Stream {
+            dir: daemon_proto::Direction::DaemonToClient,
+            r: BufReader::new(dr),
+            w: BufWriter::new(cw),
         };
         (c2d, d2c)
     };
 
-    handshake(&mut c2d, &mut d2c)
+    // Perform the new connection handshake.
+    let _state = daemon_proto::handshake(&mut c2d, &mut d2c)
         .await
-        .context("Couldn't complete handshake")?;
-    tokio::select! {
-        r = process(&mut c2d) => r?,
-        r = process(&mut d2c) => r?,
-    };
-    let (cshut_res, dshut_res) = tokio::join!(cstream.shutdown(), dstream.shutdown());
-    cshut_res?;
-    dshut_res?;
+        .tap_err(|err| error!(?err, "Handshake failed"))
+        .context("Handshake failed")?;
 
-    Ok(())
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum Direction {
-    ClientToDaemon,
-    DaemonToClient,
-}
-
-#[derive(Debug, Copy, Clone)]
-struct Conn<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin> {
-    dir: Direction,
-    r: R,
-    w: W,
-}
-
-// Based on src/libstore/daemon.cc in the nix tree.
-#[instrument(skip_all)]
-async fn handshake<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    mut c2d: &mut Conn<R, W>,
-    mut d2c: &mut Conn<R, W>,
-) -> Result<()> {
-    let mut buf = BytesMut::with_capacity(256);
-
-    // Step 1: Client sends WORKER_MAGIC_1 to the Daemon.
-    tee_len(&mut buf, &mut c2d, 8, |mut b| {
-        let magic1 = b.get_u64_le();
-        debug!(magic1, "<- read magic1: {:x}", magic1);
-        if magic1 != WORKER_MAGIC_1 {
-            bail!("Incorrect WORKER_MAGIC_1: {} != {}", WORKER_MAGIC_1, magic1);
-        }
-        Ok(())
-    })
-    .await
-    .context("Step 1 (WORKER_MAGIC_1) failed")?;
-
-    // Step 2: Daemon replies with [ WORKER_MAGIC_2, protocol version ].
-    tee_len(&mut buf, &mut d2c, 16, |mut b| {
-        let magic2 = b.get_u64_le();
-        debug!(magic2, "-> read magic2: {:x}", magic2);
-        if magic2 != WORKER_MAGIC_2 {
-            bail!(
-                "Incorrect WORKER_MAGIC_2: {:x} != {:x}",
-                WORKER_MAGIC_2,
-                magic2
-            );
-        }
-
-        let proto_ver = b.get_u64_le();
-        let (proto_major, proto_minor) = ((proto_ver & 0xFF00) >> 8, proto_ver & 0x00FF);
-        debug!(
-            proto_ver,
-            proto_major,
-            proto_minor,
-            "-> read protocol version: {:}.{:02}",
-            proto_major,
-            proto_minor
-        );
-        if proto_major != 1 || proto_minor != 35 {
-            bail!(
-                "Unsupported Protocol Version: {:}.{:02}",
-                proto_major,
-                proto_minor
-            );
-        }
-        Ok((proto_major, proto_minor))
-    })
-    .await
-    .context("Step 2 (WORKER_MAGIC_2, protocol version) failed")?;
-
-    // Step 3: Client introduction.
-    let client_ver = tee_len(&mut buf, &mut c2d, 8, |mut b| {
-        let client_ver = b.get_u64_le();
-        debug!(client_ver, "-> read client_ver: {:}", client_ver);
-        Ok(client_ver)
-    })
-    .await
-    .context("Step 3.0 (Client version) failed")?;
-
-    // Step 3.2: Skip obsolete CPU affinity, if present.
-    if client_ver >= 14
-        && take_u64(&mut buf, &mut c2d)
-            .await
-            .context("Step 3.1.1 (Obsolete CPU Affinity marker) failed")?
-            > 0
-    {
-        let cpu_affinity = take_u64(&mut buf, &mut c2d)
-            .await
-            .context("Step 3.1.2 (Obsolete CPU Affinity) failed")?;
-        debug!(cpu_affinity, "-> [v14] read obsolete CPU affinity");
-    } else {
-        debug!("-> [v14] no obsolete CPU affinity to skip");
-    }
-
-    // Step 3.3: Skip obsolete reserved space.
-    if client_ver >= 11 {
-        let reserved = take_u64(&mut buf, &mut c2d)
-            .await
-            .context("Step 3.2 (Obsolete reserved space)")?;
-        debug!(reserved, "-> [v11] read obsolete reserved space");
-    }
-
-    // It's the daemon's turn to speak!
-    flush(&mut buf, &mut c2d).await?;
-
-    // Step 4.0: Daemon's nix version string.
-    if client_ver >= 33 {
-        let nix_version_len = take_u64(&mut buf, d2c)
-            .await
-            .context("Step 4.0a (Daemon Nix version length) failed")?
-            as usize;
-        debug!(nix_version_len, "<- [v33] read nix version length");
-        let nix_version_str = tee_len(&mut buf, &mut d2c, padded_len(nix_version_len), |b| {
-            Ok(String::from_utf8_lossy(&b[..nix_version_len]).to_string())
-        })
-        .await
-        .context("Step 4.0b (Daemon Nix version string) failed")?;
-        debug!(nix_version_str, "<- [v33] read nix version string");
-    }
-
-    // Step 4.1: Is the client trusted?
-    if client_ver >= 35 {
-        let client_trusted: Option<bool> = match take_u8(&mut buf, &mut d2c)
-            .await
-            .context("Step 4.1 (Client trust flag) failed")?
-        {
-            0 => None,
-            1 => Some(true),
-            2 => Some(false),
-            v => bail!("Step 4.1 (Client trust flag) has invalid value: {}", v),
-        };
-        debug!(client_trusted, "<- [v35] read client trust flag");
-    }
-
-    flush(&mut buf, &mut d2c).await?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn process<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    conn: &mut Conn<R, W>,
-) -> Result<()> {
-    let mut buf = BytesMut::with_capacity(2048);
+    // Main loop!
     loop {
-        if conn.r.read_buf(&mut buf).await? == 0 {
-            debug!("EOF");
-            return Ok(());
-        }
-        trace!(
-            "{} [{:4}] {:x?}",
-            if conn.dir == Direction::ClientToDaemon {
-                "->"
-            } else {
-                "<-"
-            },
-            buf.len(),
-            &buf[..]
-        );
-        while buf.has_remaining() {
-            conn.w.write_buf(&mut buf).await?;
-        }
-    }
-}
+        trace!("[ main loop ]");
 
-fn padded_len(len: usize) -> usize {
-    len + if len % 8 > 0 { 8 - (len % 8) } else { 0 }
-}
-
-async fn tee_len<
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
-    F: FnMut(BytesMut) -> Result<FR>,
-    FR,
->(
-    buf: &mut BytesMut,
-    conn: &mut Conn<R, W>,
-    len: usize,
-    mut f: F,
-) -> Result<FR> {
-    loop {
-        trace!("have {} bytes of {}", buf.remaining(), len);
-        if buf.remaining() < len {
-            if conn.r.read_buf(buf).await? == 0 {
-                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+        // Wait for one of the streams to become readable.
+        let dir = if c2d.r.buffer().len() > 0 {
+            Direction::ClientToDaemon
+        } else if d2c.r.buffer().len() > 0 {
+            Direction::DaemonToClient
+        } else {
+            select! {
+                biased;
+                _ = d2c.r.get_ref().readable() => Direction::DaemonToClient,
+                _ = c2d.r.get_ref().readable() => Direction::ClientToDaemon,
             }
-        } else {
-            break;
+        };
+        trace!(?dir, "Stream became readable");
+        match match dir {
+            Direction::DaemonToClient => forward(&mut d2c).await,
+            Direction::ClientToDaemon => forward(&mut c2d).await,
+        } {
+            Ok(_) => (),
+            Err(err) => {
+                if let Some(err) = err.downcast_ref::<std::io::Error>() {
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                        info!("Disconnected");
+                        break Ok(());
+                    }
+                }
+                break Err(err);
+            }
         }
     }
+}
+
+#[instrument(skip_all)]
+async fn forward<'s>(conn: &mut Stream<'s>) -> Result<()> {
+    // Even when the reader is allegedly readable, the first read() call sometimes hangs.
+    // Hack around this for now by just setting a timeout and trying again if it happens.
+    let buf = if let Ok(res) = timeout(Duration::from_millis(10), conn.r.fill_buf()).await {
+        res.tap_err(|err| error!(?err, ?conn.dir, "Couldn't read"))
+            .with_context(|| format!("Couldn't read from {}", conn.dir.reader()))?
+    } else {
+        warn!(?conn.dir, "Read timed out");
+        return Ok(());
+    };
+
+    // An empty read means the connection was closed.
+    if buf.len() == 0 {
+        // TODO: This is a quite expected EOF, we should have our own error enum.
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
+
     trace!(
-        "{} [{:4}] {:x?}",
-        if conn.dir == Direction::ClientToDaemon {
-            "->"
-        } else {
-            "<-"
-        },
-        buf.len(),
-        &buf[..]
+        len = buf.len(),
+        ?buf,
+        "{} Read from {}",
+        conn.dir.log_arrow(),
+        conn.dir.reader()
     );
-    let ret = f(buf.clone())?;
-    flush(&mut buf.take(len), conn).await?;
-    Ok(ret)
-}
 
-async fn take_u8<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    buf: &mut BytesMut,
-    conn: &mut Conn<R, W>,
-) -> Result<u8> {
-    tee_len(buf, conn, 1, |mut b| Ok(b.get_u8())).await
-}
+    conn.w
+        .write_all(buf)
+        .await
+        .tap_err(|err| error!(?err, ?conn.dir, "Couldn't write"))
+        .with_context(|| format!("Couldn't write to {}", conn.dir.writer()))?;
+    conn.w
+        .flush()
+        .await
+        .tap_err(|err| error!(?err, ?conn.dir, "Couldn't flush writer"))
+        .with_context(|| format!("Couldn't flush writer to {}", conn.dir.writer()))?;
 
-async fn take_u64<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    buf: &mut BytesMut,
-    conn: &mut Conn<R, W>,
-) -> Result<u64> {
-    tee_len(buf, conn, 8, |mut b| Ok(b.get_u64_le())).await
-}
-
-async fn flush<B: Buf, R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
-    buf: &mut B,
-    conn: &mut Conn<R, W>,
-) -> Result<()> {
-    let total = buf.remaining();
-    while buf.has_remaining() {
-        trace!(total, remaining = buf.remaining(), "flushing buffer...");
-        conn.w.write_buf(buf).await?;
+    // Tell the reader we consumed all the data it gave us.
+    {
+        let buf_len = buf.len(); // lifetime hack.
+        conn.r.consume(buf_len);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_padded_len() {
-        assert_eq!(0, padded_len(0));
-        assert_eq!(8, padded_len(1));
-        assert_eq!(8, padded_len(2));
-        assert_eq!(8, padded_len(3));
-        assert_eq!(8, padded_len(4));
-        assert_eq!(8, padded_len(5));
-        assert_eq!(8, padded_len(6));
-        assert_eq!(8, padded_len(7));
-        assert_eq!(8, padded_len(8));
-        assert_eq!(16, padded_len(9));
-        assert_eq!(16, padded_len(10));
-        assert_eq!(16, padded_len(11));
-        assert_eq!(16, padded_len(12));
-        assert_eq!(16, padded_len(13));
-        assert_eq!(16, padded_len(14));
-        assert_eq!(16, padded_len(15));
-        assert_eq!(16, padded_len(16));
-    }
 }

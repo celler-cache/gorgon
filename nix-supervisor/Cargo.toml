@@ -11,9 +11,10 @@ license = "EUPL-1.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0"
-bytes = "1.4"
-tokio = { version = "1.28", features = ["rt", "rt-multi-thread", "parking_lot", "macros", "io-util", "process", "net"] }
+thiserror = "1.0"
+tokio = { version = "1.28", features = ["rt", "rt-multi-thread", "macros", "parking_lot", "time", "io-util", "net"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tap = "1.0.1"
+anyhow = "1.0.72"
