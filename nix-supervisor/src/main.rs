@@ -4,16 +4,15 @@
 
 mod daemon_proto;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
-use daemon_proto::{Direction, Stream};
+use daemon_proto::{Direction, Interjection, Op, State, Stream};
 use std::path::PathBuf;
 use tap::TapFallible;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{BufReader, BufWriter},
     net::{UnixListener, UnixStream},
     select,
-    time::{timeout, Duration},
 };
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -99,7 +98,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
     };
 
     // Perform the new connection handshake.
-    let _state = daemon_proto::handshake(&mut c2d, &mut d2c)
+    let state = daemon_proto::handshake(&mut c2d, &mut d2c)
         .await
         .tap_err(|err| error!(?err, "Handshake failed"))
         .context("Handshake failed")?;
@@ -108,78 +107,172 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
     loop {
         trace!("[ main loop ]");
 
-        // Wait for one of the streams to become readable.
         let dir = if c2d.r.buffer().len() > 0 {
+            trace!(
+                len = c2d.r.buffer().len(),
+                "Client-to-Daemon reader has unprocessed data"
+            );
             Direction::ClientToDaemon
         } else if d2c.r.buffer().len() > 0 {
+            trace!(
+                len = d2c.r.buffer().len(),
+                "Daemon-to-Client reader has unprocessed data"
+            );
             Direction::DaemonToClient
         } else {
+            trace!("No leftover buffers, waiting for sockets...");
             select! {
                 biased;
                 _ = d2c.r.get_ref().readable() => Direction::DaemonToClient,
                 _ = c2d.r.get_ref().readable() => Direction::ClientToDaemon,
             }
         };
-        trace!(?dir, "Stream became readable");
-        match match dir {
-            Direction::DaemonToClient => forward(&mut d2c).await,
-            Direction::ClientToDaemon => forward(&mut c2d).await,
-        } {
-            Ok(_) => (),
-            Err(err) => {
-                if let Some(err) = err.downcast_ref::<std::io::Error>() {
-                    if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                        info!("Disconnected");
-                        break Ok(());
-                    }
+
+        if dir == Direction::DaemonToClient {
+            trace!("Daemon ready; reading interjection...");
+            let inter = d2c
+                .take_interjection()
+                .await
+                .context("Couldn't read interjection")?;
+            do_interjection(&mut d2c, inter)
+                .await
+                .context("Couldn't process interjection")?;
+            d2c.flush()
+                .await
+                .context("Couldn't flush writer after interjection")?;
+        } else {
+            trace!("Client ready; reading Op...");
+            let op = c2d.take_op().await.context("Couldn't read Op")?;
+            match op {
+                Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
+                Op::ObsoleteQueryPathHash
+                | Op::ObsoleteQueryReferences
+                | Op::ObsoleteAddTextToStore
+                | Op::ObsoleteExportPath
+                | Op::ObsoleteQueryDeriver
+                | Op::ObsoleteQueryDerivationOutputs
+                | Op::ObsoleteImportPaths
+                | Op::ObsoleteQueryDerivationOutputNames => {
+                    Err(anyhow!("Obsolete Op received: {:?}", op))
                 }
-                break Err(err);
+                _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
             }
+            .tap_err(|err| error!(?err, ?op, "Couldn't process Op"))
+            .with_context(|| format!("Couldn't process Op: {:?}", op))?;
+            c2d.flush()
+                .await
+                .context("Couldn't flush writer after op")?;
         }
     }
 }
 
 #[instrument(skip_all)]
-async fn forward<'s>(conn: &mut Stream<'s>) -> Result<()> {
-    // Even when the reader is allegedly readable, the first read() call sometimes hangs.
-    // Hack around this for now by just setting a timeout and trying again if it happens.
-    let buf = if let Ok(res) = timeout(Duration::from_millis(10), conn.r.fill_buf()).await {
-        res.tap_err(|err| error!(?err, ?conn.dir, "Couldn't read"))
-            .with_context(|| format!("Couldn't read from {}", conn.dir.reader()))?
-    } else {
-        warn!(?conn.dir, "Read timed out");
-        return Ok(());
+async fn do_interjection<'s>(_d2c: &mut Stream<'s>, inter: Interjection) -> Result<()> {
+    match inter {
+        Interjection::StderrLast => debug!("End of queued stderr"),
+        _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
     };
+    Ok(())
+}
 
-    // An empty read means the connection was closed.
-    if buf.len() == 0 {
-        // TODO: This is a quite expected EOF, we should have our own error enum.
-        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+#[instrument(skip_all)]
+async fn do_set_options<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    _d2c: &mut Stream<'s>,
+) -> Result<()> {
+    debug!("Processing SetOptions");
+
+    #[instrument]
+    fn format_verbosity(v: u64) -> &'static str {
+        match v {
+            0 => "Error",
+            1 => "Warn",
+            2 => "Notice",
+            3 => "Info",
+            4 => "Talkative",
+            5 => "Chatty",
+            6 => "Debug",
+            7 => "Vomit",
+            _ => {
+                warn!(v, "Invalid verbosity received");
+                "???"
+            }
+        }
     }
 
-    trace!(
-        len = buf.len(),
-        ?buf,
-        "{} Read from {}",
-        conn.dir.log_arrow(),
-        conn.dir.reader()
+    let keep_failed = c2d.take_u64_le().await.context("keepFailed")?;
+    let keep_going = c2d.take_u64_le().await.context("keepGoing")?;
+    let try_fallback = c2d.take_u64_le().await.context("tryFallback")?;
+    let verbosity = c2d
+        .take_u64_le()
+        .await
+        .map(format_verbosity)
+        .context("verbosity")?;
+    let max_build_jobs = c2d.take_u64_le().await.context("maxBuildJobs")?;
+    let max_silent_time = c2d.take_u64_le().await.context("maxSilentTime")?;
+    c2d.take_u64_le()
+        .await
+        .tap_ok(|v| {
+            if *v != 1 {
+                warn!(v, "Client sent obsolete option: useBuildHook")
+            }
+        })
+        .context("(obsolete) useBuildHook")?;
+    let verbose_build = c2d
+        .take_u64_le()
+        .await
+        .map(format_verbosity)
+        .context("verboseBuild")?;
+    c2d.take_u64_le()
+        .await
+        .tap_ok(|v| {
+            if *v != 0 {
+                warn!(v, "Client sent obsolete option: logType")
+            }
+        })
+        .context("(obsolete) logType")?;
+    c2d.take_u64_le()
+        .await
+        .tap_ok(|v| {
+            if *v != 0 {
+                warn!(v, "Client sent obsolete option: printBuildTrace")
+            }
+        })
+        .context("(obsolete) printBuildTrace")?;
+    let build_cores = c2d.take_u64_le().await.context("buildCores")?;
+    let use_substitutes = c2d.take_u64_le().await.context("useSubstitutes")?;
+
+    let num_overrides = if state.client_proto.1 > 12 {
+        c2d.take_u64_le().await.context("override count")?
+    } else {
+        0
+    };
+    info!(
+        keepFailed = keep_failed,
+        keepGoing = keep_going,
+        tryFallback = try_fallback,
+        verbosity,
+        maxBuildJobs = max_build_jobs,
+        maxSilentTime = max_silent_time,
+        verboseBuild = verbose_build,
+        buildCores = build_cores,
+        useSubstitutes = use_substitutes,
+        "SetOptions"
     );
 
-    conn.w
-        .write_all(buf)
-        .await
-        .tap_err(|err| error!(?err, ?conn.dir, "Couldn't write"))
-        .with_context(|| format!("Couldn't write to {}", conn.dir.writer()))?;
-    conn.w
-        .flush()
-        .await
-        .tap_err(|err| error!(?err, ?conn.dir, "Couldn't flush writer"))
-        .with_context(|| format!("Couldn't flush writer to {}", conn.dir.writer()))?;
-
-    // Tell the reader we consumed all the data it gave us.
-    {
-        let buf_len = buf.len(); // lifetime hack.
-        conn.r.consume(buf_len);
+    // Note: This part is untested.
+    for num in 0..num_overrides {
+        let name = c2d
+            .take_string()
+            .await
+            .with_context(|| format!("SetOptions->overrides[{}].name", num))?;
+        let value = c2d
+            .take_string()
+            .await
+            .with_context(|| format!("SetOptions->overrides[{}].value", num))?;
+        info!(num, name, value, "SetOptions override");
     }
+
     Ok(())
 }
