@@ -152,6 +152,9 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
                 Op::BuildPaths => do_build_paths(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
+                Op::QueryDerivationOutputMap => {
+                    do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
+                }
 
                 // We don't want to implement obsolete Ops.
                 Op::ObsoleteQueryPathHash
@@ -239,6 +242,8 @@ async fn do_is_valid_path<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
+    debug!("Processing IsValidPath");
+
     let path = c2d.take_string().await.context("Reading 'path'")?;
     debug!(path, "-> Client sent query");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
@@ -396,7 +401,7 @@ async fn do_build_paths<'s>(
 
 #[instrument(skip_all)]
 async fn do_set_options<'s>(
-    state: &State,
+    _state: &State,
     c2d: &mut Stream<'s>,
     _d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -435,12 +440,8 @@ async fn do_set_options<'s>(
         .context("(obsolete) printBuildTrace")?;
     let build_cores = c2d.take_u64_le().await.context("buildCores")?;
     let use_substitutes = c2d.take_u64_le().await.context("useSubstitutes")?;
+    let overrides = c2d.take_string_pairs().await.context("overrides")?;
 
-    let num_overrides = if state.client_proto.1 > 12 {
-        c2d.take_u64_le().await.context("override count")?
-    } else {
-        0
-    };
     debug!(
         keepFailed = keep_failed,
         keepGoing = keep_going,
@@ -451,21 +452,38 @@ async fn do_set_options<'s>(
         verboseBuild = ?verbose_build,
         buildCores = build_cores,
         useSubstitutes = use_substitutes,
+        ?overrides,
         "SetOptions"
     );
 
-    // Note: This part is untested.
-    for i in 0..num_overrides {
-        let name = c2d
-            .take_string()
-            .await
-            .with_context(|| format!("overrides[{}].name", i))?;
-        let value = c2d
-            .take_string()
-            .await
-            .with_context(|| format!("overrides[{}].value", i))?;
-        debug!(i, name, value, "SetOptions override");
-    }
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_query_derivation_output_map<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    debug!("Processing QueryDerivationOutputMap");
+
+    c2d.take_string()
+        .await
+        .tap_ok(|path| debug!(path, "-> Client sent query"))
+        .context("Reading 'path'")?;
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Running Interjections")?;
+
+    d2c.take_string_pairs()
+        .await
+        .tap_ok(|pis| {
+            for (out, path) in pis.iter() {
+                debug!(out, path, "<- Daemon sent PathInfo");
+            }
+        })
+        .context("Couldn't read StorePaths")?;
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
     Ok(())
 }

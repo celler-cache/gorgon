@@ -112,6 +112,22 @@ impl<'s> Stream<'s> {
         Ok(strings)
     }
 
+    pub async fn take_string_pairs(&mut self) -> Result<Vec<(String, String)>> {
+        let count = self.take_u64_le().await.context("Couldn't read count")? as usize;
+        let mut pairs = Vec::with_capacity(count);
+        for i in 0..count {
+            pairs.push((
+                self.take_string()
+                    .await
+                    .with_context(|| format!("Couldn't read pairs[{}].0", i))?,
+                self.take_string()
+                    .await
+                    .with_context(|| format!("Couldn't read pairs[{}].0", i))?,
+            ));
+        }
+        Ok(pairs)
+    }
+
     pub async fn take_log_fields(&mut self) -> Result<Vec<LogField>> {
         let count = self.take_u64_le().await.context("Couldn't read count")? as usize;
         let mut fields = Vec::with_capacity(count);
