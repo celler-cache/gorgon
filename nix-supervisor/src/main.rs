@@ -148,6 +148,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
             trace!("Client ready; reading Op...");
             let op = c2d.take_op().await.context("Couldn't read Op")?;
             match op {
+                Op::IsValidPath => do_is_valid_path(&state, &mut c2d, &mut d2c).await,
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
 
@@ -194,6 +195,25 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
     d2c.flush()
         .await
         .context("Couldn't flush writer after interjections")?;
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_is_valid_path<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent query");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Running Interjections")?;
+
+    let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
+    debug!(is_valid, "<- Daemon replied");
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
     Ok(())
 }
 
