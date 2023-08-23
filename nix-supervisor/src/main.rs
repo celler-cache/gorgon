@@ -246,32 +246,15 @@ async fn do_add_to_store<'s>(
             total_len += len;
             total_num += 1;
 
-            // TODO: We don't actually care about the contents of the files being copied.
-            //
-            // We can optimize this whole bit (and the silly small/big chunk distinction)
-            // away by just filling up the reader's buffer and dumping `len` bytes right
-            // into the writer.
-            match len {
-                ..=8192 => {
-                    trace!(num, len, "  -> Copying small chunk...");
-                    let mut buf = [0u8; 8192];
-                    c2d.take_len_buf(&mut buf, len)
-                        .await
-                        .with_context(|| format!("Copying chunks[{}]", num))?;
-                }
-                _ => {
-                    trace!(num, len, "  -> Copying big chunk...");
-                    let mut buf = vec![0u8; len];
-                    c2d.take_len_buf(&mut buf, len)
-                        .await
-                        .with_context(|| format!("Copying chunks[{}]", num))?;
-                }
-            }
+            trace!(num, len, "  -> Copying chunk...");
+            c2d.copy(len)
+                .await
+                .with_context(|| format!("Copying chunks[{}]", num))?;
         }
         debug!(
             len = total_len,
             chunks = total_num,
-            "  -> Client sent file contents"
+            "-> Client sent file contents"
         );
         c2d.flush()
             .await

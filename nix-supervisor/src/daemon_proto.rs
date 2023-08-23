@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tap::TapFallible;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::unix::{ReadHalf, WriteHalf},
 };
 use tracing::{debug, instrument};
@@ -43,6 +43,22 @@ impl<'s> Stream<'s> {
     /// Takes a boolean from the stream, encoded as u64, >0 is true.
     pub async fn take_bool(&mut self) -> Result<bool> {
         Ok(self.take_u64_le().await? > 0)
+    }
+
+    /// Copies exactly `len` bytes from the reader to the writer, ignoring the contents.
+    pub async fn copy(&mut self, len: usize) -> Result<usize> {
+        let mut copied = 0;
+        while copied < len {
+            self.r.fill_buf().await?;
+            let mut buf = self.r.buffer();
+            if buf.len() > len - copied {
+                buf = &buf[..len - copied];
+            }
+            self.w.write_all(buf).await?;
+            copied += buf.len();
+            self.r.consume(buf.len());
+        }
+        Ok(copied)
     }
 
     /// Takes exactly `len` bytes from the stream, and stores them in `buf`.
