@@ -185,7 +185,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
             .context("Couldn't read interjection")?;
         match inter {
             Interjection::StderrLast => {
-                debug!("End of queued stderr");
+                trace!("End of queued stderr");
                 break;
             }
             _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
