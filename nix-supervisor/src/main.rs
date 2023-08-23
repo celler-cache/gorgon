@@ -55,7 +55,18 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&args.sock)
         .tap_err(|err| error!(?err, ?args.sock, "Couldn't bind to socket"))
         .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?;
+    info!(
+        path = ?listener
+            .local_addr()?
+            .as_pathname()
+            .ok_or_else(|| anyhow!("socket is unnamed; this should be impossible"))?
+            .canonicalize()?
+            .to_string_lossy(),
+        "Running!"
+    );
+
     loop {
+        debug!("Waiting for a connection...");
         match listener.accept().await {
             Ok((cstream, addr)) => {
                 info!(?addr, "Client connected");
@@ -130,21 +141,17 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 
         if dir == Direction::DaemonToClient {
             trace!("Daemon ready; reading interjection...");
-            let inter = d2c
-                .take_interjection()
+            interjections(&mut d2c)
                 .await
-                .context("Couldn't read interjection")?;
-            do_interjection(&mut d2c, inter)
-                .await
-                .context("Couldn't process interjection")?;
-            d2c.flush()
-                .await
-                .context("Couldn't flush writer after interjection")?;
+                .context("Couldn't process interjections")?;
         } else {
             trace!("Client ready; reading Op...");
             let op = c2d.take_op().await.context("Couldn't read Op")?;
             match op {
+                Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
+
+                // We don't want to implement obsolete Ops.
                 Op::ObsoleteQueryPathHash
                 | Op::ObsoleteQueryReferences
                 | Op::ObsoleteAddTextToStore
@@ -155,6 +162,8 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 | Op::ObsoleteQueryDerivationOutputNames => {
                     Err(anyhow!("Obsolete Op received: {:?}", op))
                 }
+
+                // Oops, we haven't implemented this yet.
                 _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
             }
             .tap_err(|err| error!(?err, ?op, "Couldn't process Op"))
@@ -166,13 +175,153 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
     }
 }
 
+/// Process a set of interjections (eg. log lines) sent from the daemon.
 #[instrument(skip_all)]
-async fn do_interjection<'s>(_d2c: &mut Stream<'s>, inter: Interjection) -> Result<()> {
-    match inter {
-        Interjection::StderrLast => debug!("End of queued stderr"),
-        _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
-    };
+async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
+    loop {
+        let inter = d2c
+            .take_interjection()
+            .await
+            .context("Couldn't read interjection")?;
+        match inter {
+            Interjection::StderrLast => {
+                debug!("End of queued stderr");
+                break;
+            }
+            _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
+        }
+    }
+    d2c.flush()
+        .await
+        .context("Couldn't flush writer after interjections")?;
     Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_add_to_store<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    if state.client_proto.1 >= 25 {
+        debug!("Processing AddToStore (v25)");
+        let name = c2d.take_string().await.context("Reading 'name'")?;
+        let cam_str = c2d.take_string().await.context("Reading 'camStr'")?;
+        let refs = c2d.take_strings().await.context("Reading 'refs'")?;
+        let repair = c2d.take_bool().await.context("Reading 'repair'")?;
+        debug!(name, cam_str, ?refs, repair, "-> Client sent AddToStore");
+
+        // Chunking used by a FramedSource/FramedSink on the nix side.
+        let (mut total_num, mut total_len) = (0, 0);
+        for num in 0.. {
+            let len: usize = c2d
+                .take_u64_le()
+                .await
+                .map(|v| v as usize)
+                .with_context(|| format!("Reading chunks[{}] length", num))?;
+            if len == 0 {
+                trace!(num, "-> End of chunked transfer");
+                break;
+            }
+            total_len += len;
+            total_num += 1;
+
+            // TODO: We don't actually care about the contents of the files being copied.
+            //
+            // We can optimize this whole bit (and the silly small/big chunk distinction)
+            // away by just filling up the reader's buffer and dumping `len` bytes right
+            // into the writer.
+            match len {
+                ..=8192 => {
+                    trace!(num, len, "  -> Copying small chunk...");
+                    let mut buf = [0u8; 8192];
+                    c2d.take_len_buf(&mut buf, len)
+                        .await
+                        .with_context(|| format!("Copying chunks[{}]", num))?;
+                }
+                _ => {
+                    trace!(num, len, "  -> Copying big chunk...");
+                    let mut buf = vec![0u8; len];
+                    c2d.take_len_buf(&mut buf, len)
+                        .await
+                        .with_context(|| format!("Copying chunks[{}]", num))?;
+                }
+            }
+        }
+        debug!(
+            len = total_len,
+            chunks = total_num,
+            "  -> Client sent file contents"
+        );
+        c2d.flush()
+            .await
+            .context("Flushing Client-to-Daemon Writer")?;
+
+        // Process logs from the daemon.
+        interjections(d2c)
+            .await
+            .context("Couldn't process interjections")?;
+
+        // PathInfo
+        let path = d2c.take_string().await.context("Reading PathInfo->path")?;
+        let deriver = d2c
+            .take_string()
+            .await
+            .context("Reading PathInfo->deriver")?;
+        let nar_hash = d2c
+            .take_string()
+            .await
+            .context("Reading PathInfo->narHash")?;
+        let refs = d2c
+            .take_strings()
+            .await
+            .context("Reading PathInfo->references")?;
+        let reg_time = d2c
+            .take_u64_le()
+            .await
+            .context("Reading PathInfo->registrationTime")?;
+        let nar_size = d2c
+            .take_u64_le()
+            .await
+            .context("Reading PathInfo->narSize")?;
+
+        let ultimate = if state.client_proto.1 >= 16 {
+            d2c.take_bool()
+                .await
+                .context("Reading PathInfo->ultimate")?
+        } else {
+            false
+        };
+        let sigs = if state.client_proto.1 >= 16 {
+            d2c.take_strings().await.context("Reading PathInfo->sigs")?
+        } else {
+            vec![]
+        };
+        let ca = if state.client_proto.1 >= 16 {
+            d2c.take_string().await.context("Reading PathInfo->ca")?
+        } else {
+            "".into()
+        };
+        debug!(
+            path,
+            deriver,
+            nar_hash,
+            ?refs,
+            reg_time,
+            nar_size,
+            ultimate,
+            ?sigs,
+            ?ca,
+            "<- Daemon sent PathInfo"
+        );
+        d2c.flush()
+            .await
+            .context("Flushing Daemon-to-Client Writer")?;
+
+        Ok(())
+    } else {
+        bail!("AddToStore is only implemented for protocol version >= 25");
+    }
 }
 
 #[instrument(skip_all)]
@@ -248,7 +397,7 @@ async fn do_set_options<'s>(
     } else {
         0
     };
-    info!(
+    debug!(
         keepFailed = keep_failed,
         keepGoing = keep_going,
         tryFallback = try_fallback,
@@ -262,16 +411,16 @@ async fn do_set_options<'s>(
     );
 
     // Note: This part is untested.
-    for num in 0..num_overrides {
+    for i in 0..num_overrides {
         let name = c2d
             .take_string()
             .await
-            .with_context(|| format!("SetOptions->overrides[{}].name", num))?;
+            .with_context(|| format!("overrides[{}].name", i))?;
         let value = c2d
             .take_string()
             .await
-            .with_context(|| format!("SetOptions->overrides[{}].value", num))?;
-        info!(num, name, value, "SetOptions override");
+            .with_context(|| format!("overrides[{}].value", i))?;
+        debug!(i, name, value, "SetOptions override");
     }
 
     Ok(())

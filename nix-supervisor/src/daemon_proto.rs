@@ -28,23 +28,72 @@ pub struct Stream<'s> {
 }
 
 impl<'s> Stream<'s> {
+    /// Flushes the underlying writer.
     pub async fn flush(&mut self) -> Result<()> {
         Ok(self.w.flush().await?)
     }
 
+    /// Takes a u64 from the stream, little endian.
     pub async fn take_u64_le(&mut self) -> Result<u64> {
         let v = self.r.read_u64_le().await?;
         self.w.write_u64_le(v).await?;
         Ok(v)
     }
 
+    /// Takes a boolean from the stream, encoded as u64, >0 is true.
+    pub async fn take_bool(&mut self) -> Result<bool> {
+        Ok(self.take_u64_le().await? > 0)
+    }
+
+    /// Takes exactly `len` bytes from the stream, and stores them in `buf`.
+    /// It's up to the caller to ensure that `buf` can hold at least `len`.
+    pub async fn take_len_buf<'a>(&mut self, buf: &'a mut [u8], len: usize) -> Result<&'a [u8]> {
+        self.r.read_exact(&mut buf[..len]).await?;
+        self.w.write_all(&buf[..len]).await?;
+        Ok(&buf[..len])
+    }
+
+    /// Takes a string from the stream. Strings are prefixed with a u64 length, but the
+    /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
+    /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
     pub async fn take_string(&mut self) -> Result<String> {
         let len = self.take_u64_le().await.context("Couldn't read length")? as usize;
         let padded_len = len + if len % 8 > 0 { 8 - (len % 8) } else { 0 };
-        let mut buf = [0u8; 1024];
-        self.r.read_exact(&mut buf[..padded_len]).await?;
-        self.w.write_all(&buf[..padded_len]).await?;
-        Ok(String::from_utf8_lossy(&buf[..len]).to_string())
+        if padded_len < 1024 {
+            let mut buf = [0u8; 1024];
+            self.take_len_buf(&mut buf, padded_len)
+                .await
+                .context("Couldn't read short string")?;
+            Ok(String::from_utf8_lossy(&buf[..len]).to_string())
+        } else {
+            let mut buf = vec![0u8; padded_len];
+            self.take_len_buf(&mut buf, padded_len)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Couldn't read string (length {}, padded to {})",
+                        len, padded_len
+                    )
+                })?;
+            Ok(String::from_utf8_lossy(&buf[..len]).to_string())
+        }
+    }
+
+    /// Takes a list of strings from the stream - a u64 count followed by that many
+    /// strings using the normal `take_string()` encoding.
+    ///
+    /// TODO: This should be a proper Stream; the same encoding is used for Sets.
+    pub async fn take_strings(&mut self) -> Result<Vec<String>> {
+        let count = self.take_u64_le().await.context("Couldn't read count")? as usize;
+        let mut strings = Vec::with_capacity(count);
+        for i in 0..count {
+            strings.push(
+                self.take_string()
+                    .await
+                    .with_context(|| format!("Couldn't read strings[{}]", i))?,
+            );
+        }
+        Ok(strings)
     }
 
     pub async fn take_op(&mut self) -> Result<Op> {
