@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use anyhow::{anyhow, bail, Context, Result};
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use tap::TapFallible;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
@@ -112,11 +112,41 @@ impl<'s> Stream<'s> {
         Ok(strings)
     }
 
+    pub async fn take_log_fields(&mut self) -> Result<Vec<LogField>> {
+        let count = self.take_u64_le().await.context("Couldn't read count")? as usize;
+        let mut fields = Vec::with_capacity(count);
+        for i in 0..count {
+            let kind: LogFieldType = self
+                .take_u64_le()
+                .await
+                .with_context(|| format!("Couldn't read type for fields[{}]", i))?
+                .try_into()
+                .with_context(|| format!("Invalid type for fields[{}]", i))?;
+            fields.push(match kind {
+                LogFieldType::Int => LogField::Int(self.take_u64_le().await?),
+                LogFieldType::String => LogField::String(self.take_string().await?),
+            });
+        }
+        Ok(fields)
+    }
+
     pub async fn take_op(&mut self) -> Result<Op> {
         Ok(self.take_u64_le().await?.try_into()?)
     }
 
     pub async fn take_interjection(&mut self) -> Result<Interjection> {
+        Ok(self.take_u64_le().await?.try_into()?)
+    }
+
+    pub async fn take_verbosity(&mut self) -> Result<Verbosity> {
+        Ok(self.take_u64_le().await?.try_into()?)
+    }
+
+    pub async fn take_activity_type(&mut self) -> Result<ActivityType> {
+        Ok(self.take_u64_le().await?.try_into()?)
+    }
+
+    pub async fn take_result_type(&mut self) -> Result<ResultType> {
         Ok(self.take_u64_le().await?.try_into()?)
     }
 }
@@ -183,6 +213,65 @@ pub enum Interjection {
     StderrStartActivity = 0x53545254,
     StderrStopActivity = 0x53544f50,
     StderrResult = 0x52534c54,
+}
+
+#[derive(Debug, FromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum Verbosity {
+    Error = 0,
+    Warn = 1,
+    Notice = 2,
+    Info = 3,
+    Talkative = 4,
+    Chatty = 5,
+    Debug = 6,
+    Vomit = 7,
+    #[num_enum(catch_all)]
+    Invalid(u64) = u64::MAX,
+}
+
+#[derive(Debug, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum ActivityType {
+    Unknown = 0,
+    CopyPath = 100,
+    FileTransfer = 101,
+    Realise = 102,
+    CopyPaths = 103,
+    Builds = 104,
+    Build = 105,
+    OptimiseStore = 106,
+    VerifyPaths = 107,
+    Substitute = 108,
+    QueryPathInfo = 109,
+    PostBuildHook = 110,
+    BuildWaiting = 111,
+}
+
+#[derive(Debug, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum ResultType {
+    FileLinked = 100,
+    BuildLogLine = 101,
+    UntrustedPath = 102,
+    CorruptedPath = 103,
+    SetPhase = 104,
+    Progress = 105,
+    SetExpected = 106,
+    PostBuildLogLine = 107,
+}
+
+#[derive(Debug, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum LogFieldType {
+    Int = 0,
+    String = 1,
+}
+
+#[derive(Debug)]
+pub enum LogField {
+    Int(u64),
+    String(String),
 }
 
 #[derive(Debug)]

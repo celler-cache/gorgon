@@ -150,6 +150,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
             match op {
                 Op::IsValidPath => do_is_valid_path(&state, &mut c2d, &mut d2c).await,
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
+                Op::BuildPaths => do_build_paths(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
 
                 // We don't want to implement obsolete Ops.
@@ -184,10 +185,44 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
             .take_interjection()
             .await
             .context("Couldn't read interjection")?;
+
         match inter {
             Interjection::StderrLast => {
                 trace!("End of queued stderr");
                 break;
+            }
+
+            Interjection::StderrStartActivity => {
+                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
+                let level = d2c.take_verbosity().await.context("Reading Verbosity")?;
+                let kind = d2c
+                    .take_activity_type()
+                    .await
+                    .context("Reading ActivityType")?;
+                let s = d2c.take_string().await.context("Reading string")?;
+                let fields = d2c.take_log_fields().await.context("Reading fields")?;
+                let parent_id = d2c.take_u64_le().await.context("Reading Parent ID")?;
+                trace!(
+                    act_id,
+                    ?level,
+                    ?kind,
+                    s,
+                    ?fields,
+                    parent_id,
+                    "Start Activity"
+                );
+            }
+
+            Interjection::StderrStopActivity => {
+                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
+                trace!(?act_id, "Stop Activity");
+            }
+
+            Interjection::StderrResult => {
+                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
+                let kind = d2c.take_result_type().await.context("Reading ResultType")?;
+                let fields = d2c.take_log_fields().await.context("Reading fields")?;
+                trace!(act_id, ?kind, ?fields, "Result");
             }
             _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
         }
@@ -291,17 +326,21 @@ async fn do_add_to_store<'s>(
         let ultimate = if state.client_proto.1 >= 16 {
             d2c.take_bool()
                 .await
-                .context("Reading PathInfo->ultimate")?
+                .context("Reading PathInfo->ultimate [v16]")?
         } else {
             false
         };
         let sigs = if state.client_proto.1 >= 16 {
-            d2c.take_strings().await.context("Reading PathInfo->sigs")?
+            d2c.take_strings()
+                .await
+                .context("Reading PathInfo->sigs [v16]")?
         } else {
             vec![]
         };
         let ca = if state.client_proto.1 >= 16 {
-            d2c.take_string().await.context("Reading PathInfo->ca")?
+            d2c.take_string()
+                .await
+                .context("Reading PathInfo->ca [v16]")?
         } else {
             "".into()
         };
@@ -328,6 +367,34 @@ async fn do_add_to_store<'s>(
 }
 
 #[instrument(skip_all)]
+async fn do_build_paths<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    debug!("Processing BuildPaths");
+
+    let paths = c2d.take_strings().await.context("Reading 'paths'")?;
+    let mode = if state.client_proto.1 >= 15 {
+        Some(c2d.take_u64_le().await.context("Reading 'mode'")?)
+    } else {
+        None
+    };
+    debug!(?paths, ?mode, "-> Client sent BuildPaths");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c)
+        .await
+        .context("Monitoring build (interjections)")?;
+
+    let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
+    debug!(is_valid, "<- Daemon replied");
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
 async fn do_set_options<'s>(
     state: &State,
     c2d: &mut Stream<'s>,
@@ -335,32 +402,10 @@ async fn do_set_options<'s>(
 ) -> Result<()> {
     debug!("Processing SetOptions");
 
-    #[instrument]
-    fn format_verbosity(v: u64) -> &'static str {
-        match v {
-            0 => "Error",
-            1 => "Warn",
-            2 => "Notice",
-            3 => "Info",
-            4 => "Talkative",
-            5 => "Chatty",
-            6 => "Debug",
-            7 => "Vomit",
-            _ => {
-                warn!(v, "Invalid verbosity received");
-                "???"
-            }
-        }
-    }
-
     let keep_failed = c2d.take_u64_le().await.context("keepFailed")?;
     let keep_going = c2d.take_u64_le().await.context("keepGoing")?;
     let try_fallback = c2d.take_u64_le().await.context("tryFallback")?;
-    let verbosity = c2d
-        .take_u64_le()
-        .await
-        .map(format_verbosity)
-        .context("verbosity")?;
+    let verbosity = c2d.take_verbosity().await.context("verbosity")?;
     let max_build_jobs = c2d.take_u64_le().await.context("maxBuildJobs")?;
     let max_silent_time = c2d.take_u64_le().await.context("maxSilentTime")?;
     c2d.take_u64_le()
@@ -371,11 +416,7 @@ async fn do_set_options<'s>(
             }
         })
         .context("(obsolete) useBuildHook")?;
-    let verbose_build = c2d
-        .take_u64_le()
-        .await
-        .map(format_verbosity)
-        .context("verboseBuild")?;
+    let verbose_build = c2d.take_verbosity().await.context("verboseBuild")?;
     c2d.take_u64_le()
         .await
         .tap_ok(|v| {
@@ -404,10 +445,10 @@ async fn do_set_options<'s>(
         keepFailed = keep_failed,
         keepGoing = keep_going,
         tryFallback = try_fallback,
-        verbosity,
+        ?verbosity,
         maxBuildJobs = max_build_jobs,
         maxSilentTime = max_silent_time,
-        verboseBuild = verbose_build,
+        verboseBuild = ?verbose_build,
         buildCores = build_cores,
         useSubstitutes = use_substitutes,
         "SetOptions"
