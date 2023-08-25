@@ -190,6 +190,10 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
             .context("Couldn't read interjection")?;
 
         match inter {
+            Interjection::StderrNext => {
+                let msg = d2c.take_string().await.context("Reading Message")?;
+                trace!(msg, "Next Message");
+            }
             Interjection::StderrLast => {
                 trace!("End of queued stderr");
                 break;
