@@ -10,16 +10,21 @@
           inherit system;
           config.allowAliases = false;
         };
+
+        filteredSrc = import nix/src.nix {
+          inherit (pkgs) lib;
+          src = self;
+        };
       in {
         packages.${system} = {
           nix-web = import ./nix-web {
             inherit pkgs;
-            srcOverride = self;
+            srcOverride = filteredSrc;
           };
 
           nix-supervisor = import ./nix-supervisor {
             inherit pkgs;
-            srcOverride = self;
+            srcOverride = filteredSrc;
           };
         };
 
