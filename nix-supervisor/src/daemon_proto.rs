@@ -220,14 +220,18 @@ pub enum Op {
 #[derive(Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Interjection {
+    /// Log a message to stderr.
     StderrNext = 0x6f6c6d67,
     StderrRead = 0x64617461,
     StderrWrite = 0x64617416,
-    /// End of stderr messages.
+    /// End of interjections, stop processing.
     StderrLast = 0x616c7473,
     StderrError = 0x63787470,
+    /// Activity started.
     StderrStartActivity = 0x53545254,
+    /// Activity ended.
     StderrStopActivity = 0x53544f50,
+    /// Result yielded.
     StderrResult = 0x52534c54,
 }
 
