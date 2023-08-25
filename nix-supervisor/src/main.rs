@@ -152,6 +152,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
                 Op::BuildPaths => do_build_paths(&state, &mut c2d, &mut d2c).await,
                 Op::AddTempRoot => do_add_temp_root(&state, &mut c2d, &mut d2c).await,
+                Op::AddIndirectRoot => do_add_indirect_root(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
                 Op::QueryDerivationOutputMap => {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
@@ -411,6 +412,27 @@ async fn do_add_temp_root<'s>(
 
     let path = c2d.take_string().await.context("Reading 'path'")?;
     debug!(path, "-> Client sent AddTempRoot");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Interjections")?;
+
+    let status = d2c.take_bool().await.context("Reading 'status'")?;
+    debug!(status, "<- Daemon replied");
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_add_indirect_root<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    trace!("Processing AddIndirectRoot");
+
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent AddIndirectRoot");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
     interjections(d2c).await.context("Interjections")?;
