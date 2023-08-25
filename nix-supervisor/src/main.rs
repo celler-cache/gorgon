@@ -155,6 +155,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::QueryDerivationOutputMap => {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
                 }
+                Op::QueryMissing => do_query_missing(&state, &mut c2d, &mut d2c).await,
 
                 // We don't want to implement obsolete Ops.
                 Op::ObsoleteQueryPathHash
@@ -487,6 +488,39 @@ async fn do_query_derivation_output_map<'s>(
             }
         })
         .context("Couldn't read StorePaths")?;
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_query_missing<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    debug!("Processing QueryDerivation");
+
+    let drv_paths = c2d.take_strings().await.context("Reading drv_paths")?;
+    debug!(?drv_paths, "-> Client queried");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Running Interjections")?;
+
+    let will_build = d2c.take_strings().await.context("Reading will_build")?;
+    let will_subst = d2c.take_strings().await.context("Reading will_subst")?;
+    let unknown = d2c.take_strings().await.context("Reading unknown")?;
+
+    let download_size = d2c.take_u64_le().await.context("Reading download_size")?;
+    let nar_size = d2c.take_u64_le().await.context("Reading nar_size")?;
+    debug!(
+        ?will_build,
+        ?will_subst,
+        ?unknown,
+        download_size,
+        nar_size,
+        "<- Daemon replied"
+    );
     d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
     Ok(())
