@@ -165,6 +165,41 @@ impl<'s> Stream<'s> {
     pub async fn take_result_type(&mut self) -> Result<ResultType> {
         Ok(self.take_u64_le().await?.try_into()?)
     }
+
+    pub async fn take_pathinfo(&mut self, state: &State) -> Result<PathInfo> {
+        let deriver = self.take_string().await.context("deriver")?;
+        let nar_hash = self.take_string().await.context("narHash")?;
+        let refs = self.take_strings().await.context("references")?;
+        let reg_time = self.take_u64_le().await.context("registrationTime")?;
+        let nar_size = self.take_u64_le().await.context("narSize")?;
+
+        let ultimate = if state.client_proto.1 >= 16 {
+            self.take_bool().await.context("ultimate [v16]")?
+        } else {
+            false
+        };
+        let sigs = if state.client_proto.1 >= 16 {
+            self.take_strings().await.context("sigs [v16]")?
+        } else {
+            vec![]
+        };
+        let ca = if state.client_proto.1 >= 16 {
+            self.take_string().await.context("ca [v16]")?
+        } else {
+            "".into()
+        };
+
+        Ok(PathInfo {
+            deriver,
+            nar_hash,
+            refs,
+            reg_time,
+            nar_size,
+            ultimate,
+            sigs,
+            ca,
+        })
+    }
 }
 
 /// Operation codes sent by the client to the daemon.
@@ -292,6 +327,18 @@ pub enum LogFieldType {
 pub enum LogField {
     Int(u64),
     String(String),
+}
+
+#[derive(Debug)]
+pub struct PathInfo {
+    pub deriver: String,
+    pub nar_hash: String,
+    pub refs: Vec<String>,
+    pub reg_time: u64,
+    pub nar_size: u64,
+    pub ultimate: bool,
+    pub sigs: Vec<String>,
+    pub ca: String,
 }
 
 #[derive(Debug)]

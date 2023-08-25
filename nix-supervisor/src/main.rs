@@ -163,6 +163,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::AddTempRoot => do_add_temp_root(&state, &mut c2d, &mut d2c).await,
                 Op::AddIndirectRoot => do_add_indirect_root(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
+                Op::QueryPathInfo => do_query_path_info(&state, &mut c2d, &mut d2c).await,
                 Op::QueryDerivationOutputMap => {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
                 }
@@ -319,62 +320,9 @@ async fn do_add_to_store<'s>(
             .await
             .context("Couldn't process interjections")?;
 
-        // PathInfo
-        let path = d2c.take_string().await.context("Reading PathInfo->path")?;
-        let deriver = d2c
-            .take_string()
-            .await
-            .context("Reading PathInfo->deriver")?;
-        let nar_hash = d2c
-            .take_string()
-            .await
-            .context("Reading PathInfo->narHash")?;
-        let refs = d2c
-            .take_strings()
-            .await
-            .context("Reading PathInfo->references")?;
-        let reg_time = d2c
-            .take_u64_le()
-            .await
-            .context("Reading PathInfo->registrationTime")?;
-        let nar_size = d2c
-            .take_u64_le()
-            .await
-            .context("Reading PathInfo->narSize")?;
-
-        let ultimate = if state.client_proto.1 >= 16 {
-            d2c.take_bool()
-                .await
-                .context("Reading PathInfo->ultimate [v16]")?
-        } else {
-            false
-        };
-        let sigs = if state.client_proto.1 >= 16 {
-            d2c.take_strings()
-                .await
-                .context("Reading PathInfo->sigs [v16]")?
-        } else {
-            vec![]
-        };
-        let ca = if state.client_proto.1 >= 16 {
-            d2c.take_string()
-                .await
-                .context("Reading PathInfo->ca [v16]")?
-        } else {
-            "".into()
-        };
-        debug!(
-            path,
-            deriver,
-            nar_hash,
-            ?refs,
-            reg_time,
-            nar_size,
-            ultimate,
-            ?sigs,
-            ?ca,
-            "<- Daemon sent PathInfo"
-        );
+        let path = d2c.take_string().await.context("Reading 'path'")?;
+        let pathinfo = d2c.take_pathinfo(&state).await.context("Reading PathInfo");
+        debug!(path, ?pathinfo, "<- Daemon sent PathInfo");
         d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
         Ok(())
@@ -511,6 +459,36 @@ async fn do_set_options<'s>(
     );
 
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_query_path_info<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    trace!("Processing QueryPathInfo");
+
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent QueryPathInfo");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Running Interjections")?;
+
+    let is_valid = if state.client_proto.1 >= 17 {
+        Some(d2c.take_bool().await.context("Reading 'is_valid'")?)
+    } else {
+        None
+    };
+    let pathinfo = d2c
+        .take_pathinfo(&state)
+        .await
+        .context("Reading 'pathinfo'")?;
+    debug!(?is_valid, ?pathinfo, "<- Daemon replied");
+
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
     Ok(())
 }
