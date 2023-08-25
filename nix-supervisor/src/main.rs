@@ -164,6 +164,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::AddIndirectRoot => do_add_indirect_root(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
                 Op::QueryPathInfo => do_query_path_info(&state, &mut c2d, &mut d2c).await,
+                Op::QueryValidDerivers => do_query_valid_derivers(&state, &mut c2d, &mut d2c).await,
                 Op::QueryDerivationOutputMap => {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
                 }
@@ -488,6 +489,27 @@ async fn do_query_path_info<'s>(
         .context("Reading 'pathinfo'")?;
     debug!(?is_valid, ?pathinfo, "<- Daemon replied");
 
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_query_valid_derivers<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    trace!("Processing QueryValidDerivers");
+
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent QueryValidDerivers");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Running Interjections")?;
+
+    let derivers = d2c.take_strings().await.context("Reading 'derivers'")?;
+    debug!(?derivers, "<- Daemon replied");
     d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
     Ok(())
