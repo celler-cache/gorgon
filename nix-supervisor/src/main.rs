@@ -146,7 +146,16 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 .context("Couldn't process interjections")?;
         } else {
             trace!("Client ready; reading Op...");
-            let op = c2d.take_op().await.context("Couldn't read Op")?;
+            let op = match c2d.take_op().await.context("Couldn't read Op") {
+                Ok(op) => Ok(op),
+                Err(err) => match err.downcast_ref::<std::io::Error>() {
+                    Some(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        info!("Client disconnected");
+                        return Ok(());
+                    }
+                    _ => Err(err),
+                },
+            }?;
             match op {
                 Op::IsValidPath => do_is_valid_path(&state, &mut c2d, &mut d2c).await,
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
