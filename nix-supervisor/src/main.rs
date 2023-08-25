@@ -193,7 +193,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
         match inter {
             Interjection::StderrNext => {
                 let msg = d2c.take_string().await.context("Reading Message")?;
-                trace!(msg, "Next Message");
+                trace!(msg, "Message");
             }
             Interjection::StderrLast => {
                 trace!("End of queued stderr");
@@ -247,10 +247,10 @@ async fn do_is_valid_path<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    debug!("Processing IsValidPath");
+    trace!("Processing IsValidPath");
 
     let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent query");
+    debug!(path, "-> Client sent IsValidPath");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
     interjections(d2c).await.context("Running Interjections")?;
@@ -269,7 +269,7 @@ async fn do_add_to_store<'s>(
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
     if state.client_proto.1 >= 25 {
-        debug!("Processing AddToStore (v25)");
+        trace!("Processing AddToStore (v25)");
         let name = c2d.take_string().await.context("Reading 'name'")?;
         let cam_str = c2d.take_string().await.context("Reading 'camStr'")?;
         let refs = c2d.take_strings().await.context("Reading 'refs'")?;
@@ -301,9 +301,7 @@ async fn do_add_to_store<'s>(
             chunks = total_num,
             "-> Client sent file contents"
         );
-        c2d.flush()
-            .await
-            .context("Flushing Client-to-Daemon Writer")?;
+        c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
         // Process logs from the daemon.
         interjections(d2c)
@@ -366,9 +364,7 @@ async fn do_add_to_store<'s>(
             ?ca,
             "<- Daemon sent PathInfo"
         );
-        d2c.flush()
-            .await
-            .context("Flushing Daemon-to-Client Writer")?;
+        d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
         Ok(())
     } else {
@@ -382,7 +378,7 @@ async fn do_build_paths<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    debug!("Processing BuildPaths");
+    trace!("Processing BuildPaths");
 
     let paths = c2d.take_strings().await.context("Reading 'paths'")?;
     let mode = if state.client_proto.1 >= 15 {
@@ -410,7 +406,7 @@ async fn do_set_options<'s>(
     c2d: &mut Stream<'s>,
     _d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    debug!("Processing SetOptions");
+    trace!("Processing SetOptions");
 
     let keep_failed = c2d.take_u64_le().await.context("keepFailed")?;
     let keep_going = c2d.take_u64_le().await.context("keepGoing")?;
@@ -461,6 +457,8 @@ async fn do_set_options<'s>(
         "SetOptions"
     );
 
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
     Ok(())
 }
 
@@ -470,12 +468,10 @@ async fn do_query_derivation_output_map<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    debug!("Processing QueryDerivationOutputMap");
+    trace!("Processing QueryDerivationOutputMap");
 
-    c2d.take_string()
-        .await
-        .tap_ok(|path| debug!(path, "-> Client sent query"))
-        .context("Reading 'path'")?;
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent QueryDerivationOutputMap");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
     interjections(d2c).await.context("Running Interjections")?;
@@ -499,10 +495,10 @@ async fn do_query_missing<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    debug!("Processing QueryDerivation");
+    trace!("Processing QueryMissing");
 
     let drv_paths = c2d.take_strings().await.context("Reading drv_paths")?;
-    debug!(?drv_paths, "-> Client queried");
+    debug!(?drv_paths, "-> Client sent QueryMissing");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
     interjections(d2c).await.context("Running Interjections")?;
