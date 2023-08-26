@@ -29,6 +29,11 @@
             inherit (self.packages.${system}) nix-web;
           };
 
+          nix-supervisor = import nix-supervisor/tests.nix {
+            inherit pkgs;
+            inherit (self.packages.${system}) nix-supervisor;
+          };
+
           reuse = import nix/reuse.nix {
             inherit pkgs;
             src = self;
