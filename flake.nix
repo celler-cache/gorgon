@@ -11,9 +11,16 @@
           config.allowAliases = false;
         };
       in {
-        packages.${system}.nix-web = import ./nix-web {
-          inherit pkgs;
-          srcOverride = self;
+        packages.${system} = {
+          nix-web = import ./nix-web {
+            inherit pkgs;
+            srcOverride = self;
+          };
+
+          nix-supervisor = import ./nix-supervisor {
+            inherit pkgs;
+            srcOverride = self;
+          };
         };
 
         checks.${system} = {
