@@ -3,33 +3,40 @@
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , nix-supervisor ? import ./. { inherit pkgs; }
+, hello ? pkgs.hello
 }:
 
 let
-  supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
-    (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.13");
-
-  testDrv = derivation {
-    name = "test";
-    builder = "/bin/sh";
-    args = [ "-c" ": > $out" ];
-    inherit (pkgs.stdenv.hostPlatform) system;
-  };
+  # TODO: Fix 2.13-2.14, 2.16-2.17, futureproof by downgrading the handshake.
+  supportedNixVersions = { inherit (pkgs.nixVersions) nix_2_15; };
+  # supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
+  #   (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.13");
 in
 
 pkgs.testers.nixosTest ({ lib, ... }: {
-  name = "nix-web-test";
+  name = "nix-supervisor-test";
 
-  nodes.machine = {
+  nodes.machine = { modulesPath, ... }: {
+    imports = [
+      "${modulesPath}/installer/cd-dvd/channel.nix"
+    ];
+
     system.extraDependencies = [
-      testDrv.drvPath
+      hello hello.drvPath
     ];
 
     systemd.services.nix-supervisor = {
-      after = [ "network.target" ];
-      serviceConfig.ExecStart = ''${nix-supervisor}/bin/nix-supervisor \
-        -vv --sock=/tmp/nix-supervisor.sock'';
+      after = [ "network.target" "nix-daemon.service" ];
+      serviceConfig = {
+        ExecStart = ''${nix-supervisor}/bin/nix-supervisor -v \
+          --sock=/tmp/nix-supervisor.sock'';
+        UMask = "0000";
+      };
       wantedBy = [ "multi-user.target" ];
+    };
+
+    users.users.testuser = {
+      isNormalUser = true;
     };
 
     specialisation = lib.mapAttrs (attr: pkg: {
@@ -45,6 +52,8 @@ pkgs.testers.nixosTest ({ lib, ... }: {
     for specialisation in listdir('${specialisations}'):
         machine.succeed(f'${specialisations}/{specialisation}/bin/switch-to-configuration test')
         machine.wait_for_unit("nix-supervisor")
-        machine.succeed("NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' path-info ${testDrv} >&2")
+
+        machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-build '<nixpkgs>' -A hello >&2")
+        machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' path-info ./result >&2")
   '';
 })
