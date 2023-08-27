@@ -36,14 +36,22 @@ struct Args {
 }
 
 fn init_logging(args: &Args) {
-    tracing_subscriber::fmt()
-        .with_max_level(match 2 + args.verbose - args.quiet {
-            0 => tracing::Level::ERROR,
-            1 => tracing::Level::WARN,
-            2 => tracing::Level::INFO,
-            3 => tracing::Level::DEBUG,
-            4.. => tracing::Level::TRACE,
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::Registry::default()
+        .with(match 2 + args.verbose - args.quiet {
+            0 => tracing_subscriber::filter::LevelFilter::ERROR,
+            1 => tracing_subscriber::filter::LevelFilter::WARN,
+            2 => tracing_subscriber::filter::LevelFilter::INFO,
+            3 => tracing_subscriber::filter::LevelFilter::DEBUG,
+            4.. => tracing_subscriber::filter::LevelFilter::TRACE,
         })
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_journald::layer()
+                .tap_err(|err| debug!(?err, "Couldn't connect to journald"))
+                .ok(),
+        )
         .init();
 }
 

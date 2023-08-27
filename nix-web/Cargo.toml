@@ -28,3 +28,5 @@ sqlx = { version = "0.6.3", features = ["sqlite", "runtime-tokio-rustls"] }
 lazy_static = "1.4.0"
 regex = "1.8.4"
 listenfd = "1.0.1"
+tracing-journald = "0.3.0"
+tap = "1.0.1"
