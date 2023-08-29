@@ -380,27 +380,16 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
         .take_u64_le()
         .await
         .and_then(|proto_raw| {
-            let (proto_major, proto_minor) = (
-                ((proto_raw & 0xFF00) >> 8) as u32,
-                (proto_raw & 0x00FF) as u32,
-            );
+            let (proto_major, proto_minor) = check_version(proto_raw)?;
             debug!(
                 hex = format!("{:04x}", proto_raw),
                 proto_major,
                 proto_minor,
-                "<- Daemon sent protocol version: {}.{:02} ({:04x})",
+                "<- Daemon sent protocol version: {}.{:02} (0x{:04X})",
                 proto_major,
                 proto_minor,
                 proto_raw,
             );
-            if proto_major != 1 || proto_minor != 35 {
-                bail!(
-                    "Unsupported protocol version: {}.{:02} ({:04x})",
-                    proto_major,
-                    proto_minor,
-                    proto_raw
-                );
-            }
             Ok((proto_major, proto_minor))
         })
         .context("Couldn't read protocol version")?;
@@ -411,27 +400,16 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
         .take_u64_le()
         .await
         .and_then(|proto_raw| {
-            let (proto_major, proto_minor) = (
-                ((proto_raw & 0xFF00) >> 8) as u32,
-                (proto_raw & 0x00FF) as u32,
-            );
+            let (proto_major, proto_minor) = check_version(proto_raw)?;
             debug!(
                 hex = format!("{:04x}", proto_raw),
                 proto_major,
                 proto_minor,
-                "-> Client sent its protocol version: {}.{:02} ({:04x})",
+                "-> Client sent its protocol version: {}.{:02} (0x{:04X})",
                 proto_major,
                 proto_minor,
                 proto_raw,
             );
-            if proto_major != 1 || proto_minor != 35 {
-                bail!(
-                    "Unsupported protocol version: {}.{:02} ({:04x})",
-                    proto_major,
-                    proto_minor,
-                    proto_raw
-                );
-            }
             Ok((proto_major, proto_minor))
         })
         .context("Couldn't read client version")?;
@@ -490,4 +468,24 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
         daemon_proto,
         client_proto,
     })
+}
+
+fn parse_version(proto_raw: u64) -> (u32, u32) {
+    (
+        ((proto_raw & 0xFF00) >> 8) as u32,
+        (proto_raw & 0x00FF) as u32,
+    )
+}
+
+fn check_version(proto_raw: u64) -> Result<(u32, u32)> {
+    let (proto_major, proto_minor) = parse_version(proto_raw);
+    if proto_major != 1 || (proto_minor < 34 || proto_minor > 35) {
+        bail!(
+            "Unsupported protocol version: {}.{:02} (0x{:04X})",
+            proto_major,
+            proto_minor,
+            proto_raw
+        );
+    }
+    Ok((proto_major, proto_minor))
 }

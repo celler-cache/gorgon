@@ -7,8 +7,8 @@
 }:
 
 let
-  # TODO: Fix 2.13-2.14, 2.16-2.17, futureproof by downgrading the handshake.
-  supportedNixVersions = { inherit (pkgs.nixVersions) nix_2_15; };
+  # TODO: 2.16-2.17, futureproof by downgrading the handshake.
+  supportedNixVersions = { inherit (pkgs.nixVersions) nix_2_13 nix_2_14 nix_2_15; };
   # supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
   #   (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.13");
 in
