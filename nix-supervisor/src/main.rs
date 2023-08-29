@@ -168,6 +168,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::IsValidPath => do_is_valid_path(&state, &mut c2d, &mut d2c).await,
                 Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
                 Op::BuildPaths => do_build_paths(&state, &mut c2d, &mut d2c).await,
+                Op::EnsurePath => do_ensure_path(&state, &mut c2d, &mut d2c).await,
                 Op::AddTempRoot => do_add_temp_root(&state, &mut c2d, &mut d2c).await,
                 Op::AddIndirectRoot => do_add_indirect_root(&state, &mut c2d, &mut d2c).await,
                 Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
@@ -363,6 +364,27 @@ async fn do_build_paths<'s>(
 
     let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
     debug!(is_valid, "<- Daemon replied");
+    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_ensure_path<'s>(
+    _state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    trace!("Processing EnsurePath");
+
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    debug!(path, "-> Client sent EnsurePath");
+    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+    interjections(d2c).await.context("Interjections")?;
+
+    let status = d2c.take_bool().await.context("Reading 'status'")?;
+    debug!(status, "<- Daemon replied");
     d2c.flush().await.context("Flushing Daemon-to-Client")?;
 
     Ok(())
