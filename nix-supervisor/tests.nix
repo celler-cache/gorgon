@@ -26,7 +26,7 @@ pkgs.testers.nixosTest ({ lib, ... }: {
     systemd.services.nix-supervisor = {
       after = [ "network.target" "nix-daemon.service" ];
       serviceConfig = {
-        ExecStart = ''${nix-supervisor}/bin/nix-supervisor -v \
+        ExecStart = ''${nix-supervisor}/bin/nix-supervisor \
           --sock=/tmp/nix-supervisor.sock'';
         UMask = "0000";
       };
