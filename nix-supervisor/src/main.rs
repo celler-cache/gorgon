@@ -178,6 +178,9 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
                 }
                 Op::QueryMissing => do_query_missing(&state, &mut c2d, &mut d2c).await,
+                Op::BuildPathsWithResults => {
+                    do_build_paths_with_results(&state, &mut c2d, &mut d2c).await
+                }
 
                 // We don't want to implement obsolete Ops.
                 Op::ObsoleteQueryPathHash
@@ -601,6 +604,35 @@ async fn do_query_missing<'s>(
         "<- Daemon replied"
     );
     d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_build_paths_with_results<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    if state.client_proto.1 >= 25 {
+        trace!("Processing BuildPathsWithResults (v34)");
+
+        let paths = c2d.take_strings().await.context("Reading 'paths'")?;
+        let build_mode = c2d.take_u64_le().await.context("Reading 'build_mode'")?;
+        debug!(?paths, build_mode, "-> Client sent BuildPathsWithResults");
+        c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+        interjections(d2c).await.context("Running Interjections")?;
+
+        let results = d2c
+            .take_keyed_build_results()
+            .await
+            .context("Reading 'results'")?;
+        debug!(?results, "<- Daemon replied");
+        d2c.flush().await.context("Flushing Daemon-to-Client")?;
+    } else {
+        bail!("AddToStore is only implemented for protocol version >= 25");
+    }
 
     Ok(())
 }

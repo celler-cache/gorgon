@@ -200,6 +200,46 @@ impl<'s> Stream<'s> {
             ca,
         })
     }
+
+    pub async fn take_keyed_build_results(&mut self) -> Result<Vec<(String, BuildResult)>> {
+        let count = self.take_u64_le().await.context("Reading count")? as usize;
+        let mut results = Vec::with_capacity(count);
+        for i in 0..count {
+            results.push((
+                self.take_string()
+                    .await
+                    .with_context(|| format!("Reading key for results[{}]", i))?,
+                self.take_build_result()
+                    .await
+                    .with_context(|| format!("Reading results[{}]", i))?,
+            ));
+        }
+        Ok(results)
+    }
+
+    pub async fn take_build_result(&mut self) -> Result<BuildResult> {
+        let status = self
+            .take_u64_le()
+            .await
+            .map(|v| v.into())
+            .context("status")?;
+        let error_msg = self.take_string().await.context("error_msg")?;
+        let times_built = self.take_u64_le().await.context("times_built")?;
+        let is_non_deterministic = self.take_bool().await.context("is_non_deterministic")?;
+        let start_time = self.take_u64_le().await.context("start_time")?;
+        let stop_time = self.take_u64_le().await.context("stop_time")?;
+        let built_outputs = self.take_string_pairs().await.context("built_outputs")?;
+
+        Ok(BuildResult {
+            status,
+            error_msg,
+            times_built,
+            is_non_deterministic,
+            start_time,
+            stop_time,
+            built_outputs,
+        })
+    }
 }
 
 /// Operation codes sent by the client to the daemon.
@@ -339,6 +379,42 @@ pub struct PathInfo {
     pub ultimate: bool,
     pub sigs: Vec<String>,
     pub ca: String,
+}
+
+#[derive(Debug, FromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum BuildResultStatus {
+    Built = 0,
+    Substituted,
+    AlreadyValid,
+    PermanentFailure,
+    InputRejected,
+    OutputRejected,
+    TransientFailure,
+    ObsoleteCachedFailure,
+    TimedOut,
+    MiscFailure,
+    DependencyFailed,
+    LogLimitExceeded,
+    NotDeterministic,
+    ResolvesToAlreadyValid,
+    NoSubstituters,
+
+    #[num_enum(catch_all)]
+    Invalid(u64) = u64::MAX,
+}
+
+#[derive(Debug)]
+pub struct BuildResult {
+    pub status: BuildResultStatus,
+    pub error_msg: String,
+    pub times_built: u64,
+    pub is_non_deterministic: bool,
+    /// time_t
+    pub start_time: u64,
+    /// time_t
+    pub stop_time: u64,
+    pub built_outputs: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
