@@ -177,6 +177,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 Op::QueryDerivationOutputMap => {
                     do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
                 }
+                Op::AddToStoreNar => do_add_to_store_nar(&state, &mut c2d, &mut d2c).await,
                 Op::QueryMissing => do_query_missing(&state, &mut c2d, &mut d2c).await,
                 Op::BuildPathsWithResults => {
                     do_build_paths_with_results(&state, &mut c2d, &mut d2c).await
@@ -301,29 +302,23 @@ async fn do_add_to_store<'s>(
         let repair = c2d.take_bool().await.context("Reading 'repair'")?;
         debug!(name, cam_str, ?refs, repair, "-> Client sent AddToStore");
 
-        // Chunking used by a FramedSource/FramedSink on the nix side.
-        let (mut total_num, mut total_len) = (0, 0);
-        for num in 0.. {
-            let len: usize = c2d
-                .take_u64_le()
+        let (mut num, mut total_len) = (0, 0);
+        loop {
+            let len = c2d
+                .copy_frame()
                 .await
-                .map(|v| v as usize)
-                .with_context(|| format!("Reading chunks[{}] length", num))?;
+                .with_context(|| format!("Copying chunks[{}]", num))?;
             if len == 0 {
                 trace!(num, "-> End of chunked transfer");
                 break;
             }
+            trace!(num, len, "-> Copied chunk");
             total_len += len;
-            total_num += 1;
-
-            trace!(num, len, "  -> Copying chunk...");
-            c2d.copy(len)
-                .await
-                .with_context(|| format!("Copying chunks[{}]", num))?;
+            num += 1;
         }
         debug!(
             len = total_len,
-            chunks = total_num,
+            chunks = num,
             "-> Client sent file contents"
         );
         c2d.flush().await.context("Flushing Client-to-Daemon")?;
@@ -571,6 +566,56 @@ async fn do_query_derivation_output_map<'s>(
         })
         .context("Couldn't read StorePaths")?;
     d2c.flush().await.context("Flushing Daemon-to-Client")?;
+
+    Ok(())
+}
+
+#[instrument(skip_all)]
+async fn do_add_to_store_nar<'s>(
+    state: &State,
+    c2d: &mut Stream<'s>,
+    d2c: &mut Stream<'s>,
+) -> Result<()> {
+    trace!("Processing AddToStoreNar");
+
+    let path = c2d.take_string().await.context("Reading 'path'")?;
+    let pinfo = c2d.take_pathinfo(&state).await.context("Reading 'pinfo'")?;
+    let repair = c2d.take_bool().await.context("Reading 'repair'")?;
+    let no_check_sigs = c2d.take_bool().await.context("Reading 'no_check_sigs'")?;
+    debug!(
+        path,
+        ?pinfo,
+        repair,
+        no_check_sigs,
+        "-> Client sent AddToStoreNar"
+    );
+
+    if state.client_proto.1 >= 23 {
+        let (mut num, mut total_len) = (0, 0);
+        loop {
+            let len = c2d
+                .copy_frame()
+                .await
+                .with_context(|| format!("Copying chunks[{}]", num))?;
+            if len == 0 {
+                trace!(num, "-> End of chunked transfer");
+                break;
+            }
+            trace!(num, len, "-> Copied chunk");
+            total_len += len;
+            num += 1;
+        }
+        debug!(
+            len = total_len,
+            chunks = num,
+            "-> Client sent file contents"
+        );
+        c2d.flush().await.context("Flushing Client-to-Daemon")?;
+
+        interjections(d2c).await.context("Running Interjections")?;
+    } else {
+        bail!("AddToStoreNar is only implemented for protocol version >= 23");
+    }
 
     Ok(())
 }

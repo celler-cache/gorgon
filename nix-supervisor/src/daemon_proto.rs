@@ -61,6 +61,21 @@ impl<'s> Stream<'s> {
         Ok(copied)
     }
 
+    /// Copies a (length, data) chunk, as used by nix' FramedSource/FramedSink.
+    pub async fn copy_frame(&mut self) -> Result<usize> {
+        let len: usize = self
+            .take_u64_le()
+            .await
+            .map(|v| v as usize)
+            .context("Reading frame length")?;
+        if len > 0 {
+            self.copy(len)
+                .await
+                .with_context(|| format!("Copying frame ({} bytes)", len))?;
+        }
+        Ok(len)
+    }
+
     /// Takes exactly `len` bytes from the stream, and stores them in `buf`.
     /// It's up to the caller to ensure that `buf` can hold at least `len`.
     pub async fn take_len_buf<'a>(&mut self, buf: &'a mut [u8], len: usize) -> Result<&'a [u8]> {
