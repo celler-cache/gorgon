@@ -149,7 +149,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 
         if dir == Direction::DaemonToClient {
             trace!("Daemon ready; reading interjection...");
-            interjections(&mut d2c)
+            interjections(&mut d2c, &state)
                 .await
                 .context("Couldn't process interjections")?;
         } else {
@@ -209,7 +209,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 
 /// Process a set of interjections (eg. log lines) sent from the daemon.
 #[instrument(skip_all)]
-async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
+async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
     loop {
         let inter = d2c
             .take_interjection()
@@ -224,6 +224,44 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
             Interjection::StderrLast => {
                 trace!("End of queued stderr");
                 break;
+            }
+            Interjection::StderrError => {
+                if state.client_proto.1 >= 26 {
+                    let typ = d2c.take_string().await.context("Reading Error Type")?;
+                    if typ != "Error" {
+                        bail!("STDERR_ERROR received with unknown type: {}", typ);
+                    }
+                    let lvl = d2c.take_verbosity().await.context("Reading Error Level")?;
+                    let name = d2c.take_string().await.context("Reading Error Name")?;
+                    let msg = d2c.take_string().await.context("Reading Error Message")?;
+                    let have_pos = d2c.take_u64_le().await.context("Reading Error have_pos")?;
+                    if have_pos != 0 {
+                        bail!("STDERR_ERROR has invalid have_pos: {}", have_pos);
+                    }
+                    let num_traces = d2c
+                        .take_u64_le()
+                        .await
+                        .context("Reading Error num_traces")?;
+                    let mut traces = Vec::with_capacity(num_traces.try_into().unwrap());
+                    for i in 0..num_traces {
+                        let have_pos = d2c
+                            .take_u64_le()
+                            .await
+                            .with_context(|| format!("Reading Error traces[{}].have_pos", i))?;
+                        if have_pos != 0 {
+                            bail!("STDERR_ERROR has invalid have_pos: {}", have_pos);
+                        }
+                        traces.push(
+                            d2c.take_string()
+                                .await
+                                .with_context(|| format!("Reading Error traces[{}]", i)),
+                        );
+                    }
+
+                    trace!(typ, ?lvl, name, msg, ?traces, "Exception Thrown");
+                } else {
+                    bail!("STDERR_ERROR is only implemented for protocol version >= 25");
+                }
             }
 
             Interjection::StderrStartActivity => {
@@ -269,7 +307,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>) -> Result<()> {
 
 #[instrument(skip_all)]
 async fn do_is_valid_path<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -279,7 +317,7 @@ async fn do_is_valid_path<'s>(
     debug!(path, "-> Client sent IsValidPath");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Running Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
     debug!(is_valid, "<- Daemon replied");
@@ -324,7 +362,7 @@ async fn do_add_to_store<'s>(
         c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
         // Process logs from the daemon.
-        interjections(d2c)
+        interjections(d2c, state)
             .await
             .context("Couldn't process interjections")?;
 
@@ -356,7 +394,7 @@ async fn do_build_paths<'s>(
     debug!(?paths, ?mode, "-> Client sent BuildPaths");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c)
+    interjections(d2c, state)
         .await
         .context("Monitoring build (interjections)")?;
 
@@ -369,7 +407,7 @@ async fn do_build_paths<'s>(
 
 #[instrument(skip_all)]
 async fn do_ensure_path<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -379,7 +417,7 @@ async fn do_ensure_path<'s>(
     debug!(path, "-> Client sent EnsurePath");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let status = d2c.take_bool().await.context("Reading 'status'")?;
     debug!(status, "<- Daemon replied");
@@ -390,7 +428,7 @@ async fn do_ensure_path<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_temp_root<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -400,7 +438,7 @@ async fn do_add_temp_root<'s>(
     debug!(path, "-> Client sent AddTempRoot");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let status = d2c.take_bool().await.context("Reading 'status'")?;
     debug!(status, "<- Daemon replied");
@@ -411,7 +449,7 @@ async fn do_add_temp_root<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_indirect_root<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -421,7 +459,7 @@ async fn do_add_indirect_root<'s>(
     debug!(path, "-> Client sent AddIndirectRoot");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let status = d2c.take_bool().await.context("Reading 'status'")?;
     debug!(status, "<- Daemon replied");
@@ -504,7 +542,7 @@ async fn do_query_path_info<'s>(
     debug!(path, "-> Client sent QueryPathInfo");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Running Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let is_valid = if state.client_proto.1 >= 17 {
         Some(d2c.take_bool().await.context("Reading 'is_valid'")?)
@@ -524,7 +562,7 @@ async fn do_query_path_info<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_valid_derivers<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -534,7 +572,7 @@ async fn do_query_valid_derivers<'s>(
     debug!(path, "-> Client sent QueryValidDerivers");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Running Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let derivers = d2c.take_strings().await.context("Reading 'derivers'")?;
     debug!(?derivers, "<- Daemon replied");
@@ -545,7 +583,7 @@ async fn do_query_valid_derivers<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_derivation_output_map<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -555,7 +593,7 @@ async fn do_query_derivation_output_map<'s>(
     debug!(path, "-> Client sent QueryDerivationOutputMap");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Running Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     d2c.take_string_pairs()
         .await
@@ -612,7 +650,7 @@ async fn do_add_to_store_nar<'s>(
         );
         c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-        interjections(d2c).await.context("Running Interjections")?;
+        interjections(d2c, state).await.context("Interjections")?;
     } else {
         bail!("AddToStoreNar is only implemented for protocol version >= 23");
     }
@@ -622,7 +660,7 @@ async fn do_add_to_store_nar<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_missing<'s>(
-    _state: &State,
+    state: &State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -632,7 +670,7 @@ async fn do_query_missing<'s>(
     debug!(?drv_paths, "-> Client sent QueryMissing");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-    interjections(d2c).await.context("Running Interjections")?;
+    interjections(d2c, state).await.context("Interjections")?;
 
     let will_build = d2c.take_strings().await.context("Reading will_build")?;
     let will_subst = d2c.take_strings().await.context("Reading will_subst")?;
@@ -667,7 +705,7 @@ async fn do_build_paths_with_results<'s>(
         debug!(?paths, build_mode, "-> Client sent BuildPathsWithResults");
         c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
-        interjections(d2c).await.context("Running Interjections")?;
+        interjections(d2c, state).await.context("Interjections")?;
 
         let results = d2c
             .take_keyed_build_results()
