@@ -33,16 +33,34 @@ impl<'s> Stream<'s> {
         Ok(self.w.flush().await?)
     }
 
-    /// Takes a u64 from the stream, little endian.
+    /// Takes a u64 from the stream (little endian).
     pub async fn take_u64_le(&mut self) -> Result<u64> {
         let v = self.r.read_u64_le().await?;
         self.w.write_u64_le(v).await?;
         Ok(v)
     }
 
+    /// Takes a u64 from the stream (little endian), if the protocol minor version is >= `minor`.
+    pub async fn take_u64_le_if(&mut self, cond: bool) -> Result<Option<u64>> {
+        if cond {
+            Ok(Some(self.take_u64_le().await?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Takes a boolean from the stream, encoded as u64, >0 is true.
     pub async fn take_bool(&mut self) -> Result<bool> {
         Ok(self.take_u64_le().await? > 0)
+    }
+
+    /// Takes a boolean from the stream, if the protocol minor version is >= `minor`.
+    pub async fn take_bool_if(&mut self, cond: bool) -> Result<Option<bool>> {
+        if cond {
+            Ok(Some(self.take_bool().await?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Copies exactly `len` bytes from the reader to the writer, ignoring the contents.
@@ -110,6 +128,15 @@ impl<'s> Stream<'s> {
         }
     }
 
+    /// Takes a string from the stream, if the protocol minor version >= `minor`.
+    pub async fn take_string_if(&mut self, cond: bool) -> Result<Option<String>> {
+        if cond {
+            Ok(Some(self.take_string().await?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Takes a list of strings from the stream - a u64 count followed by that many
     /// strings using the normal `take_string()` encoding.
     ///
@@ -125,6 +152,15 @@ impl<'s> Stream<'s> {
             );
         }
         Ok(strings)
+    }
+
+    /// Takes a list of strings from the stream, if the protocol minor version >= `minor`.
+    pub async fn take_strings_if(&mut self, cond: bool) -> Result<Option<Vec<String>>> {
+        if cond {
+            Ok(Some(self.take_strings().await?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn take_string_pairs(&mut self) -> Result<Vec<(String, String)>> {
@@ -188,21 +224,18 @@ impl<'s> Stream<'s> {
         let reg_time = self.take_u64_le().await.context("registrationTime")?;
         let nar_size = self.take_u64_le().await.context("narSize")?;
 
-        let ultimate = if state.client_proto.1 >= 16 {
-            self.take_bool().await.context("ultimate [v16]")?
-        } else {
-            false
-        };
-        let sigs = if state.client_proto.1 >= 16 {
-            self.take_strings().await.context("sigs [v16]")?
-        } else {
-            vec![]
-        };
-        let ca = if state.client_proto.1 >= 16 {
-            self.take_string().await.context("ca [v16]")?
-        } else {
-            "".into()
-        };
+        let ultimate = self
+            .take_bool_if(state.since(16))
+            .await
+            .context("ultimate [v16]")?;
+        let sigs = self
+            .take_strings_if(state.since(16))
+            .await
+            .context("sigs [v16]")?;
+        let ca = self
+            .take_string_if(state.since(16))
+            .await
+            .context("ca [v16]")?;
 
         Ok(PathInfo {
             deriver,
@@ -391,9 +424,9 @@ pub struct PathInfo {
     pub refs: Vec<String>,
     pub reg_time: u64,
     pub nar_size: u64,
-    pub ultimate: bool,
-    pub sigs: Vec<String>,
-    pub ca: String,
+    pub ultimate: Option<bool>,
+    pub sigs: Option<Vec<String>>,
+    pub ca: Option<String>,
 }
 
 #[derive(Debug, FromPrimitive, IntoPrimitive)]
@@ -437,6 +470,13 @@ pub struct State {
     pub nix_version: String,
     pub daemon_proto: (u32, u32),
     pub client_proto: (u32, u32),
+}
+
+impl State {
+    /// Returns whether the protocol minor version is newer than `minor`.
+    pub fn since(&self, minor: u32) -> bool {
+        self.client_proto.1 >= minor
+    }
 }
 
 #[instrument(skip_all)]

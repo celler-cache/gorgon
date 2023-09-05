@@ -232,7 +232,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 break;
             }
             Interjection::StderrError => {
-                if state.client_proto.1 >= 26 {
+                if state.since(26) {
                     let typ = d2c.take_string().await.context("Reading Error Type")?;
                     if typ != "Error" {
                         bail!("STDERR_ERROR received with unknown type: {}", typ);
@@ -338,7 +338,7 @@ async fn do_add_to_store<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    if state.client_proto.1 >= 25 {
+    if state.since(25) {
         trace!("Processing AddToStore (v25)");
         let name = c2d.take_string().await.context("Reading 'name'")?;
         let cam_str = c2d.take_string().await.context("Reading 'camStr'")?;
@@ -392,11 +392,10 @@ async fn do_build_paths<'s>(
     trace!("Processing BuildPaths");
 
     let paths = c2d.take_strings().await.context("Reading 'paths'")?;
-    let mode = if state.client_proto.1 >= 15 {
-        Some(c2d.take_u64_le().await.context("Reading 'mode'")?)
-    } else {
-        None
-    };
+    let mode = c2d
+        .take_u64_le_if(state.since(15))
+        .await
+        .context("Reading 'mode'")?;
     debug!(?paths, ?mode, "-> Client sent BuildPaths");
     c2d.flush().await.context("Flushing Client-to-Daemon")?;
 
@@ -550,11 +549,10 @@ async fn do_query_path_info<'s>(
 
     interjections(d2c, state).await.context("Interjections")?;
 
-    let is_valid = if state.client_proto.1 >= 17 {
-        Some(d2c.take_bool().await.context("Reading 'is_valid'")?)
-    } else {
-        None
-    };
+    let is_valid = d2c
+        .take_bool_if(state.since(17))
+        .await
+        .context("Reading 'is_valid'")?;
     let pathinfo = d2c
         .take_pathinfo(&state)
         .await
@@ -634,7 +632,7 @@ async fn do_add_to_store_nar<'s>(
         "-> Client sent AddToStoreNar"
     );
 
-    if state.client_proto.1 >= 23 {
+    if state.since(23) {
         let (mut num, mut total_len) = (0, 0);
         loop {
             let len = c2d
@@ -703,7 +701,7 @@ async fn do_build_paths_with_results<'s>(
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
-    if state.client_proto.1 >= 25 {
+    if state.since(25) {
         trace!("Processing BuildPathsWithResults (v34)");
 
         let paths = c2d.take_strings().await.context("Reading 'paths'")?;
