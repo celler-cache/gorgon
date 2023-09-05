@@ -255,7 +255,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                             .await
                             .with_context(|| format!("Reading Error traces[{}].have_pos", i))?;
                         if have_pos != 0 {
-                            bail!("STDERR_ERROR has invalid have_pos: {}", have_pos);
+                            bail!("STDERR_ERROR invalid traces[{}].have_pos: {}", i, have_pos);
                         }
                         traces.push(
                             d2c.take_string()
@@ -265,6 +265,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                     }
 
                     trace!(typ, ?lvl, name, msg, ?traces, "Exception Thrown");
+                    return Err(anyhow!("{}", msg).context("Daemon sent Error"));
                 } else {
                     bail!("STDERR_ERROR is only implemented for protocol version >= 25");
                 }
