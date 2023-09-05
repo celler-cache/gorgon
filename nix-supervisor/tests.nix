@@ -60,7 +60,6 @@ pkgs.testers.nixosTest ({ lib, ... }: {
 
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' show-derivation -f '<nixpkgs>' hello >&2")
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' path-info -f '<nixpkgs>' hello >&2")
-        # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' why-depends -f '<nixpkgs>' hello hello >&2")
 
         # REPL commands.
         machine.succeed("echo 'hello' | sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' repl -f '<nixpkgs>' >&2")
@@ -69,7 +68,10 @@ pkgs.testers.nixosTest ({ lib, ... }: {
 
         # Shells.
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' shell -f '<nixpkgs>' hello -c hello >&2")
-        # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' develop -f '<nixpkgs>' hello -c hello >&2")
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-shell -p hello --command 'hello' >&2")
+
+        # For some reason, these hang forever when ran in test cases.
+        # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' why-depends -f '<nixpkgs>' hello hello >&2")
+        # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' develop -f '<nixpkgs>' hello -c hello >&2")
   '';
 })
