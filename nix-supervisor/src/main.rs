@@ -121,6 +121,12 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
         .await
         .tap_err(|err| error!(?err, "Handshake failed"))
         .context("Handshake failed")?;
+    info!(
+        nix_version = state.nix_version,
+        client_proto = format!("{}.{}", state.client_proto.0, state.client_proto.1),
+        daemon_proto = format!("{}.{}", state.daemon_proto.0, state.daemon_proto.1),
+        "Connection Established!"
+    );
 
     // Main loop!
     loop {

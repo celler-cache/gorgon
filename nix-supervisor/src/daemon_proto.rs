@@ -434,6 +434,7 @@ pub struct BuildResult {
 
 #[derive(Debug)]
 pub struct State {
+    pub nix_version: String,
     pub daemon_proto: (u32, u32),
     pub client_proto: (u32, u32),
 }
@@ -533,12 +534,14 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
     c2d.flush().await?;
 
     // The daemon sends the nix version... as a string?
-    if client_proto.1 >= 33 {
+    let nix_version = if client_proto.1 >= 33 {
         d2c.take_string()
             .await
             .tap_ok(|nix_ver| debug!(nix_ver, "<- Daemon sent nix version string"))
-            .context("Couldn't read Nix daemon version")?;
-    }
+            .context("Couldn't read Nix daemon version")?
+    } else {
+        "".into()
+    };
     // And an Option<bool> of whether or not the client is trusted.
     if client_proto.1 >= 35 {
         d2c.take_u64_le()
@@ -556,6 +559,7 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
     c2d.flush().await?;
 
     Ok(State {
+        nix_version,
         daemon_proto,
         client_proto,
     })
