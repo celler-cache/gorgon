@@ -6,7 +6,7 @@ mod daemon_proto;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
-use daemon_proto::{Direction, Interjection, Op, State, Stream};
+use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, State, Stream};
 use std::path::PathBuf;
 use tap::TapFallible;
 use tokio::{
@@ -281,15 +281,36 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 let s = d2c.take_string().await.context("Reading string")?;
                 let fields = d2c.take_log_fields().await.context("Reading fields")?;
                 let parent_id = d2c.take_u64_le().await.context("Reading Parent ID")?;
-                trace!(
-                    act_id,
-                    ?level,
-                    ?kind,
-                    s,
-                    ?fields,
-                    parent_id,
-                    "Start Activity"
-                );
+                match kind {
+                    ActivityType::Build => {
+                        let (name, machine_name, cur_rounds, nr_rounds) = (
+                            fields.get(0).and_then(|v| v.as_string()),
+                            fields.get(1).and_then(|v| v.as_string()),
+                            fields.get(2).and_then(|v| v.as_int()),
+                            fields.get(3).and_then(|v| v.as_int()),
+                        );
+                        trace!(
+                            act_id,
+                            ?level,
+                            s,
+                            name,
+                            machine_name,
+                            cur_rounds,
+                            nr_rounds,
+                            parent_id,
+                            "Start Activity: Build"
+                        );
+                    }
+                    _ => trace!(
+                        act_id,
+                        ?level,
+                        ?kind,
+                        s,
+                        ?fields,
+                        parent_id,
+                        "Start Activity"
+                    ),
+                }
             }
 
             Interjection::StderrStopActivity => {
@@ -301,7 +322,25 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
                 let kind = d2c.take_result_type().await.context("Reading ResultType")?;
                 let fields = d2c.take_log_fields().await.context("Reading fields")?;
-                trace!(act_id, ?kind, ?fields, "Result");
+                match kind {
+                    ResultType::Progress => {
+                        let (done, expected, running, failed) = (
+                            fields.get(0).and_then(|v| v.as_int()),
+                            fields.get(1).and_then(|v| v.as_int()),
+                            fields.get(2).and_then(|v| v.as_int()),
+                            fields.get(3).and_then(|v| v.as_int()),
+                        );
+                        trace!(act_id, done, expected, running, failed, "Result: Progress");
+                    }
+                    ResultType::SetExpected => {
+                        let (state, expected) = (
+                            fields.get(0).and_then(|v| v.as_activity_type()),
+                            fields.get(1).and_then(|v| v.as_int()),
+                        );
+                        trace!(act_id, ?state, expected, "Result: SetExpected");
+                    }
+                    _ => trace!(act_id, ?kind, ?fields, "Result"),
+                }
             }
             _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
         }

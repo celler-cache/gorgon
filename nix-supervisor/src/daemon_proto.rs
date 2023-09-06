@@ -417,6 +417,28 @@ pub enum LogField {
     String(String),
 }
 
+impl LogField {
+    pub fn as_int(&self) -> Option<&u64> {
+        if let Self::Int(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_activity_type(&self) -> Option<ActivityType> {
+        self.as_int().and_then(|v| (*v).try_into().ok())
+    }
+
+    pub fn as_string(&self) -> Option<&String> {
+        if let Self::String(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PathInfo {
     pub deriver: String,
