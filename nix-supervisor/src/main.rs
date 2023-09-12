@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 mod daemon_proto;
+mod entity;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
@@ -217,15 +218,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 /// Process a set of interjections (eg. log lines) sent from the daemon.
 #[instrument(skip_all)]
 async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
-    #[derive(Debug, Default)]
-    struct Build {
-        pub name: String,
-        pub machine_name: String,
-
-        pub start: DateTime<Utc>,
-        pub start_phase: Vec<(String, DateTime<Utc>)>,
-        pub end: Option<DateTime<Utc>>,
-    }
+    use entity::build::{Model as Build, Phase};
     let mut builds = HashMap::<u64, Build>::new();
 
     loop {
@@ -320,7 +313,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                             name: name.cloned().unwrap_or_default(),
                             machine_name: machine_name.cloned().unwrap_or_default(),
                             start: Utc::now(),
-                            ..Build::default()
+                            ..Default::default()
                         };
                         debug!(build.name, build.machine_name, "[{}] Build Started", act_id);
                         builds.insert(act_id, build);
@@ -347,7 +340,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                     build.end = Some(now);
 
                     // Log the final phase too.
-                    if let Some((last_phase, started)) = build.start_phase.last() {
+                    if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
                         debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
                     }
                     debug!(build.name,build.machine_name,t=?(now - build.start), "[{}] Build Finished", act_id);
@@ -369,12 +362,13 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
 
                         if let Some(build) = builds.get_mut(&act_id) {
                             let now = Utc::now();
-                            if let Some((last_phase, started)) = build.start_phase.last() {
-                                debug!(t=?(now-started),"[ ] -> {} finished", last_phase);
+                            if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
+                                debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
                             }
                             build
                                 .start_phase
-                                .push((phase.cloned().unwrap_or_default(), now));
+                                .0
+                                .push(Phase(phase.cloned().unwrap_or_default(), now));
                         }
                     }
                     ResultType::Progress => {
