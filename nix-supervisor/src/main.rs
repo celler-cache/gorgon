@@ -40,12 +40,12 @@ fn init_logging(args: &Args) {
     use tracing_subscriber::prelude::*;
 
     tracing_subscriber::Registry::default()
-        .with(match 2 + args.verbose - args.quiet {
-            0 => tracing_subscriber::filter::LevelFilter::ERROR,
-            1 => tracing_subscriber::filter::LevelFilter::WARN,
-            2 => tracing_subscriber::filter::LevelFilter::INFO,
-            3 => tracing_subscriber::filter::LevelFilter::DEBUG,
-            4.. => tracing_subscriber::filter::LevelFilter::TRACE,
+        .with(match args.verbose as i8 - args.quiet as i8 {
+            ..=-2 => tracing_subscriber::filter::LevelFilter::ERROR,
+            -1 => tracing_subscriber::filter::LevelFilter::WARN,
+            0 => tracing_subscriber::filter::LevelFilter::INFO,
+            1 => tracing_subscriber::filter::LevelFilter::DEBUG,
+            2.. => tracing_subscriber::filter::LevelFilter::TRACE,
         })
         .with(tracing_subscriber::fmt::layer())
         .with(
