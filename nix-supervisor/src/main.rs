@@ -5,9 +5,10 @@
 mod daemon_proto;
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::prelude::*;
 use clap::Parser;
 use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, State, Stream};
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use tap::TapFallible;
 use tokio::{
     io::{BufReader, BufWriter},
@@ -216,6 +217,17 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 /// Process a set of interjections (eg. log lines) sent from the daemon.
 #[instrument(skip_all)]
 async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
+    #[derive(Debug, Default)]
+    struct Build {
+        pub name: String,
+        pub machine_name: String,
+
+        pub start: DateTime<Utc>,
+        pub start_phase: Vec<(String, DateTime<Utc>)>,
+        pub end: Option<DateTime<Utc>>,
+    }
+    let mut builds = HashMap::<u64, Build>::new();
+
     loop {
         let inter = d2c
             .take_interjection()
@@ -283,6 +295,8 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 let parent_id = d2c.take_u64_le().await.context("Reading Parent ID")?;
                 match kind {
                     ActivityType::Build => {
+                        // cur_rounds and nr_rounds aren't used anymore, and the daemon will error
+                        // unless they're both 1. (They were for running a build multiple times.)
                         let (name, machine_name, cur_rounds, nr_rounds) = (
                             fields.get(0).and_then(|v| v.as_string()),
                             fields.get(1).and_then(|v| v.as_string()),
@@ -300,6 +314,16 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                             parent_id,
                             "Start Activity: Build"
                         );
+
+                        // Start tracking build progress.
+                        let build = Build {
+                            name: name.cloned().unwrap_or_default(),
+                            machine_name: machine_name.cloned().unwrap_or_default(),
+                            start: Utc::now(),
+                            ..Build::default()
+                        };
+                        debug!(build.name, build.machine_name, "[{}] Build Started", act_id);
+                        builds.insert(act_id, build);
                     }
                     _ => trace!(
                         act_id,
@@ -316,6 +340,18 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
             Interjection::StderrStopActivity => {
                 let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
                 trace!(?act_id, "Stop Activity");
+
+                // Is this the end of a build we're tracking?
+                if let Some(mut build) = builds.remove(&act_id) {
+                    let now = Utc::now();
+                    build.end = Some(now);
+
+                    // Log the final phase too.
+                    if let Some((last_phase, started)) = build.start_phase.last() {
+                        debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                    }
+                    debug!(build.name,build.machine_name,t=?(now - build.start), "[{}] Build Finished", act_id);
+                }
             }
 
             Interjection::StderrResult => {
@@ -323,6 +359,24 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 let kind = d2c.take_result_type().await.context("Reading ResultType")?;
                 let fields = d2c.take_log_fields().await.context("Reading fields")?;
                 match kind {
+                    ResultType::BuildLogLine => {
+                        let msg = fields.get(0).and_then(|v| v.as_string());
+                        trace!(act_id, msg, "Result: BuildLogLine");
+                    }
+                    ResultType::SetPhase => {
+                        let phase = fields.get(0).and_then(|v| v.as_string());
+                        trace!(act_id, phase, "Result: SetPhase");
+
+                        if let Some(build) = builds.get_mut(&act_id) {
+                            let now = Utc::now();
+                            if let Some((last_phase, started)) = build.start_phase.last() {
+                                debug!(t=?(now-started),"[ ] -> {} finished", last_phase);
+                            }
+                            build
+                                .start_phase
+                                .push((phase.cloned().unwrap_or_default(), now));
+                        }
+                    }
                     ResultType::Progress => {
                         let (done, expected, running, failed) = (
                             fields.get(0).and_then(|v| v.as_int()),
