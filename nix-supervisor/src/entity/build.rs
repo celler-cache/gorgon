@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+//
+// SPDX-License-Identifier: EUPL-1.2
+
 use chrono::prelude::*;
 use chrono::DateTime;
 use sea_orm::{entity::prelude::*, FromJsonQueryResult};
@@ -8,9 +12,11 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key)]
     pub name: String,
+    #[sea_orm(primary_key)]
     pub machine_name: String,
-
+    #[sea_orm(primary_key)]
     pub start: DateTime<Utc>,
+
     pub start_phase: PhaseList,
     pub end: Option<DateTime<Utc>>,
 }

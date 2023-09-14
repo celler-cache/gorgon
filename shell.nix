@@ -8,6 +8,9 @@ pkgs.mkShell {
     # build dependencies
     stdenv # C/C++ compiler and deps for crates with bindings
 
+    # sea-orm-cli
+    pkg-config openssl
+
     # repo tools
     reuse # check license compliance
   ];

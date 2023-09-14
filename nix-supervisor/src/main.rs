@@ -4,11 +4,14 @@
 
 mod daemon_proto;
 mod entity;
+mod migration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
 use clap::Parser;
-use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, State, Stream};
+use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, Stream};
+use sea_orm::{prelude::*, ActiveValue, Database, Set};
+use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tap::TapFallible;
 use tokio::{
@@ -28,6 +31,10 @@ struct Args {
     #[arg(long, short, action=clap::ArgAction::Count)]
     quiet: u8,
 
+    /// Path to the database.
+    #[arg(long, default_value = "nix-supervisor.db")]
+    db_path: PathBuf,
+
     /// Path to the real nix daemon socket.
     #[arg(long, short = 'S', default_value = "/nix/var/nix/daemon-socket/socket")]
     nix_daemon_sock: PathBuf,
@@ -37,6 +44,7 @@ struct Args {
     sock: PathBuf,
 }
 
+#[instrument(skip_all)]
 fn init_logging(args: &Args) {
     use tracing_subscriber::prelude::*;
 
@@ -57,10 +65,35 @@ fn init_logging(args: &Args) {
         .init();
 }
 
+#[instrument(skip_all)]
+async fn init_db(args: &Args) -> Result<Arc<DatabaseConnection>> {
+    use sea_orm_migration::prelude::*;
+
+    debug!(?args.db_path, "Connecting to database...");
+    let mut opt = sea_orm::ConnectOptions::new(format!(
+        "sqlite:{}?mode=rwc",
+        &args.db_path.to_string_lossy()
+    ));
+    opt.sqlx_logging(true)
+        .sqlx_logging_level(tracing::log::LevelFilter::Debug);
+    let db = Database::connect(opt)
+        .await
+        .context("Couldn't connect to database")?;
+
+    debug!("Running database migrations...");
+    migration::Migrator::up(&db, None)
+        .await
+        .context("Running database migrations")?;
+
+    Ok(Arc::new(db))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
+
+    let db = init_db(&args).await?;
 
     let listener = UnixListener::bind(&args.sock)
         .tap_err(|err| error!(?err, ?args.sock, "Couldn't bind to socket"))
@@ -80,15 +113,32 @@ async fn main() -> Result<()> {
         match listener.accept().await {
             Ok((cstream, addr)) => {
                 info!(?addr, "Client connected");
-                run_session(&args, cstream).await?;
+                run_session(&args, db.clone(), cstream).await?;
             }
             Err(err) => error!(?err, "Couldn't accept connection"),
         }
     }
 }
 
+#[derive(Debug)]
+pub struct State {
+    pub handshake: daemon_proto::Handshake,
+    pub db: Arc<DatabaseConnection>,
+}
+
+impl State {
+    /// Returns whether the protocol minor version is newer than `minor`.
+    pub fn since(&self, minor: u32) -> bool {
+        self.handshake.client_proto.1 >= minor
+    }
+}
+
 #[instrument(skip_all)]
-async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
+async fn run_session(
+    args: &Args,
+    db: Arc<DatabaseConnection>,
+    mut cstream: UnixStream,
+) -> Result<()> {
     // We've got a client connection already; connect to the daemon on their behalf.
     debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
     let mut dstream = UnixStream::connect(&args.nix_daemon_sock)
@@ -119,16 +169,18 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
     };
 
     // Perform the new connection handshake.
-    let state = daemon_proto::handshake(&mut c2d, &mut d2c)
+    let handshake = daemon_proto::handshake(&mut c2d, &mut d2c)
         .await
         .tap_err(|err| error!(?err, "Handshake failed"))
         .context("Handshake failed")?;
     info!(
-        nix_version = state.nix_version,
-        client_proto = format!("{}.{}", state.client_proto.0, state.client_proto.1),
-        daemon_proto = format!("{}.{}", state.daemon_proto.0, state.daemon_proto.1),
+        nix_version = handshake.nix_version,
+        client_proto = format!("{}.{}", handshake.client_proto.0, handshake.client_proto.1),
+        daemon_proto = format!("{}.{}", handshake.daemon_proto.0, handshake.daemon_proto.1),
         "Connection Established!"
     );
+
+    let mut state = State { handshake, db };
 
     // Main loop!
     loop {
@@ -157,7 +209,7 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
 
         if dir == Direction::DaemonToClient {
             trace!("Daemon ready; reading interjection...");
-            interjections(&mut d2c, &state)
+            interjections(&mut d2c, &mut state)
                 .await
                 .context("Couldn't process interjections")?;
         } else {
@@ -173,22 +225,24 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
                 },
             }?;
             match op {
-                Op::IsValidPath => do_is_valid_path(&state, &mut c2d, &mut d2c).await,
-                Op::AddToStore => do_add_to_store(&state, &mut c2d, &mut d2c).await,
-                Op::BuildPaths => do_build_paths(&state, &mut c2d, &mut d2c).await,
-                Op::EnsurePath => do_ensure_path(&state, &mut c2d, &mut d2c).await,
-                Op::AddTempRoot => do_add_temp_root(&state, &mut c2d, &mut d2c).await,
-                Op::AddIndirectRoot => do_add_indirect_root(&state, &mut c2d, &mut d2c).await,
-                Op::SetOptions => do_set_options(&state, &mut c2d, &mut d2c).await,
-                Op::QueryPathInfo => do_query_path_info(&state, &mut c2d, &mut d2c).await,
-                Op::QueryValidDerivers => do_query_valid_derivers(&state, &mut c2d, &mut d2c).await,
-                Op::QueryDerivationOutputMap => {
-                    do_query_derivation_output_map(&state, &mut c2d, &mut d2c).await
+                Op::IsValidPath => do_is_valid_path(&mut state, &mut c2d, &mut d2c).await,
+                Op::AddToStore => do_add_to_store(&mut state, &mut c2d, &mut d2c).await,
+                Op::BuildPaths => do_build_paths(&mut state, &mut c2d, &mut d2c).await,
+                Op::EnsurePath => do_ensure_path(&mut state, &mut c2d, &mut d2c).await,
+                Op::AddTempRoot => do_add_temp_root(&mut state, &mut c2d, &mut d2c).await,
+                Op::AddIndirectRoot => do_add_indirect_root(&mut state, &mut c2d, &mut d2c).await,
+                Op::SetOptions => do_set_options(&mut state, &mut c2d, &mut d2c).await,
+                Op::QueryPathInfo => do_query_path_info(&mut state, &mut c2d, &mut d2c).await,
+                Op::QueryValidDerivers => {
+                    do_query_valid_derivers(&mut state, &mut c2d, &mut d2c).await
                 }
-                Op::AddToStoreNar => do_add_to_store_nar(&state, &mut c2d, &mut d2c).await,
-                Op::QueryMissing => do_query_missing(&state, &mut c2d, &mut d2c).await,
+                Op::QueryDerivationOutputMap => {
+                    do_query_derivation_output_map(&mut state, &mut c2d, &mut d2c).await
+                }
+                Op::AddToStoreNar => do_add_to_store_nar(&mut state, &mut c2d, &mut d2c).await,
+                Op::QueryMissing => do_query_missing(&mut state, &mut c2d, &mut d2c).await,
                 Op::BuildPathsWithResults => {
-                    do_build_paths_with_results(&state, &mut c2d, &mut d2c).await
+                    do_build_paths_with_results(&mut state, &mut c2d, &mut d2c).await
                 }
 
                 // We don't want to implement obsolete Ops.
@@ -215,11 +269,14 @@ async fn run_session(args: &Args, mut cstream: UnixStream) -> Result<()> {
     }
 }
 
-/// Process a set of interjections (eg. log lines) sent from the daemon.
+/// Process a set of interjections (eg. log lines, build progress) sent from the daemon.
 #[instrument(skip_all)]
-async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
-    use entity::build::{Model as Build, Phase};
-    let mut builds = HashMap::<u64, Build>::new();
+async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()> {
+    use entity::build::{self, Phase, PhaseList};
+
+    // In-memory cache of active builds. Note that activity IDs are monotonic u64s with
+    // the PID of the daemon in the high 32 bits; not guaranteed unique between sessions.
+    let mut builds = HashMap::<u64, build::ActiveModel>::new();
 
     loop {
         let inter = d2c
@@ -309,13 +366,21 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                         );
 
                         // Start tracking build progress.
-                        let build = Build {
-                            name: name.cloned().unwrap_or_default(),
-                            machine_name: machine_name.cloned().unwrap_or_default(),
-                            start: Utc::now(),
+                        let build = build::ActiveModel {
+                            name: Set(name.cloned().unwrap_or_default()),
+                            machine_name: Set(machine_name.cloned().unwrap_or_default()),
+                            start: Set(Utc::now()),
                             ..Default::default()
                         };
-                        debug!(build.name, build.machine_name, "[{}] Build Started", act_id);
+                        debug!(
+                            ?build.name,
+                            ?build.machine_name, "[{}] Build Started", act_id
+                        );
+                        build
+                            .clone()
+                            .insert(&*state.db)
+                            .await
+                            .context("Saving build")?;
                         builds.insert(act_id, build);
                     }
                     _ => trace!(
@@ -337,13 +402,16 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
                 // Is this the end of a build we're tracking?
                 if let Some(mut build) = builds.remove(&act_id) {
                     let now = Utc::now();
-                    build.end = Some(now);
+                    build.end = Set(Some(now));
 
                     // Log the final phase too.
-                    if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
-                        debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                    if let ActiveValue::Set(start_phase) = &build.start_phase {
+                        if let Some(Phase(last_phase, started)) = start_phase.0.last() {
+                            debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                        }
                     }
-                    debug!(build.name,build.machine_name,t=?(now - build.start), "[{}] Build Finished", act_id);
+                    debug!(?build.name,?build.machine_name,t=?(now - build.start.clone().unwrap()), "[{}] Build Finished", act_id);
+                    build.update(&*state.db).await.context("Saving build")?;
                 }
             }
 
@@ -362,13 +430,20 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
 
                         if let Some(build) = builds.get_mut(&act_id) {
                             let now = Utc::now();
-                            if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
-                                debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                            let phase = Phase(phase.cloned().unwrap_or_default(), now);
+                            if let ActiveValue::Set(start_phase) = &mut build.start_phase {
+                                if let Some(Phase(last_phase, started)) = start_phase.0.last() {
+                                    debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                                }
+                                start_phase.0.push(phase);
+                            } else {
+                                build.start_phase = Set(PhaseList(vec![phase]));
                             }
                             build
-                                .start_phase
-                                .0
-                                .push(Phase(phase.cloned().unwrap_or_default(), now));
+                                .clone()
+                                .update(&*state.db)
+                                .await
+                                .context("Saving build")?;
                         }
                     }
                     ResultType::Progress => {
@@ -401,7 +476,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &State) -> Result<()> {
 
 #[instrument(skip_all)]
 async fn do_is_valid_path<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -422,7 +497,7 @@ async fn do_is_valid_path<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_to_store<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -473,7 +548,7 @@ async fn do_add_to_store<'s>(
 
 #[instrument(skip_all)]
 async fn do_build_paths<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -500,7 +575,7 @@ async fn do_build_paths<'s>(
 
 #[instrument(skip_all)]
 async fn do_ensure_path<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -521,7 +596,7 @@ async fn do_ensure_path<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_temp_root<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -542,7 +617,7 @@ async fn do_add_temp_root<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_indirect_root<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -625,7 +700,7 @@ async fn do_set_options<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_path_info<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -654,7 +729,7 @@ async fn do_query_path_info<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_valid_derivers<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -675,7 +750,7 @@ async fn do_query_valid_derivers<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_derivation_output_map<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -702,7 +777,7 @@ async fn do_query_derivation_output_map<'s>(
 
 #[instrument(skip_all)]
 async fn do_add_to_store_nar<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -752,7 +827,7 @@ async fn do_add_to_store_nar<'s>(
 
 #[instrument(skip_all)]
 async fn do_query_missing<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {
@@ -785,7 +860,7 @@ async fn do_query_missing<'s>(
 
 #[instrument(skip_all)]
 async fn do_build_paths_with_results<'s>(
-    state: &State,
+    state: &mut State,
     c2d: &mut Stream<'s>,
     d2c: &mut Stream<'s>,
 ) -> Result<()> {

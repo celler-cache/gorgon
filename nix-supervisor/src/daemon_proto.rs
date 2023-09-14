@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use crate::State;
 use anyhow::{anyhow, bail, Context, Result};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use tap::TapFallible;
@@ -488,21 +489,14 @@ pub struct BuildResult {
 }
 
 #[derive(Debug)]
-pub struct State {
+pub struct Handshake {
     pub nix_version: String,
     pub daemon_proto: (u32, u32),
     pub client_proto: (u32, u32),
 }
 
-impl State {
-    /// Returns whether the protocol minor version is newer than `minor`.
-    pub fn since(&self, minor: u32) -> bool {
-        self.client_proto.1 >= minor
-    }
-}
-
 #[instrument(skip_all)]
-pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result<State> {
+pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result<Handshake> {
     debug!("Performing handshake...");
 
     // Client sends WORKER_MAGIC_1 to the Daemon.
@@ -620,7 +614,7 @@ pub async fn handshake<'s>(c2d: &mut Stream<'s>, d2c: &mut Stream<'s>) -> Result
     d2c.flush().await?;
     c2d.flush().await?;
 
-    Ok(State {
+    Ok(Handshake {
         nix_version,
         daemon_proto,
         client_proto,
