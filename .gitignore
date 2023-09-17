@@ -5,3 +5,6 @@
 /target
 result
 result-*
+
+/nix-supervisor.sock
+/nix-supervisor.db
