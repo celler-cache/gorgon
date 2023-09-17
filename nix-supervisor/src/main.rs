@@ -113,7 +113,13 @@ async fn main() -> Result<()> {
         match listener.accept().await {
             Ok((cstream, addr)) => {
                 info!(?addr, "Client connected");
-                run_session(&args, db.clone(), cstream).await?;
+                let args_ = args.clone();
+                let db_ = db.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = run_session(args_, db_, cstream).await {
+                        error!("Connection Error: {}", err);
+                    }
+                });
             }
             Err(err) => error!(?err, "Couldn't accept connection"),
         }
@@ -135,7 +141,7 @@ impl State {
 
 #[instrument(skip_all)]
 async fn run_session(
-    args: &Args,
+    args: Args,
     db: Arc<DatabaseConnection>,
     mut cstream: UnixStream,
 ) -> Result<()> {
