@@ -19,7 +19,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     select,
 };
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -111,15 +111,27 @@ async fn main() -> Result<()> {
     loop {
         debug!("Waiting for a connection...");
         match listener.accept().await {
-            Ok((cstream, addr)) => {
-                info!(?addr, "Client connected");
+            Ok((cstream, _)) => {
+                let cred = cstream
+                    .peer_cred()
+                    .tap_err(|err| warn!(?err, "Couldn't get client's SO_PEERCRED"))
+                    .ok();
+
                 let args_ = args.clone();
                 let db_ = db.clone();
-                tokio::spawn(async move {
-                    if let Err(err) = run_session(args_, db_, cstream).await {
-                        error!("Connection Error: {}", err);
+                tokio::spawn(
+                    async move {
+                        info!("Client connected");
+                        if let Err(err) = run_session(args_, db_, cstream).await {
+                            error!("Connection Error: {}", err);
+                        }
                     }
-                });
+                    .instrument(info_span!(
+                        "conn",
+                        pid = cred.map(|c| c.pid()),
+                        uid = cred.map(|c| c.uid())
+                    )),
+                );
             }
             Err(err) => error!(?err, "Couldn't accept connection"),
         }
@@ -139,7 +151,6 @@ impl State {
     }
 }
 
-#[instrument(skip_all)]
 async fn run_session(
     args: Args,
     db: Arc<DatabaseConnection>,
