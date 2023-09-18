@@ -33,7 +33,36 @@ impl MigrationTrait for Migration {
                     )
                     .to_owned(),
             )
-            .await
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name(format!(
+                        "{}_{}",
+                        Build::Table.to_string(),
+                        Build::Name.to_string()
+                    ))
+                    .table(Build::Table)
+                    .col(Build::Name)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name(format!(
+                        "{}_{}",
+                        Build::Table.to_string(),
+                        Build::Start.to_string()
+                    ))
+                    .table(Build::Table)
+                    .col(Build::Start)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
