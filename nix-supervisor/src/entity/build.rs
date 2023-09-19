@@ -7,7 +7,7 @@ use chrono::DateTime;
 use sea_orm::{entity::prelude::*, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Clone, PartialEq, DeriveEntityModel)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
 #[sea_orm(table_name = "builds")]
 pub struct Model {
     #[sea_orm(primary_key)]

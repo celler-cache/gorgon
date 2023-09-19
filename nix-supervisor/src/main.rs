@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+mod api;
 mod daemon_proto;
 mod entity;
 mod migration;
@@ -42,6 +43,10 @@ struct Args {
     /// Path to our listening socket.
     #[arg(long, short = 's', default_value = "nix-supervisor.sock")]
     sock: PathBuf,
+
+    /// API listen address.
+    #[arg(long, short = 'L', default_value = "[::]:9649")]
+    http_listen: std::net::SocketAddr,
 }
 
 #[instrument(skip_all)]
@@ -95,6 +100,19 @@ async fn main() -> Result<()> {
 
     let db = init_db(&args).await?;
 
+    {
+        let api_srv = axum::Server::try_bind(&args.http_listen)
+            .context("Couldn't bind to API socket")?
+            .serve(api::new(db.clone()).into_make_service());
+        tokio::spawn(
+            async move {
+                info!(addr = ?api_srv.local_addr(), "API Running!");
+                api_srv.await.expect("API shut down unexpectedly");
+            }
+            .instrument(info_span!("api")),
+        );
+    }
+
     let listener = UnixListener::bind(&args.sock)
         .tap_err(|err| error!(?err, ?args.sock, "Couldn't bind to socket"))
         .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?;
@@ -107,7 +125,6 @@ async fn main() -> Result<()> {
             .to_string_lossy(),
         "Running!"
     );
-
     loop {
         debug!("Waiting for a connection...");
         match listener.accept().await {

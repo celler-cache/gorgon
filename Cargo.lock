@@ -263,7 +263,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -281,7 +280,6 @@ dependencies = [
  "rustversion",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -1232,6 +1230,7 @@ name = "nix-supervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "num_enum",
@@ -1243,6 +1242,7 @@ dependencies = [
  "tap",
  "thiserror",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
