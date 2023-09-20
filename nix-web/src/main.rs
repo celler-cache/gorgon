@@ -147,14 +147,13 @@ async fn main() -> Result<()> {
     let mut listen_fds = ListenFd::from_env();
     let srv = if listen_fds.len() > 0 {
         // This unwrap() can only fail if the FD has already been used.
-        info!("Socket activated, using external FD 0...");
+        info!("We're socket-activated, using external FD 0...");
         axum::Server::from_tcp(listen_fds.take_tcp_listener(0)?.unwrap())?
     } else {
-        debug!(addr = ?&args.http_listen, "Binding...");
         axum::Server::try_bind(&args.http_listen)?
     }
     .serve(app.into_make_service());
-    info!(addr = ?srv.local_addr(), "Listening!");
+    info!(addr = ?srv.local_addr(), "Running!");
     srv.await?;
     Ok(())
 }
