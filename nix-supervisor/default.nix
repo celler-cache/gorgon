@@ -4,6 +4,8 @@
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
 , nix ? pkgs.nix
+, pkg-config ? pkgs.pkg-config
+, openssl ? pkgs.openssl
 , srcOverride ? import ../nix/src.nix { inherit lib; }
 }:
 let
@@ -15,6 +17,9 @@ pkgs.rustPlatform.buildRustPackage {
 
   src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
+
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ openssl ];
 
   cargoBuildFlags = cargoPackageFlags;
   cargoTestFlags = cargoPackageFlags;
