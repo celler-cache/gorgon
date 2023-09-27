@@ -62,7 +62,7 @@ SPDX-License-Identifier: EUPL-1.2
                 {% let d = build.end.unwrap() - build.start %}
                 {% if d.num_hours() > 0 %}{{ d.num_hours() }}h {%endif %}
                 {% if d.num_minutes() > 0 %}{{ d.num_minutes() }}m {%endif %}
-                {% if d.num_hours() > 0 %}{{ d.num_hours() }}s {%endif %}
+                {% if d.num_seconds() > 0 %}{{ d.num_seconds() }}s {%endif %}
               {% else %}
                 <span aria-label="Building">⏳</span>
               {% endif %}
