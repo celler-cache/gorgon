@@ -50,6 +50,32 @@ SPDX-License-Identifier: EUPL-1.2
         </table>
       </td>
     </tr>
+    {% if root_builds.len() > 0 %}
+    <tr>
+      <th scope="row">Builds</th>
+      <td>
+        <table class="table table-responsive">
+          {% for build in root_builds %}
+          <tr class="{% if build.end.is_some() %}table-success{% endif %}">
+            <td style="text-align: right; width: 0;">
+              {% if build.end.is_some() %}
+                {% let d = build.end.unwrap() - build.start %}
+                {% if d.num_hours() > 0 %}{{ d.num_hours() }}h {%endif %}
+                {% if d.num_minutes() > 0 %}{{ d.num_minutes() }}m {%endif %}
+                {% if d.num_hours() > 0 %}{{ d.num_hours() }}s {%endif %}
+              {% else %}
+                <span aria-label="Building">⏳</span>
+              {% endif %}
+            </td>
+            <td style="width: 0;">{{ build.start.format("%Y-%m-%d") }}</td>
+            <td style="width: 0;">{{ build.start.format("%H:%M") }}</td>
+            <td>{{ build.machine_name }}</td>
+          </tr>
+          {% endfor %}
+        </table>
+      </td>
+    </tr>
+    {% endif %}
     <tr>
       <th scope="row">Sources</th>
       <td>

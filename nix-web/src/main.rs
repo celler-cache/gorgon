@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 pub mod nix_cli;
+pub mod supervisor_api;
 
 use crate::nix_cli::{Derivation, DerivationOutput, DerivationStatus, PathInfo};
 use askama::Template;
@@ -42,6 +43,8 @@ pub enum Error {
     Hyper(#[from] hyper::Error),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
     IO(#[from] std::io::Error),
 
@@ -98,6 +101,14 @@ struct Args {
     /// Listen address.
     #[arg(long, short = 'L', default_value = "[::]:8649")]
     http_listen: std::net::SocketAddr,
+
+    /// Use nix-supervisor.
+    #[arg(long, short = 's')]
+    nix_supervisor: bool,
+
+    /// Address of the nix-supervisor API.
+    #[arg(long, short = 'S', default_value = "http://[::1]:9649")]
+    nix_supervisor_addr: String,
 }
 
 #[instrument(skip_all)]
@@ -236,6 +247,7 @@ async fn get_goto(query: Query<GotoQuery>) -> Response {
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
     root: &'a Derivation,
+    root_builds: Vec<supervisor_api::Build>,
     root_outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
     root_input_tmpls: Vec<DerivationItemTemplate<'a>>,
     root_env_html: Vec<(&'a String, String)>,
@@ -298,16 +310,22 @@ pub struct GetDerivationQuery {
 }
 
 async fn get_derivation(
+    State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
     Query(query): Query<GetDerivationQuery>,
 ) -> Result<Response> {
     match query.page.unwrap_or(GetDerivationPage::Info) {
-        GetDerivationPage::Info => Ok(get_derivation_info(Path(store_path)).await?.into_response()),
+        GetDerivationPage::Info => Ok(get_derivation_info(State(state), Path(store_path))
+            .await?
+            .into_response()),
         GetDerivationPage::Log => Ok(get_derivation_log(Path(store_path)).await?.into_response()),
     }
 }
 
-async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<String>> {
+async fn get_derivation_info(
+    State(state): State<Arc<AppState>>,
+    Path(store_path): Path<String>,
+) -> Result<Html<String>> {
     // Collect info from nix.
     let (mut drvs, mut out_pis) = {
         let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
@@ -388,9 +406,20 @@ async fn get_derivation_info(Path(store_path): Path<String>) -> Result<Html<Stri
     }
 
     let root = &drvs[find_tree_root(&drvs)];
+
+    // If nix-supervisor integration is enabled, ask if it knows anything about the root.
+    let root_builds = if state.args.nix_supervisor {
+        supervisor_api::Build::list(&state.args.nix_supervisor_addr, &root.path)
+            .await?
+            .builds
+    } else {
+        vec![]
+    };
+
     Ok(Html(
         DerivationTemplate {
             root,
+            root_builds,
             root_outputs: find_outputs(&out_pis, root),
             root_input_tmpls: DerivationItemTemplate::build_batch(
                 &drvs,
