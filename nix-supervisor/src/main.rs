@@ -14,7 +14,7 @@ use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, Stream
 use sea_orm::{prelude::*, ActiveValue, Database, Set};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
-use tap::TapFallible;
+use tap::{Tap, TapFallible};
 use tokio::{
     io::{BufReader, BufWriter},
     net::{UnixListener, UnixStream},
@@ -100,10 +100,29 @@ async fn main() -> Result<()> {
 
     let db = init_db(&args).await?;
 
+    let mut listen_fds = listenfd::ListenFd::from_env();
+    if listen_fds.len() > 0 {
+        info!("We're socket-activated, using external FDs...");
+    }
+
     {
-        let api_srv = axum::Server::try_bind(&args.http_listen)
-            .context("Couldn't bind to API socket")?
-            .serve(api::new(db.clone()).into_make_service());
+        let api_srv = if listen_fds.len() > 1 {
+            axum::Server::from_tcp(
+                listen_fds
+                    .take_tcp_listener(1)
+                    .context("Couldn't take API socket; wrong order?")?
+                    .expect("FD 1 was already consumed; this should be impossible???")
+                    .tap(|listener| {
+                        info!(
+                            addr = ?listener.local_addr().unwrap(),
+                            "-> Using external FD 1 for API"
+                        )
+                    }),
+            )?
+        } else {
+            axum::Server::try_bind(&args.http_listen).context("Couldn't bind to API socket")?
+        }
+        .serve(api::new(db.clone()).into_make_service());
         tokio::spawn(
             async move {
                 info!(addr = ?api_srv.local_addr(), "API Running!");
@@ -113,9 +132,25 @@ async fn main() -> Result<()> {
         );
     }
 
-    let listener = UnixListener::bind(&args.sock)
-        .tap_err(|err| error!(?err, ?args.sock, "Couldn't bind to socket"))
-        .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?;
+    // Take an external FD if we were socket activated, else listen normally.
+    let listener = if listen_fds.len() > 0 {
+        UnixListener::from_std(
+            listen_fds
+                .take_unix_listener(0)
+                .context("Couldn't take proxy socket; wrong order?")?
+                .expect("FD 0 was already consumed; this should be impossible???")
+                .tap(|listener| {
+                    info!(
+                        addr = ?listener.local_addr().unwrap(),
+                        "We're socket-activated, using external FD 0...",
+                    )
+                }),
+        )
+        .expect("Couldn't turn std::net::UnixListener into tokio::net::UnixListener")
+    } else {
+        UnixListener::bind(&args.sock)
+            .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?
+    };
     info!(
         path = ?listener
             .local_addr()?

@@ -28,3 +28,4 @@ sea-orm = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio" ] }
 sea-orm-migration = { version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls", "with-chrono", "with-json"] }
 axum = "0.6"
 tower-http = { version = "0.4", features = ["trace"] }
+listenfd = "1.0"
