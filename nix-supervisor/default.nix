@@ -21,6 +21,15 @@ pkgs.rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ openssl ];
 
+  postPatch = ''
+    substituteInPlace nix-supervisor/nix-supervisor.service \
+      --replace 'ExecStart=nix-supervisor' "ExecStart=$out/bin/nix-supervisor"
+  '';
+  postInstall = ''
+    install -m 644 -D nix-supervisor/nix-supervisor.service \
+      $out/lib/systemd/system/nix-supervisor.service
+  '';
+
   cargoBuildFlags = cargoPackageFlags;
   cargoTestFlags = cargoPackageFlags;
 }
