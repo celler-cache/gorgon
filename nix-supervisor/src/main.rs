@@ -78,7 +78,8 @@ async fn init_db(args: &Args, xdg_dirs: &xdg::BaseDirectories) -> Result<Arc<Dat
         .db_path
         .clone()
         .map(|p| Ok(p))
-        .unwrap_or_else(|| xdg_dirs.place_state_file("db.sqlite3"))?
+        .unwrap_or_else(|| xdg_dirs.place_state_file("db.sqlite3"))
+        .context("Creating database directory")?
         .into_os_string()
         .into_string()
         .expect("Database path must be valid UTF-8");
@@ -105,7 +106,9 @@ async fn main() -> Result<()> {
     init_logging(&args);
 
     let xdg_dirs = xdg::BaseDirectories::with_prefix("nix-supervisor")?;
-    let db = init_db(&args, &xdg_dirs).await?;
+    let db = init_db(&args, &xdg_dirs)
+        .await
+        .context("Connecting to database")?;
 
     let mut listen_fds = listenfd::ListenFd::from_env();
     if listen_fds.len() > 0 {
@@ -125,7 +128,8 @@ async fn main() -> Result<()> {
                             "-> Using external FD 1 for API"
                         )
                     }),
-            )?
+            )
+            .context("Couldn't wrap external API socket")?
         } else {
             axum::Server::try_bind(&args.http_listen).context("Couldn't bind to API socket")?
         }
