@@ -32,9 +32,9 @@ struct Args {
     #[arg(long, short, action=clap::ArgAction::Count)]
     quiet: u8,
 
-    /// Path to the database.
-    #[arg(long, default_value = "nix-supervisor.db")]
-    db_path: PathBuf,
+    /// Path to the database. [default: $XDG_STATE_HOME/nix-supervisor/db.sqlite3]
+    #[arg(long)]
+    db_path: Option<PathBuf>,
 
     /// Path to the real nix daemon socket.
     #[arg(long, short = 'S', default_value = "/nix/var/nix/daemon-socket/socket")]
@@ -71,14 +71,20 @@ fn init_logging(args: &Args) {
 }
 
 #[instrument(skip_all)]
-async fn init_db(args: &Args) -> Result<Arc<DatabaseConnection>> {
+async fn init_db(args: &Args, xdg_dirs: &xdg::BaseDirectories) -> Result<Arc<DatabaseConnection>> {
     use sea_orm_migration::prelude::*;
 
-    debug!(?args.db_path, "Connecting to database...");
-    let mut opt = sea_orm::ConnectOptions::new(format!(
-        "sqlite:{}?mode=rwc",
-        &args.db_path.to_string_lossy()
-    ));
+    let db_path = args
+        .db_path
+        .clone()
+        .map(|p| Ok(p))
+        .unwrap_or_else(|| xdg_dirs.place_state_file("db.sqlite3"))?
+        .into_os_string()
+        .into_string()
+        .expect("Database path must be valid UTF-8");
+
+    debug!(?db_path, "Connecting to database...");
+    let mut opt = sea_orm::ConnectOptions::new(format!("sqlite:{}?mode=rwc", &db_path));
     opt.sqlx_logging(true)
         .sqlx_logging_level(tracing::log::LevelFilter::Debug);
     let db = Database::connect(opt)
@@ -98,7 +104,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
 
-    let db = init_db(&args).await?;
+    let xdg_dirs = xdg::BaseDirectories::with_prefix("nix-supervisor")?;
+    let db = init_db(&args, &xdg_dirs).await?;
 
     let mut listen_fds = listenfd::ListenFd::from_env();
     if listen_fds.len() > 0 {
