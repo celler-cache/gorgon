@@ -20,6 +20,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     select,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, instrument, trace, warn, Instrument};
 
 #[derive(Debug, Clone, Parser)]
@@ -115,6 +116,25 @@ async fn main() -> Result<()> {
         info!("We're socket-activated, using external FDs...");
     }
 
+    // Listen for Ctrl+C or a shutdown signal, then start a graceful termination.
+    let shutdown_root = CancellationToken::new();
+    let shutdown_child = shutdown_root.child_token();
+    tokio::spawn(
+        async move {
+            debug!("Waiting for shutdown signal...");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Couldn't register Ctrl+C handler");
+            debug!("Shutdown signal received");
+            shutdown_root.cancel();
+        }
+        .instrument(info_span!("ctrl_c")),
+    );
+    // Outstanding tasks should hold a clone of the sender, but never send anything.
+    // When shutting down, we'll wait until all senders are dropped before exiting.
+    let (shutdown_send, mut shutdown_recv) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Spawn the API.
     {
         let api_srv = if listen_fds.len() > 1 {
             axum::Server::from_tcp(
@@ -134,10 +154,17 @@ async fn main() -> Result<()> {
             axum::Server::try_bind(&args.http_listen).context("Couldn't bind to API socket")?
         }
         .serve(api::new(db.clone()).into_make_service());
+
+        let shutdown = shutdown_child.child_token();
+        let shutdown_send_ = shutdown_send.clone();
         tokio::spawn(
             async move {
                 info!(addr = ?api_srv.local_addr(), "API Running!");
-                api_srv.await.expect("API shut down unexpectedly");
+                api_srv
+                    .with_graceful_shutdown(shutdown.cancelled())
+                    .await
+                    .expect("API shut down unexpectedly");
+                drop(shutdown_send_);
             }
             .instrument(info_span!("api")),
         );
@@ -162,32 +189,36 @@ async fn main() -> Result<()> {
         UnixListener::bind(&args.sock)
             .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?
     };
-    info!(
-        path = ?listener
-            .local_addr()?
-            .as_pathname()
-            .ok_or_else(|| anyhow!("socket is unnamed; this should be impossible"))?
-            .canonicalize()?
-            .to_string_lossy(),
-        "Running!"
-    );
+    let listener_path = listener
+        .local_addr()?
+        .as_pathname()
+        .ok_or_else(|| anyhow!("socket is unnamed; this should be impossible"))?
+        .canonicalize()?;
+    info!(path = ?listener_path.to_string_lossy(), "Running!");
+
     loop {
         debug!("Waiting for a connection...");
-        match listener.accept().await {
-            Ok((cstream, _)) => {
+        match select! {
+            _ = shutdown_child.cancelled() => None,
+            r = listener.accept() => Some(r),
+        } {
+            Some(Ok((cstream, _))) => {
                 let cred = cstream
                     .peer_cred()
                     .tap_err(|err| warn!(?err, "Couldn't get client's SO_PEERCRED"))
                     .ok();
 
                 let args_ = args.clone();
+                let shutdown_ = shutdown_child.child_token();
                 let db_ = db.clone();
+                let shutdown_send_ = shutdown_send.clone();
                 tokio::spawn(
                     async move {
                         info!("Client connected");
-                        if let Err(err) = run_session(args_, db_, cstream).await {
+                        if let Err(err) = run_session(args_, shutdown_, db_, cstream).await {
                             error!("Connection Error: {}", err);
                         }
+                        drop(shutdown_send_);
                     }
                     .instrument(info_span!(
                         "conn",
@@ -196,9 +227,39 @@ async fn main() -> Result<()> {
                     )),
                 );
             }
-            Err(err) => error!(?err, "Couldn't accept connection"),
+            Some(Err(err)) => error!(?err, "Couldn't accept connection"),
+            None => {
+                debug!("Accept loop shutting down");
+                break;
+            }
         }
     }
+
+    // Clean up the dang socket file.
+    debug!(path = ?listener_path.to_string_lossy(), "Shutting down socket...");
+    drop(listener);
+    tokio::fs::remove_file(listener_path)
+        .await
+        .context("Removing socket")?;
+
+    // Try to receive on the shutdown channel. Nothing should be sending on it, so it'll wait
+    // until no more senders exist, and fail - this is what we want, so we discard the error.
+    debug!("Waiting for outstanding connections...");
+    drop(shutdown_send);
+    let _ = shutdown_recv.recv().await;
+
+    // If we can't do Arc::into_inner() here, we've got an outstanding clone of the db Arc.
+    // Make sure anything that takes a db.clone() also takes a cancellation token, and holds
+    // a sender on the shutdown channel until they've properly terminated.
+    debug!("Closing database connection...");
+    Arc::into_inner(db)
+        .ok_or_else(|| anyhow!("Database has outstanding references; this is a bug"))?
+        .close()
+        .await
+        .context("Shutting down database")?;
+
+    info!("Bye!");
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -216,6 +277,7 @@ impl State {
 
 async fn run_session(
     args: Args,
+    cancel: CancellationToken,
     db: Arc<DatabaseConnection>,
     mut cstream: UnixStream,
 ) -> Result<()> {
@@ -271,82 +333,95 @@ async fn run_session(
                 len = c2d.r.buffer().len(),
                 "Client-to-Daemon reader has unprocessed data"
             );
-            Direction::ClientToDaemon
+            Some(Direction::ClientToDaemon)
         } else if d2c.r.buffer().len() > 0 {
             trace!(
                 len = d2c.r.buffer().len(),
                 "Daemon-to-Client reader has unprocessed data"
             );
-            Direction::DaemonToClient
+            Some(Direction::DaemonToClient)
         } else {
             trace!("No leftover buffers, waiting for sockets...");
             select! {
                 biased;
-                _ = d2c.r.get_ref().readable() => Direction::DaemonToClient,
-                _ = c2d.r.get_ref().readable() => Direction::ClientToDaemon,
+                _ = cancel.cancelled() => None,
+                _ = d2c.r.get_ref().readable() => Some(Direction::DaemonToClient),
+                _ = c2d.r.get_ref().readable() => Some(Direction::ClientToDaemon),
             }
         };
 
-        if dir == Direction::DaemonToClient {
-            trace!("Daemon ready; reading interjection...");
-            interjections(&mut d2c, &mut state)
-                .await
-                .context("Couldn't process interjections")?;
-        } else {
-            trace!("Client ready; reading Op...");
-            let op = match c2d.take_op().await.context("Couldn't read Op") {
-                Ok(op) => Ok(op),
-                Err(err) => match err.downcast_ref::<std::io::Error>() {
-                    Some(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        info!("Client disconnected");
-                        return Ok(());
-                    }
-                    _ => Err(err),
-                },
-            }?;
-            match op {
-                Op::IsValidPath => do_is_valid_path(&mut state, &mut c2d, &mut d2c).await,
-                Op::AddToStore => do_add_to_store(&mut state, &mut c2d, &mut d2c).await,
-                Op::BuildPaths => do_build_paths(&mut state, &mut c2d, &mut d2c).await,
-                Op::EnsurePath => do_ensure_path(&mut state, &mut c2d, &mut d2c).await,
-                Op::AddTempRoot => do_add_temp_root(&mut state, &mut c2d, &mut d2c).await,
-                Op::AddIndirectRoot => do_add_indirect_root(&mut state, &mut c2d, &mut d2c).await,
-                Op::SetOptions => do_set_options(&mut state, &mut c2d, &mut d2c).await,
-                Op::QueryPathInfo => do_query_path_info(&mut state, &mut c2d, &mut d2c).await,
-                Op::QueryValidDerivers => {
-                    do_query_valid_derivers(&mut state, &mut c2d, &mut d2c).await
-                }
-                Op::QueryDerivationOutputMap => {
-                    do_query_derivation_output_map(&mut state, &mut c2d, &mut d2c).await
-                }
-                Op::AddToStoreNar => do_add_to_store_nar(&mut state, &mut c2d, &mut d2c).await,
-                Op::QueryMissing => do_query_missing(&mut state, &mut c2d, &mut d2c).await,
-                Op::BuildPathsWithResults => {
-                    do_build_paths_with_results(&mut state, &mut c2d, &mut d2c).await
-                }
-
-                // We don't want to implement obsolete Ops.
-                Op::ObsoleteQueryPathHash
-                | Op::ObsoleteQueryReferences
-                | Op::ObsoleteAddTextToStore
-                | Op::ObsoleteExportPath
-                | Op::ObsoleteQueryDeriver
-                | Op::ObsoleteQueryDerivationOutputs
-                | Op::ObsoleteImportPaths
-                | Op::ObsoleteQueryDerivationOutputNames => {
-                    Err(anyhow!("Obsolete Op received: {:?}", op))
-                }
-
-                // Oops, we haven't implemented this yet.
-                _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
+        match dir {
+            Some(Direction::DaemonToClient) => {
+                trace!("Daemon ready; reading interjection...");
+                interjections(&mut d2c, &mut state)
+                    .await
+                    .context("Couldn't process interjections")?;
             }
-            .tap_err(|err| error!(?err, ?op, "Couldn't process Op"))
-            .with_context(|| format!("Couldn't process Op: {:?}", op))?;
-            c2d.flush()
-                .await
-                .context("Couldn't flush writer after op")?;
+            Some(Direction::ClientToDaemon) => {
+                trace!("Client ready; reading Op...");
+                let op = match c2d.take_op().await.context("Couldn't read Op") {
+                    Ok(op) => Ok(op),
+                    Err(err) => match err.downcast_ref::<std::io::Error>() {
+                        Some(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            info!("Client disconnected");
+                            break;
+                        }
+                        _ => Err(err),
+                    },
+                }?;
+                match op {
+                    Op::IsValidPath => do_is_valid_path(&mut state, &mut c2d, &mut d2c).await,
+                    Op::AddToStore => do_add_to_store(&mut state, &mut c2d, &mut d2c).await,
+                    Op::BuildPaths => do_build_paths(&mut state, &mut c2d, &mut d2c).await,
+                    Op::EnsurePath => do_ensure_path(&mut state, &mut c2d, &mut d2c).await,
+                    Op::AddTempRoot => do_add_temp_root(&mut state, &mut c2d, &mut d2c).await,
+                    Op::AddIndirectRoot => {
+                        do_add_indirect_root(&mut state, &mut c2d, &mut d2c).await
+                    }
+                    Op::SetOptions => do_set_options(&mut state, &mut c2d, &mut d2c).await,
+                    Op::QueryPathInfo => do_query_path_info(&mut state, &mut c2d, &mut d2c).await,
+                    Op::QueryValidDerivers => {
+                        do_query_valid_derivers(&mut state, &mut c2d, &mut d2c).await
+                    }
+                    Op::QueryDerivationOutputMap => {
+                        do_query_derivation_output_map(&mut state, &mut c2d, &mut d2c).await
+                    }
+                    Op::AddToStoreNar => do_add_to_store_nar(&mut state, &mut c2d, &mut d2c).await,
+                    Op::QueryMissing => do_query_missing(&mut state, &mut c2d, &mut d2c).await,
+                    Op::BuildPathsWithResults => {
+                        do_build_paths_with_results(&mut state, &mut c2d, &mut d2c).await
+                    }
+
+                    // We don't want to implement obsolete Ops.
+                    Op::ObsoleteQueryPathHash
+                    | Op::ObsoleteQueryReferences
+                    | Op::ObsoleteAddTextToStore
+                    | Op::ObsoleteExportPath
+                    | Op::ObsoleteQueryDeriver
+                    | Op::ObsoleteQueryDerivationOutputs
+                    | Op::ObsoleteImportPaths
+                    | Op::ObsoleteQueryDerivationOutputNames => {
+                        Err(anyhow!("Obsolete Op received: {:?}", op))
+                    }
+
+                    // Oops, we haven't implemented this yet.
+                    _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
+                }
+                .tap_err(|err| error!(?err, ?op, "Couldn't process Op"))
+                .with_context(|| format!("Couldn't process Op: {:?}", op))?;
+                c2d.flush()
+                    .await
+                    .context("Couldn't flush writer after op")?;
+            }
+            None => {
+                debug!("Shutdown signal received, terminating...");
+                break;
+            }
         }
     }
+
+    debug!("[ Connection Terminated ]");
+    Ok(())
 }
 
 /// Process a set of interjections (eg. log lines, build progress) sent from the daemon.
