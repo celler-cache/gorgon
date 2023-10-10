@@ -285,7 +285,6 @@ async fn run_session(
     debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
     let mut dstream = UnixStream::connect(&args.nix_daemon_sock)
         .await
-        .tap_err(|err| error!(?err, ?args.nix_daemon_sock, "Couldn't connect to nix daemon socket"))
         .with_context(|| {
             format!(
                 "Couldn't connect to nix daemon socket: {}",
@@ -313,7 +312,6 @@ async fn run_session(
     // Perform the new connection handshake.
     let handshake = daemon_proto::handshake(&mut c2d, &mut d2c)
         .await
-        .tap_err(|err| error!(?err, "Handshake failed"))
         .context("Handshake failed")?;
     info!(
         nix_version = handshake.nix_version,
@@ -407,7 +405,6 @@ async fn run_session(
                     // Oops, we haven't implemented this yet.
                     _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
                 }
-                .tap_err(|err| error!(?err, ?op, "Couldn't process Op"))
                 .with_context(|| format!("Couldn't process Op: {:?}", op))?;
                 c2d.flush()
                     .await
