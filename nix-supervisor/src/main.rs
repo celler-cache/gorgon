@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
                 listen_fds
                     .take_tcp_listener(1)
                     .context("Couldn't take API socket; wrong order?")?
-                    .expect("FD 1 was already consumed; this should be impossible???")
+                    .ok_or_else(|| anyhow!("FD 1 already consumed; this should be impossible???"))?
                     .tap(|listener| {
                         info!(
                             addr = ?listener.local_addr().unwrap(),
@@ -176,15 +176,15 @@ async fn main() -> Result<()> {
             listen_fds
                 .take_unix_listener(0)
                 .context("Couldn't take proxy socket; wrong order?")?
-                .expect("FD 0 was already consumed; this should be impossible???")
+                .ok_or_else(|| anyhow!("FD 0 already consumed; this should be impossible???"))?
                 .tap(|listener| {
                     info!(
                         addr = ?listener.local_addr().unwrap(),
-                        "We're socket-activated, using external FD 0...",
+                        "-> Using external FD 0 for proxy...",
                     )
                 }),
         )
-        .expect("Couldn't turn std::net::UnixListener into tokio::net::UnixListener")
+        .context("Couldn't turn std::net::UnixListener into tokio::net::UnixListener")?
     } else {
         UnixListener::bind(&args.sock)
             .with_context(|| format!("Couldn't bind to socket: {}", args.sock.to_string_lossy()))?
