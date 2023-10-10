@@ -399,11 +399,42 @@ async fn run_session(
                     | Op::ObsoleteQueryDerivationOutputs
                     | Op::ObsoleteImportPaths
                     | Op::ObsoleteQueryDerivationOutputNames => {
-                        Err(anyhow!("Obsolete Op received: {:?}", op))
+                        Err(anyhow!("{:?} is obsolete; this should never happen!", op))
                     }
 
-                    // Oops, we haven't implemented this yet.
-                    _ => Err(anyhow!("Unimplemented Op received: {:?}", op)),
+                    // These Ops exist in the Nix codebase, but don't seem to be used in 2.13+.
+                    //
+                    // If you manage to trigger one of these, please open an issue and tell us:
+                    // 1. the nix version (`nix --version`), 2. the command that caused it.
+                    Op::HasSubstitutes
+                    | Op::QueryReferrers
+                    | Op::SyncWithGC
+                    | Op::FindRoots
+                    | Op::CollectGarbage
+                    | Op::QuerySubstitutablePathInfo
+                    | Op::QueryAllValidPaths
+                    | Op::QueryFailedPaths
+                    | Op::ClearFailedPaths
+                    | Op::QueryPathFromHashPart
+                    | Op::QuerySubstitutablePathInfos
+                    | Op::QueryValidPaths
+                    | Op::QuerySubstitutablePaths
+                    | Op::OptimiseStore
+                    | Op::VerifyStore
+                    | Op::BuildDerivation
+                    | Op::AddSignatures
+                    | Op::NarFromPath
+                    | Op::RegisterDrvOutput
+                    | Op::QueryRealisation
+                    | Op::AddMultipleToStore
+                    | Op::AddBuildLog => {
+                        // If the format string is any longer, rustfmt breaks for the whole block.
+                        Err(anyhow!(
+                            "{:?} is unimplemented -- this is a bug, please open an issue! {}",
+                            op,
+                            "https://codeberg.org/gorgon/gorgon/issues",
+                        ))
+                    }
                 }
                 .with_context(|| format!("Couldn't process Op: {:?}", op))?;
                 c2d.flush()
