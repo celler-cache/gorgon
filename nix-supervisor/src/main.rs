@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
                     async move {
                         info!("Client connected");
                         if let Err(err) = run_session(args_, shutdown_, db_, cstream).await {
-                            error!("Connection Error: {}", err);
+                            error!("{:?}", err);
                         }
                         drop(shutdown_send_);
                     }
