@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use chrono::prelude::*;
-use chrono::DateTime;
+use chrono::{prelude::*, DateTime};
 use sea_orm::{entity::prelude::*, FromJsonQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +10,10 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "builds")]
 pub struct Model {
     #[sea_orm(primary_key)]
+    pub id: i32,
+
     pub name: String,
-    #[sea_orm(primary_key)]
     pub machine_name: String,
-    #[sea_orm(primary_key)]
     pub start: DateTime<Utc>,
 
     pub start_phase: PhaseList,

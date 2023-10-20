@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
 use clap::Parser;
 use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, Stream};
-use sea_orm::{prelude::*, ActiveValue, Database, Set};
+use sea_orm::{prelude::*, Database, Set};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tap::{Tap, TapFallible};
@@ -459,7 +459,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
 
     // In-memory cache of active builds. Note that activity IDs are monotonic u64s with
     // the PID of the daemon in the high 32 bits; not guaranteed unique between sessions.
-    let mut builds = HashMap::<u64, build::ActiveModel>::new();
+    let mut builds = HashMap::<u64, build::Model>::new();
 
     loop {
         let inter = d2c
@@ -559,12 +559,10 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                             ?build.name,
                             ?build.machine_name, "[{}] Build Started", act_id
                         );
-                        build
-                            .clone()
-                            .insert(&*state.db)
-                            .await
-                            .context("Saving build")?;
-                        builds.insert(act_id, build);
+                        builds.insert(
+                            act_id,
+                            build.insert(&*state.db).await.context("Saving build")?,
+                        );
                     }
                     _ => trace!(
                         act_id,
@@ -583,18 +581,20 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                 trace!(?act_id, "Stop Activity");
 
                 // Is this the end of a build we're tracking?
-                if let Some(mut build) = builds.remove(&act_id) {
+                if let Some(build) = builds.remove(&act_id) {
+                    // Set the end time.
                     let now = Utc::now();
-                    build.end = Set(Some(now));
+                    let build = {
+                        let mut build_: build::ActiveModel = build.into();
+                        build_.end = Set(Some(now));
+                        build_.update(&*state.db).await.context("Saving build")?
+                    };
 
                     // Log the final phase too.
-                    if let ActiveValue::Set(start_phase) = &build.start_phase {
-                        if let Some(Phase(last_phase, started)) = start_phase.0.last() {
-                            debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
-                        }
+                    if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
+                        debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
                     }
-                    debug!(?build.name,?build.machine_name,t=?(now - build.start.clone().unwrap()), "[{}] Build Finished", act_id);
-                    build.update(&*state.db).await.context("Saving build")?;
+                    debug!(?build.name,?build.machine_name,t=?(now-build.start), "[{}] Build Finished", act_id);
                 }
             }
 
@@ -604,45 +604,69 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                 let fields = d2c.take_log_fields().await.context("Reading fields")?;
                 match kind {
                     ResultType::BuildLogLine => {
-                        let msg = fields.get(0).and_then(|v| v.as_string());
+                        let msg = fields
+                            .get(0)
+                            .and_then(|v| v.as_string())
+                            .ok_or_else(|| anyhow!("{:?} has no 'msg'", kind))?;
                         trace!(act_id, msg, "Result: BuildLogLine");
                     }
                     ResultType::SetPhase => {
-                        let phase = fields.get(0).and_then(|v| v.as_string());
+                        let phase = fields
+                            .get(0)
+                            .and_then(|v| v.as_string())
+                            .ok_or_else(|| anyhow!("{:?} has no 'phase'", kind))?;
                         trace!(act_id, phase, "Result: SetPhase");
 
                         if let Some(build) = builds.get_mut(&act_id) {
                             let now = Utc::now();
-                            let phase = Phase(phase.cloned().unwrap_or_default(), now);
-                            if let ActiveValue::Set(start_phase) = &mut build.start_phase {
-                                if let Some(Phase(last_phase, started)) = start_phase.0.last() {
-                                    debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
-                                }
-                                start_phase.0.push(phase);
-                            } else {
-                                build.start_phase = Set(PhaseList(vec![phase]));
+
+                            // If we just finished a phase, log that.
+                            if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
+                                debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
                             }
-                            build
-                                .clone()
-                                .update(&*state.db)
-                                .await
-                                .context("Saving build")?;
-                        }
+
+                            // Push it into the state list.
+                            *build = {
+                                let mut build_: build::ActiveModel = build.clone().into();
+                                build_.start_phase = Set(PhaseList({
+                                    let mut list = build.start_phase.0.clone();
+                                    list.push(Phase(phase.clone(), now));
+                                    list
+                                }));
+                                build_.update(&*state.db).await.context("Saving build")?
+                            }
+                        } else {
+                            warn!(act_id, phase, "SetPhase on unknown build");
+                        };
                     }
                     ResultType::Progress => {
-                        let (done, expected, running, failed) = (
-                            fields.get(0).and_then(|v| v.as_int()),
-                            fields.get(1).and_then(|v| v.as_int()),
-                            fields.get(2).and_then(|v| v.as_int()),
-                            fields.get(3).and_then(|v| v.as_int()),
-                        );
+                        let done = fields
+                            .get(0)
+                            .and_then(|v| v.as_int())
+                            .ok_or_else(|| anyhow!("{:?} has no 'done'", kind))?;
+                        let expected = fields
+                            .get(1)
+                            .and_then(|v| v.as_int())
+                            .ok_or_else(|| anyhow!("{:?} has no 'expected'", kind))?;
+                        let running = fields
+                            .get(2)
+                            .and_then(|v| v.as_int())
+                            .ok_or_else(|| anyhow!("{:?} has no 'running'", kind))?;
+                        let failed = fields
+                            .get(3)
+                            .and_then(|v| v.as_int())
+                            .ok_or_else(|| anyhow!("{:?} has no 'failed'", kind))?;
                         trace!(act_id, done, expected, running, failed, "Result: Progress");
                     }
                     ResultType::SetExpected => {
-                        let (state, expected) = (
-                            fields.get(0).and_then(|v| v.as_activity_type()),
-                            fields.get(1).and_then(|v| v.as_int()),
-                        );
+                        let state = fields
+                            .get(0)
+                            .and_then(|v| v.as_activity_type())
+                            .ok_or_else(|| anyhow!("{:?} has no 'state'", kind))?;
+                        let expected = fields
+                            .get(1)
+                            .and_then(|v| v.as_int())
+                            .ok_or_else(|| anyhow!("{:?} has no 'expected'", kind))?;
                         trace!(act_id, ?state, expected, "Result: SetExpected");
                     }
                     _ => trace!(act_id, ?kind, ?fields, "Result"),

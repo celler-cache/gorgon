@@ -15,6 +15,13 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Build::Table)
                     .if_not_exists()
+                    .col(
+                        ColumnDef::new(Build::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Build::Name).string().not_null())
                     .col(ColumnDef::new(Build::MachineName).string().not_null())
                     .col(ColumnDef::new(Build::Start).date_time().not_null())
@@ -25,12 +32,6 @@ impl MigrationTrait for Migration {
                             .default("[]"),
                     )
                     .col(ColumnDef::new(Build::End).date_time().null())
-                    .primary_key(
-                        Index::create()
-                            .col(Build::Name)
-                            .col(Build::MachineName)
-                            .col(Build::Start),
-                    )
                     .to_owned(),
             )
             .await?;
@@ -76,6 +77,7 @@ impl MigrationTrait for Migration {
 enum Build {
     #[sea_orm(iden = "builds")]
     Table,
+    Id,
     Name,
     MachineName,
     Start,
