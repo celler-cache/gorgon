@@ -32,6 +32,7 @@ impl MigrationTrait for Migration {
                             .default("[]"),
                     )
                     .col(ColumnDef::new(Build::End).date_time().null())
+                    .col(ColumnDef::new(Build::TempLogPath).string().null())
                     .to_owned(),
             )
             .await?;
@@ -83,4 +84,5 @@ enum Build {
     Start,
     StartPhase,
     End,
+    TempLogPath,
 }

@@ -208,6 +208,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-tempfile"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b37d4bb113c47e4f263d4b0221912ff5aa840a51bc9b7b47b024e1cf1926fd9b"
+dependencies = [
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,6 +1340,7 @@ name = "nix-supervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-tempfile",
  "axum",
  "chrono",
  "clap",
@@ -3091,6 +3102,7 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d023da39d1fde5a8a3fe1f3e01ca9632ada0a63e9797de55a879d6e2236277be"
 dependencies = [
+ "getrandom",
  "serde",
 ]
 

@@ -18,6 +18,8 @@ pub struct Model {
 
     pub start_phase: PhaseList,
     pub end: Option<DateTime<Utc>>,
+
+    pub temp_log_path: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, EnumIter, DeriveRelation)]

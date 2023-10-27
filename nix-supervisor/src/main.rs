@@ -15,6 +15,7 @@ use sea_orm::{prelude::*, Database, Set};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use tap::{Tap, TapFallible};
+use tokio::io::AsyncWriteExt;
 use tokio::{
     io::{BufReader, BufWriter},
     net::{UnixListener, UnixStream},
@@ -455,11 +456,17 @@ async fn run_session(
 /// Process a set of interjections (eg. log lines, build progress) sent from the daemon.
 #[instrument(skip_all)]
 async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()> {
+    use async_tempfile::TempFile;
     use entity::build::{self, Phase, PhaseList};
+
+    struct BuildState {
+        build: build::Model,
+        log: Option<TempFile>,
+    }
 
     // In-memory cache of active builds. Note that activity IDs are monotonic u64s with
     // the PID of the daemon in the high 32 bits; not guaranteed unique between sessions.
-    let mut builds = HashMap::<u64, build::Model>::new();
+    let mut builds = HashMap::<u64, BuildState>::new();
 
     loop {
         let inter = d2c
@@ -561,7 +568,10 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                         );
                         builds.insert(
                             act_id,
-                            build.insert(&*state.db).await.context("Saving build")?,
+                            BuildState {
+                                build: build.insert(&*state.db).await.context("Saving build")?,
+                                log: None,
+                            },
                         );
                     }
                     _ => trace!(
@@ -581,12 +591,13 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                 trace!(?act_id, "Stop Activity");
 
                 // Is this the end of a build we're tracking?
-                if let Some(build) = builds.remove(&act_id) {
+                if let Some(bs) = builds.remove(&act_id) {
                     // Set the end time.
                     let now = Utc::now();
                     let build = {
-                        let mut build_: build::ActiveModel = build.into();
+                        let mut build_: build::ActiveModel = bs.build.into();
                         build_.end = Set(Some(now));
+                        build_.temp_log_path = Set(None);
                         build_.update(&*state.db).await.context("Saving build")?
                     };
 
@@ -609,6 +620,47 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                             .and_then(|v| v.as_string())
                             .ok_or_else(|| anyhow!("{:?} has no 'msg'", kind))?;
                         trace!(act_id, msg, "Result: BuildLogLine");
+
+                        // Write it to the temporary log file.
+                        if let Some(bs) = builds.get_mut(&act_id) {
+                            // If we don't have a TempFile open for this build, open one.
+                            if bs.log.is_none() {
+                                let log = TempFile::new_with_name(format!(
+                                    "nix_supervisor_build_{}.tmp.log",
+                                    bs.build.id
+                                ))
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "Creating temporary log file for build #{} ({})",
+                                        bs.build.id, bs.build.name
+                                    )
+                                })?;
+                                debug!(act_id, path = log.file_path().to_str(), "Opened log file");
+
+                                bs.build = {
+                                    let mut build_: build::ActiveModel = bs.build.clone().into();
+                                    build_.temp_log_path = Set(Some(log.file_path().to_str().ok_or_else(|| anyhow!(
+                                        "Temp log path for build #{} ({}) contains invalid UTF-8: {}", bs.build.id,
+                                        bs.build.name,
+                                        log.file_path().to_string_lossy()))?.into(),
+                                    ));
+                                    build_.update(&*state.db).await.context("Saving build")?
+                                };
+                                bs.log = Some(log);
+                            };
+
+                            // Write the log line + a trailing newline.
+                            let log = bs.log.as_mut().unwrap();
+                            log.write_all(msg.as_bytes())
+                                .await
+                                .with_context(|| format!("Writing log line: {}", msg))?;
+                            log.write_all(&[b'\n'])
+                                .await
+                                .with_context(|| format!("Writing newline after: {}", msg))?;
+                        } else {
+                            warn!(act_id, msg, "BuildLogLine on unknown build");
+                        };
                     }
                     ResultType::SetPhase => {
                         let phase = fields
@@ -617,19 +669,19 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                             .ok_or_else(|| anyhow!("{:?} has no 'phase'", kind))?;
                         trace!(act_id, phase, "Result: SetPhase");
 
-                        if let Some(build) = builds.get_mut(&act_id) {
+                        if let Some(bs) = builds.get_mut(&act_id) {
                             let now = Utc::now();
 
                             // If we just finished a phase, log that.
-                            if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
-                                debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
+                            if let Some(Phase(phase, started)) = bs.build.start_phase.0.last() {
+                                debug!(t=?(now-started),"[{}] -> {} finished", act_id, phase);
                             }
 
                             // Push it into the state list.
-                            *build = {
-                                let mut build_: build::ActiveModel = build.clone().into();
+                            bs.build = {
+                                let mut build_: build::ActiveModel = bs.build.clone().into();
                                 build_.start_phase = Set(PhaseList({
-                                    let mut list = build.start_phase.0.clone();
+                                    let mut list = bs.build.start_phase.0.clone();
                                     list.push(Phase(phase.clone(), now));
                                     list
                                 }));
