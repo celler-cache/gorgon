@@ -721,6 +721,9 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
             }
             _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
         }
+        d2c.flush()
+            .await
+            .context("Couldn't flush writer after interjection")?;
     }
     d2c.flush()
         .await
