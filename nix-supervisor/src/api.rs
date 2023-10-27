@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::entity;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -52,6 +52,7 @@ pub(crate) struct AppState {
 pub(crate) fn new(db: Arc<DatabaseConnection>) -> Router<()> {
     Router::new()
         .route("/nix/store/:drv/builds", get(get_drv_builds))
+        .route("/builds/:build_id", get(get_build))
         .with_state(Arc::new(AppState { db }))
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
@@ -72,4 +73,22 @@ async fn get_drv_builds(
         .await
         .with_context(|| format!("Querying Builds for: /nix/store/{}", drv))?;
     Ok(Json(GetDrvBuildsResponse { builds }))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GetBuildResponse {
+    pub build: entity::build::Model,
+}
+
+async fn get_build(
+    State(state): State<Arc<AppState>>,
+    Path(build_id): Path<i32>,
+) -> Result<Json<GetBuildResponse>> {
+    Ok(Json(GetBuildResponse {
+        build: entity::build::Entity::find_by_id(build_id)
+            .one(&*state.db)
+            .await
+            .with_context(|| format!("Getting build #{}", build_id))?
+            .ok_or_else(|| anyhow!("Build not found: #{}", build_id))?,
+    }))
 }
