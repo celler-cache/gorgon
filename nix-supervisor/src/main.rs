@@ -64,11 +64,6 @@ fn init_logging(args: &Args) {
             2.. => tracing_subscriber::filter::LevelFilter::TRACE,
         })
         .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_journald::layer()
-                .tap_err(|err| debug!(?err, "Couldn't connect to journald"))
-                .ok(),
-        )
         .init();
 }
 

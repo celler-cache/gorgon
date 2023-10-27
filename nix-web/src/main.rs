@@ -21,8 +21,7 @@ use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tap::TapFallible;
-use tracing::{debug, debug_span, info, instrument, trace};
+use tracing::{debug_span, info, instrument, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -124,11 +123,6 @@ fn init_logging(args: &Args) {
             2.. => tracing_subscriber::filter::LevelFilter::TRACE,
         })
         .with(tracing_subscriber::fmt::layer())
-        .with(
-            tracing_journald::layer()
-                .tap_err(|err| debug!(?err, "Couldn't connect to journald"))
-                .ok(),
-        )
         .init();
 }
 
