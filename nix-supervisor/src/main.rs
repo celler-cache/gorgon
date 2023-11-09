@@ -972,9 +972,10 @@ async fn do_query_path_info<'s>(
     let is_valid = d2c
         .take_bool_if(state.since(17))
         .await
-        .context("Reading 'is_valid'")?;
+        .context("Reading 'is_valid'")?
+        .unwrap_or(true);
     let pathinfo = d2c
-        .take_pathinfo(&state)
+        .take_pathinfo_if(&state, is_valid)
         .await
         .context("Reading 'pathinfo'")?;
     debug!(?is_valid, ?pathinfo, "<- Daemon replied");

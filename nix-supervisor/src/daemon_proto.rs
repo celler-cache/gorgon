@@ -41,7 +41,7 @@ impl<'s> Stream<'s> {
         Ok(v)
     }
 
-    /// Takes a u64 from the stream (little endian), if the protocol minor version is >= `minor`.
+    /// Takes a u64 from the stream (little endian), if `cond` is true.
     pub async fn take_u64_le_if(&mut self, cond: bool) -> Result<Option<u64>> {
         if cond {
             Ok(Some(self.take_u64_le().await?))
@@ -55,7 +55,7 @@ impl<'s> Stream<'s> {
         Ok(self.take_u64_le().await? > 0)
     }
 
-    /// Takes a boolean from the stream, if the protocol minor version is >= `minor`.
+    /// Takes a boolean from the stream, if `cond` is true.
     pub async fn take_bool_if(&mut self, cond: bool) -> Result<Option<bool>> {
         if cond {
             Ok(Some(self.take_bool().await?))
@@ -129,7 +129,7 @@ impl<'s> Stream<'s> {
         }
     }
 
-    /// Takes a string from the stream, if the protocol minor version >= `minor`.
+    /// Takes a string from the stream, if `cond` is true.
     pub async fn take_string_if(&mut self, cond: bool) -> Result<Option<String>> {
         if cond {
             Ok(Some(self.take_string().await?))
@@ -155,7 +155,7 @@ impl<'s> Stream<'s> {
         Ok(strings)
     }
 
-    /// Takes a list of strings from the stream, if the protocol minor version >= `minor`.
+    /// Takes a list of strings from the stream, if `cond` is true.
     pub async fn take_strings_if(&mut self, cond: bool) -> Result<Option<Vec<String>>> {
         if cond {
             Ok(Some(self.take_strings().await?))
@@ -248,6 +248,15 @@ impl<'s> Stream<'s> {
             sigs,
             ca,
         })
+    }
+
+    /// Takes a PathInfo from the stream, if `c` is true.
+    pub async fn take_pathinfo_if(&mut self, state: &State, c: bool) -> Result<Option<PathInfo>> {
+        if c {
+            Ok(Some(self.take_pathinfo(state).await?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn take_keyed_build_results(&mut self) -> Result<Vec<(String, BuildResult)>> {
