@@ -4,6 +4,7 @@
 
 use crate::Result;
 use chrono::prelude::*;
+use reqwest::Url;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,8 +22,8 @@ pub struct GetDerivationBuildsResponse {
 }
 
 impl Build {
-    pub async fn list(base: &str, path: &str) -> Result<GetDerivationBuildsResponse> {
-        Ok(reqwest::get(format!("{}{}/builds", base, path))
+    pub async fn list(base: &Url, path: &str) -> Result<GetDerivationBuildsResponse> {
+        Ok(reqwest::get(base.join(&format!("{}/builds", path))?)
             .await?
             .json::<GetDerivationBuildsResponse>()
             .await?)

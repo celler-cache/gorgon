@@ -45,6 +45,8 @@ pub enum Error {
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
+    URL(#[from] url::ParseError),
+    #[error(transparent)]
     IO(#[from] std::io::Error),
 
     #[error("request handler panicked - this is a bug: {0}")]
@@ -107,7 +109,7 @@ struct Args {
 
     /// Address of the nix-supervisor API.
     #[arg(long, short = 'S', default_value = "http://[::1]:9649")]
-    nix_supervisor_addr: String,
+    nix_supervisor_addr: url::Url,
 }
 
 #[instrument(skip_all)]
