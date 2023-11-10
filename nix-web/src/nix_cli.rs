@@ -78,7 +78,7 @@ impl Derivation {
         args: AI,
         paths: PI,
     ) -> Result<BTreeMap<String, Self>> {
-        Ok(serde_json::from_slice(
+        let mut v: BTreeMap<String, Self> = serde_json::from_slice(
             &exec(
                 Command::new(NIX_CLI_PATH)
                     .arg("--experimental-features")
@@ -89,7 +89,11 @@ impl Derivation {
                     .args(paths),
             )
             .await?[..],
-        )?)
+        )?;
+        for (path, drv) in v.iter_mut() {
+            drv.path = path.clone();
+        }
+        Ok(v)
     }
 }
 

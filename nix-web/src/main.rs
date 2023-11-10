@@ -12,16 +12,17 @@ use axum::{
     http::{HeaderName, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
+    Json,
 };
 use clap::Parser;
 use hyper::header;
 use listenfd::ListenFd;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Connection, Row};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug_span, info, instrument, trace};
+use tracing::{debug, debug_span, info, instrument, trace};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -144,6 +145,7 @@ async fn main() -> Result<()> {
         .route("/static/*path", get(get_static))
         .route("/goto", get(get_goto))
         .route("/nix/store/*path", get(get_derivation))
+        .route("/api/nix/store/:drv/poll", get(get_api_derivation_poll))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
@@ -314,7 +316,9 @@ async fn get_derivation(
         GetDerivationPage::Info => Ok(get_derivation_info(State(state), Path(store_path))
             .await?
             .into_response()),
-        GetDerivationPage::Log => Ok(get_derivation_log(Path(store_path)).await?.into_response()),
+        GetDerivationPage::Log => Ok(get_derivation_log(State(state), Path(store_path))
+            .await?
+            .into_response()),
     }
 }
 
@@ -344,8 +348,6 @@ async fn get_derivation_info(
     for (path, drv) in drvs.iter_mut() {
         let span = debug_span!("drv", path);
         let _enter = span.enter();
-
-        drv.path = path.clone();
 
         // If the initial `nix path-info` has one of our outputs, it's a success.
         drv.status = if drv
@@ -485,8 +487,68 @@ fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
     root_set.iter().next().unwrap()
 }
 
-async fn get_derivation_log(Path(store_path): Path<String>) -> Result<String> {
-    Ok(nix_cli::log(format!("{}/{}", NIX_STORE_PATH, store_path)).await?)
+#[derive(Template)]
+#[template(path = "derivation_log.html")]
+struct DerivationLogTemplate {
+    root: Derivation,
+    is_final: bool,
+    log: String,
+}
+
+async fn get_derivation_log(
+    State(state): State<Arc<AppState>>,
+    Path(store_path): Path<String>,
+) -> Result<DerivationLogTemplate> {
+    let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
+    let path = path_buf.to_str().unwrap();
+
+    let root = nix_cli::Derivation::get(["--"], [path])
+        .await?
+        .remove(path)
+        .unwrap();
+    let (is_final, log) = read_derivation_log(&state.args, path).await?;
+
+    Ok(DerivationLogTemplate {
+        root,
+        is_final,
+        log,
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct GetAPIDerivationPollResponse {
+    pub is_final: bool,
+    pub log: String,
+}
+async fn get_api_derivation_poll(
+    State(state): State<Arc<AppState>>,
+    Path(drv): Path<String>,
+) -> Result<Json<GetAPIDerivationPollResponse>> {
+    let path_buf = PathBuf::from(NIX_STORE_PATH).join(&drv);
+    let path = path_buf.to_str().unwrap();
+
+    let (is_final, log) = read_derivation_log(&state.args, path).await?;
+    Ok(Json(GetAPIDerivationPollResponse { is_final, log }))
+}
+
+#[instrument(skip(args))]
+async fn read_derivation_log(args: &Args, path: &str) -> Result<(bool, String)> {
+    // Arrested for Rust crimes.
+    Ok(match nix_cli::log(path).await {
+        Ok(log) if log.len() > 0 => {
+            debug!("Got final log from nix");
+            (true, log)
+        }
+        _ if args.nix_supervisor => {
+            debug!("Querying nix-supervisor...");
+            let log = supervisor_api::derivation_log(&args.nix_supervisor_addr, path).await?;
+            (false, log)
+        }
+        _ => {
+            debug!("No log, returning non-final blank");
+            (false, String::new())
+        }
+    })
 }
 
 #[cfg(test)]

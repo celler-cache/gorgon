@@ -29,3 +29,10 @@ impl Build {
             .await?)
     }
 }
+
+pub async fn derivation_log(base: &Url, path: &str) -> Result<String> {
+    Ok(reqwest::get(base.join(&format!("{}/log", path))?)
+        .await?
+        .text()
+        .await?)
+}
