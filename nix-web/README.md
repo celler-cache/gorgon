@@ -21,15 +21,10 @@ nix --extra-experimental-features 'nix-command flakes' run 'git+https://codeberg
 ### NixOS
 
 ```nix
-{ ... }:
+{ pkgs, ... }:
 
 {
-  systemd.packages = [
-    (import ((builtins.fetchTarball {
-      url = "https://codeberg.org/gorgon/gorgon/archive/<commit>.tar.gz";
-      sha256 = ...;
-    }) + "/nix-web") {})
-  ];
+  systemd.packages = with pkgs; [ nix-web ];
 
   systemd.sockets.nix-web = {
     socketConfig.ListenStream = "[::1]:8649";
