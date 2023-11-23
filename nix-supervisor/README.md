@@ -40,6 +40,32 @@ nix --extra-experimental-features 'nix-command flakes' run 'git+https://codeberg
 }
 ```
 
+Or clone this repository and use the overlay:
+
+```nix
+{ pkgs, ... }:
+
+{
+  systemd.packages = with pkgs; [ nix-web ];
+
+  systemd.sockets.nix-supervisor = {
+    socketConfig.ListenStream = [
+      "/run/nix-supervisor.sock"
+      "[::1]:9649"
+    ];
+    wantedBy = [ "sockets.target" ];
+  };
+
+  environment.variables = {
+    NIX_DAEMON_SOCKET_PATH = "/run/nix-supervisor.sock";
+  };
+
+  nixpkgs.overlays = [
+    (import /home/embr/src/gorgon/gorgon/nix/overlay.nix)
+  ];
+}
+```
+
 Contributing
 ------------
 

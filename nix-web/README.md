@@ -33,6 +33,19 @@ nix --extra-experimental-features 'nix-command flakes' run 'git+https://codeberg
 }
 ```
 
+To use a version that's not yet in nixpkgs, clone this repository and use the overlay:
+
+```nix
+{ ... }:
+{
+  # ...
+
+  nixpkgs.overlays = [
+    (import /home/embr/src/gorgon/gorgon/nix/overlay.nix)
+  ];
+}
+```
+
 Contributing
 ------------
 

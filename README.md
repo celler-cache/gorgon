@@ -5,6 +5,7 @@ Gorgon
 ======
 
 - [nix-web](nix-web)
+- [nix-supervisor](nix-supervisor)
 
 ## Contributing
 
