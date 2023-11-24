@@ -3,12 +3,14 @@
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
-, nix ? pkgs.nix
+, nixVersions ? pkgs.nixVersions
+, nixVersion ? "nix_2_17"
 , pkg-config ? pkgs.pkg-config
 , openssl ? pkgs.openssl
 , srcOverride ? import ../nix/src.nix { inherit lib; }
 }:
 let
+  nix = nixVersions."${nixVersion}";
   cargoPackageFlags = [ "-p" "nix-web" ];
 in
 pkgs.rustPlatform.buildRustPackage {
