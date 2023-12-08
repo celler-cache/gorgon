@@ -83,7 +83,7 @@ pub async fn write_strings<W: AsyncWriteExt + Unpin, S: AsRef<str>>(
     Ok(())
 }
 
-/// Reads a PathInfo structure from the stream.
+/// Read a PathInfo structure from the stream.
 pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Version) -> Result<PathInfo> {
     let deriver = read_string(r)
         .await
@@ -129,7 +129,7 @@ pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Version) -
         ca,
     })
 }
-/// Writes a PathInfo structure to the stream.
+/// Write a PathInfo structure to the stream.
 pub async fn write_pathinfo<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     proto: Version,
