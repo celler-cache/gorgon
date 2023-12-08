@@ -3,27 +3,82 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use async_stream::try_stream;
+use chrono::{DateTime, Utc};
+use futures::future::OptionFuture;
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version(u32, u32);
+trait ResultExt<T, E> {
+    fn with_field(self, f: &'static str) -> Result<T>;
+}
+
+impl<T, E: Into<Error>> ResultExt<T, E> for Result<T, E> {
+    fn with_field(self, f: &'static str) -> Result<T> {
+        self.map_err(|err| Error::Field(f, Box::new(err.into())))
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum Error {
+    /// This error was encountered while reading/writing a specific field.
+    #[error("`{0}`: {1}")]
+    Field(&'static str, #[source] Box<Error>),
+    #[error("invalid value: {0}")]
+    Invalid(String),
+
     #[error(transparent)]
     IO(#[from] std::io::Error),
 }
 
-pub struct NixReader<R: AsyncReadExt + Unpin>(R, Version);
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version(u8, u8);
+
+impl Version {
+    fn since(&self, v: u8) -> bool {
+        self.1 >= v
+    }
+}
+
+/// Data about a Nix store path.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathInfo {
+    /// Derivation that produced this path.
+    pub deriver: Option<String>,
+    /// Paths referenced by this path.
+    pub references: Vec<String>,
+
+    /// NAR hash (in the form: [algo]-[hash]).
+    pub nar_hash: String,
+    /// NAR size.
+    pub nar_size: u64,
+
+    /// Is this path "ultimately trusted", eg. built locally?
+    pub ultimate: bool,
+    /// Optional signatures, eg. from a binary cache.
+    pub signatures: Vec<String>,
+    /// An assertion that this path is content-addressed, eg. for fixed-output derivations.
+    pub ca: Option<String>,
+
+    /// When the path was registered, eg. placed into the local store.
+    pub registration_time: DateTime<Utc>,
+}
+
+pub struct NixReader<R: AsyncReadExt + Unpin> {
+    r: R,
+    proto: Version,
+}
 
 impl<R: AsyncReadExt + Unpin> NixReader<R> {
+    pub fn new(r: R, proto: Version) -> Self {
+        Self { r, proto }
+    }
+
     /// Read a u64 from the stream (little endian).
     pub async fn read_u64(&mut self) -> Result<u64> {
-        Ok(self.0.read_u64_le().await?)
+        Ok(self.r.read_u64_le().await?)
     }
 
     /// Read a boolean from the stream, encoded as u64 (>0 is true).
@@ -33,7 +88,7 @@ impl<R: AsyncReadExt + Unpin> NixReader<R> {
 
     /// Reads the exact number of bytes needed to fill up `buf`.
     pub async fn read_exact<'a>(&mut self, buf: &'a mut [u8]) -> Result<&'a [u8]> {
-        self.0.read_exact(buf).await?;
+        self.r.read_exact(buf).await?;
         Ok(buf)
     }
 
@@ -41,7 +96,7 @@ impl<R: AsyncReadExt + Unpin> NixReader<R> {
     /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
     /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
     pub async fn read_string(&mut self) -> Result<String> {
-        let len = self.read_u64().await? as usize;
+        let len = self.read_u64().await.with_field("<length>")? as usize;
         let padded_len = len + if len % 8 > 0 { 8 - (len % 8) } else { 0 };
         if padded_len <= 1024 {
             let mut buf = [0u8; 1024];
@@ -58,19 +113,78 @@ impl<R: AsyncReadExt + Unpin> NixReader<R> {
     /// many strings using the normal `read_string()` encoding.
     pub fn read_strings(&mut self) -> impl Stream<Item = Result<String>> + '_ {
         try_stream! {
-            let count = self.read_u64().await? as usize;
+            let count = self.read_u64().await.with_field("<count>")? as usize;
             for _ in 0..count {
                 yield self.read_string().await?;
             }
         }
+    }
+
+    /// Reads a PathInfo structure from the stream.
+    pub async fn read_pathinfo(&mut self) -> Result<PathInfo> {
+        let deriver = self
+            .read_string()
+            .await
+            .map(|s| (!s.is_empty()).then_some(s)) // "" -> None.
+            .with_field("PathInfo.deriver")?;
+        let nar_hash = self.read_string().await.with_field("PathInfo.nar_hash")?;
+        let references = self
+            .read_strings()
+            .collect::<Result<Vec<_>>>()
+            .await
+            .with_field("PathInfo.deriver")?;
+        let registration_time = self
+            .read_u64()
+            .await
+            .with_field("PathInfo.registration_time")
+            .and_then(|ts| {
+                DateTime::from_timestamp(ts as i64, 0).ok_or_else(|| Error::Invalid(ts.to_string()))
+            })?;
+        let nar_size = self.read_u64().await.with_field("PathInfo.nar_size")?;
+
+        let ultimate = OptionFuture::from(self.proto.since(16).then(|| self.read_bool()))
+            .await
+            .transpose()
+            .with_field("PathInfo.ultimate")?
+            .unwrap_or_default();
+        let signatures =
+            OptionFuture::from(self.proto.since(16).then(|| self.read_strings().collect()))
+                .await
+                .transpose()
+                .with_field("PathInfo.signatures")?
+                .unwrap_or_default();
+        let ca = OptionFuture::from(self.proto.since(16).then(|| self.read_string()))
+            .await
+            .transpose()
+            .with_field("PathInfo.ca")?
+            .and_then(|s| (!s.is_empty()).then_some(s)); // "" -> None.
+
+        Ok(PathInfo {
+            deriver,
+            nar_hash,
+            references,
+            registration_time,
+            nar_size,
+            ultimate,
+            signatures,
+            ca,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use tokio_stream::StreamExt;
     use tokio_test::io::Builder;
+
+    fn pad_str<const L: usize>(s: &str) -> [u8; L] {
+        assert!(L % 8 == 0, "{} is not aligned to 8", L);
+        let mut v = [0u8; L];
+        (&mut v[..s.len()]).copy_from_slice(s.as_bytes());
+        v
+    }
 
     // Integers.
     #[tokio::test]
@@ -80,7 +194,10 @@ mod tests {
             .build();
         assert_eq!(
             1234567890u64,
-            NixReader(mock, Version(0, 0)).read_u64().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_u64()
+                .await
+                .unwrap()
         );
     }
 
@@ -90,7 +207,10 @@ mod tests {
         let mock = Builder::new().read(&0u64.to_le_bytes()[..]).build();
         assert_eq!(
             false,
-            NixReader(mock, Version(0, 0)).read_bool().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_bool()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -98,7 +218,10 @@ mod tests {
         let mock = Builder::new().read(&1u64.to_le_bytes()[..]).build();
         assert_eq!(
             true,
-            NixReader(mock, Version(0, 0)).read_bool().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_bool()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -106,7 +229,10 @@ mod tests {
         let mock = Builder::new().read(&2u64.to_le_bytes()[..]).build();
         assert_eq!(
             true,
-            NixReader(mock, Version(0, 0)).read_bool().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_bool()
+                .await
+                .unwrap()
         );
     }
 
@@ -116,7 +242,10 @@ mod tests {
         let mock = Builder::new().read(&0u64.to_le_bytes()[..]).build();
         assert_eq!(
             "".to_string(),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -128,7 +257,10 @@ mod tests {
             .build();
         assert_eq!(
             "a".to_string(),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -139,7 +271,10 @@ mod tests {
             .build();
         assert_eq!(
             "i'm gay.".to_string(),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
 
@@ -152,7 +287,10 @@ mod tests {
             .build();
         assert_eq!(
             String::from_iter(std::iter::repeat('a').take(1024)),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -164,7 +302,10 @@ mod tests {
             .build();
         assert_eq!(
             String::from_iter(std::iter::repeat('a').take(1025)),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
     #[tokio::test]
@@ -175,7 +316,10 @@ mod tests {
             .build();
         assert_eq!(
             String::from_iter(std::iter::repeat('a').take(2048)),
-            NixReader(mock, Version(0, 0)).read_string().await.unwrap()
+            NixReader::new(mock, Version(0, 0))
+                .read_string()
+                .await
+                .unwrap()
         );
     }
 
@@ -184,7 +328,7 @@ mod tests {
         let mock = Builder::new().read(&0u64.to_le_bytes()[..]).build();
         assert_eq!(
             Vec::<String>::new(),
-            NixReader(mock, Version(0, 0))
+            NixReader::new(mock, Version(0, 0))
                 .read_strings()
                 .collect::<Result<Vec<_>>>()
                 .await
@@ -200,7 +344,7 @@ mod tests {
             .build();
         assert_eq!(
             vec!["i'm gay.".to_string()],
-            NixReader(mock, Version(0, 0))
+            NixReader::new(mock, Version(0, 0))
                 .read_strings()
                 .collect::<Result<Vec<_>>>()
                 .await
@@ -227,9 +371,124 @@ mod tests {
                 "there's no way that a bee".to_string(),
                 "should be able to fly".to_string()
             ],
-            NixReader(mock, Version(0, 0))
+            NixReader::new(mock, Version(0, 0))
                 .read_strings()
                 .collect::<Result<Vec<_>>>()
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_pathinfo_derived() {
+        let mock = Builder::new()
+            .read(&61u64.to_le_bytes()) // deriver
+            .read(&pad_str::<64>(
+                "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv",
+            ))
+            .read(&51u64.to_le_bytes()) // nar_hash
+            .read(&pad_str::<56>(
+                "sha256-sUu8vqpIoy7ZpnQPcwvQasNqX2jJOSXeEwd1yFtTukU=",
+            ))
+            .read(&2u64.to_le_bytes()) // references[]
+            .read(&52u64.to_le_bytes()) // references[0]
+            .read(&pad_str::<56>(
+                "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3",
+            ))
+             .read(&57u64.to_le_bytes()) // references[1]
+             .read(&pad_str::<64>(
+                 "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27",
+             ))
+             .read(&1700495600u64.to_le_bytes()) // registration_time
+             .read(&1768960u64.to_le_bytes()) // nar_size
+             .read(&0u64.to_le_bytes()) // ultimate
+             .read(&1u64.to_le_bytes()) // signatures[]
+             .read(&106u64.to_le_bytes()) // signatures[0]
+             .read(&pad_str::<112>(
+                 "cache.nixos.org-1:Efz+S0y30Eny+nbjeiS0vlUiEpmNbW+m1CiznlC5odPRpTfQUENj+AQcDsnEgvXmaTY9OqG0l5pMIBc6XAk6AQ==",
+             ))
+             .read(&0u64.to_le_bytes()) // ca
+            .build();
+        assert_eq!(
+            PathInfo {
+                deriver: Some("/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv".into()),
+                nar_hash: "sha256-sUu8vqpIoy7ZpnQPcwvQasNqX2jJOSXeEwd1yFtTukU=".into(),
+                references: vec![
+                    "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3".into(),
+                    "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27".into(),
+                ],
+                registration_time: Utc.with_ymd_and_hms(2023, 11, 20, 15, 53, 20).unwrap(),
+                nar_size: 1768960,
+                ultimate: false,
+                signatures: vec![
+                    "cache.nixos.org-1:Efz+S0y30Eny+nbjeiS0vlUiEpmNbW+m1CiznlC5odPRpTfQUENj+AQcDsnEgvXmaTY9OqG0l5pMIBc6XAk6AQ==".into(),
+                ],
+                ca: None,
+            },
+            NixReader::new(mock, Version(1, 35))
+                .read_pathinfo()
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_pathinfo_ca() {
+        let mock = Builder::new()
+            .read(&0u64.to_le_bytes()) // deriver
+            .read(&51u64.to_le_bytes()) // nar_hash
+            .read(&pad_str::<56>(
+                "sha256-1JmbR4NOsYNvgbJlqjp+4/bfm22IvhakiE1DXNfx78s=",
+            ))
+            .read(&5u64.to_le_bytes()) // references[]
+            .read(&60u64.to_le_bytes()) // references[0]
+            .read(&pad_str::<64>(
+                "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv",
+            ))
+            .read(&58u64.to_le_bytes()) // references[1]
+            .read(&pad_str::<64>(
+                "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv",
+            ))
+            .read(&54u64.to_le_bytes()) // references[2]
+            .read(&pad_str::<56>(
+                "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh",
+            ))
+            .read(&60u64.to_le_bytes()) // references[3]
+            .read(&pad_str::<64>(
+                "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv",
+            ))
+            .read(&60u64.to_le_bytes()) // references[4]
+            .read(&pad_str::<64>(
+                "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv",
+            ))
+            .read(&1700854586u64.to_le_bytes()) // registration_time
+            .read(&3008u64.to_le_bytes()) // nar_size
+            .read(&0u64.to_le_bytes()) // ultimate
+            .read(&0u64.to_le_bytes()) // signatures[]
+            .read(&64u64.to_le_bytes()) // ca
+            .read(&pad_str::<64>(
+                "text:sha256:0yjycizc8v9950dz9a69a7qlzcba9gl2gls8svi1g1i75xxf206d",
+            ))
+            .build();
+        assert_eq!(
+            PathInfo {
+                deriver: None,
+                nar_hash: "sha256-1JmbR4NOsYNvgbJlqjp+4/bfm22IvhakiE1DXNfx78s=".into(),
+                references: vec![
+                    "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv".into(),
+                    "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv".into(),
+                    "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh".into(),
+                    "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv".into(),
+                    "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv".into(),
+                ],
+                registration_time: Utc.with_ymd_and_hms(2023, 11, 24, 19, 36, 26).unwrap(),
+                nar_size: 3008,
+                ultimate: false,
+                signatures: vec![],
+                ca: Some("text:sha256:0yjycizc8v9950dz9a69a7qlzcba9gl2gls8svi1g1i75xxf206d".into()),
+            },
+            NixReader::new(mock, Version(1, 35))
+                .read_pathinfo()
                 .await
                 .unwrap()
         );
