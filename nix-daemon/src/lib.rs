@@ -31,7 +31,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version(u8, u8);
 
 impl Version {
