@@ -34,6 +34,17 @@ pub enum Error {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version(u8, u8);
 
+impl From<u64> for Version {
+    fn from(raw: u64) -> Self {
+        Self(((raw & 0xFF00) >> 8) as u8, (raw & 0x00FF) as u8)
+    }
+}
+impl From<Version> for u64 {
+    fn from(v: Version) -> Self {
+        ((v.0 as u64) << 8) | (v.1 as u64)
+    }
+}
+
 impl Version {
     fn since(&self, v: u8) -> bool {
         self.1 >= v

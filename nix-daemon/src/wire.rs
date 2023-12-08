@@ -27,6 +27,15 @@ pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> Result<
     Ok(write_u64(w, v.then_some(1u64).unwrap_or(0u64)).await?)
 }
 
+/// Reads a protocol version from the stream.
+pub async fn read_version<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Version> {
+    read_u64(r).await.map(|raw| raw.into())
+}
+/// Writes a protocol version to the stream.
+pub async fn write_version<W: AsyncWriteExt + Unpin>(w: &mut W, v: Version) -> Result<()> {
+    write_u64(w, v.into()).await
+}
+
 /// Reads a string from the stream. Strings are prefixed with a u64 length, but the
 /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
 /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
@@ -220,6 +229,18 @@ mod tests {
         let mut mock = Builder::new().write(&1u64.to_le_bytes()).build();
 
         write_bool(&mut mock, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_version() {
+        // Why are they this way around?? Is this right?
+        let mut mock = Builder::new().read(&[34, 12, 0, 0, 0, 0, 0, 0]).build();
+        assert_eq!(Version(12, 34), read_version(&mut mock).await.unwrap());
+    }
+    #[tokio::test]
+    async fn test_write_version() {
+        let mut mock = Builder::new().write(&[34, 12, 0, 0, 0, 0, 0, 0]).build();
+        write_version(&mut mock, Version(12, 34)).await.unwrap();
     }
 
     // Short strings.
