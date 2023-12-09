@@ -45,6 +45,12 @@ impl From<Version> for u64 {
     }
 }
 
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.0, self.1)
+    }
+}
+
 impl Version {
     fn since(&self, v: u8) -> bool {
         self.1 >= v
@@ -73,4 +79,18 @@ pub struct PathInfo {
 
     /// When the path was registered, eg. placed into the local store.
     pub registration_time: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Sanity check for version comparisons.
+    #[test]
+    fn test_version_ord() {
+        assert!(Version(0, 1) > Version(0, 0));
+        assert!(Version(1, 0) > Version(0, 0));
+        assert!(Version(1, 0) > Version(0, 1));
+        assert!(Version(1, 1) > Version(1, 0));
+    }
 }
