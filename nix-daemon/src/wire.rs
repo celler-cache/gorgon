@@ -9,6 +9,9 @@ use futures::future::OptionFuture;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
 
+pub const WORKER_MAGIC_1: u64 = 0x6e697863;
+pub const WORKER_MAGIC_2: u64 = 0x6478696f;
+
 /// Read a u64 from the stream (little endian).
 pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {
     Ok(r.read_u64_le().await?)
@@ -27,16 +30,16 @@ pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> Result<
     Ok(write_u64(w, v.then_some(1u64).unwrap_or(0u64)).await?)
 }
 
-/// Reads a protocol version from the stream.
+/// Read a protocol version from the stream.
 pub async fn read_version<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Version> {
     read_u64(r).await.map(|raw| raw.into())
 }
-/// Writes a protocol version to the stream.
+/// Write a protocol version to the stream.
 pub async fn write_version<W: AsyncWriteExt + Unpin>(w: &mut W, v: Version) -> Result<()> {
     write_u64(w, v.into()).await
 }
 
-/// Reads a string from the stream. Strings are prefixed with a u64 length, but the
+/// Read a string from the stream. Strings are prefixed with a u64 length, but the
 /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
 /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
 pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
