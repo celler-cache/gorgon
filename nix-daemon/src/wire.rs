@@ -57,7 +57,9 @@ pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
 }
 /// Write a string to the stream. See: NixReader::read_string.
 pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str>>(w: &mut W, s: S) -> Result<()> {
-    let b = s.as_ref().as_bytes();
+    let truncated = s.as_ref().split(|b| b=='\0')
+        .next().ok_or_else(|| Error::Invalid("slice::split() returned an empty iterator".to_string()))?;
+    let b = truncated.as_bytes();
     write_u64(w, b.len().try_into().unwrap())
         .await
         .with_field("<length>")?;
