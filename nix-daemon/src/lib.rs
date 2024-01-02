@@ -31,27 +31,28 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
+/// Protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version(u8, u8);
+pub struct Proto(u8, u8);
 
-impl From<u64> for Version {
+impl From<u64> for Proto {
     fn from(raw: u64) -> Self {
         Self(((raw & 0xFF00) >> 8) as u8, (raw & 0x00FF) as u8)
     }
 }
-impl From<Version> for u64 {
-    fn from(v: Version) -> Self {
+impl From<Proto> for u64 {
+    fn from(v: Proto) -> Self {
         ((v.0 as u64) << 8) | (v.1 as u64)
     }
 }
 
-impl std::fmt::Display for Version {
+impl std::fmt::Display for Proto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}", self.0, self.1)
     }
 }
 
-impl Version {
+impl Proto {
     fn since(&self, v: u8) -> bool {
         self.1 >= v
     }
@@ -88,9 +89,9 @@ mod tests {
     // Sanity check for version comparisons.
     #[test]
     fn test_version_ord() {
-        assert!(Version(0, 1) > Version(0, 0));
-        assert!(Version(1, 0) > Version(0, 0));
-        assert!(Version(1, 0) > Version(0, 1));
-        assert!(Version(1, 1) > Version(1, 0));
+        assert!(Proto(0, 1) > Proto(0, 0));
+        assert!(Proto(1, 0) > Proto(0, 0));
+        assert!(Proto(1, 0) > Proto(0, 1));
+        assert!(Proto(1, 1) > Proto(1, 0));
     }
 }

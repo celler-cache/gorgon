@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use crate::{Error, PathInfo, Result, ResultExt, Version};
+use crate::{Error, PathInfo, Proto, Result, ResultExt};
 use async_stream::try_stream;
 use chrono::DateTime;
 use futures::future::OptionFuture;
@@ -31,11 +31,11 @@ pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> Result<
 }
 
 /// Read a protocol version from the stream.
-pub async fn read_version<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Version> {
+pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
     read_u64(r).await.map(|raw| raw.into())
 }
 /// Write a protocol version to the stream.
-pub async fn write_version<W: AsyncWriteExt + Unpin>(w: &mut W, v: Version) -> Result<()> {
+pub async fn write_proto<W: AsyncWriteExt + Unpin>(w: &mut W, v: Proto) -> Result<()> {
     write_u64(w, v.into()).await
 }
 
@@ -98,7 +98,7 @@ pub async fn write_strings<W: AsyncWriteExt + Unpin, S: AsRef<str>>(
 }
 
 /// Read a PathInfo structure from the stream.
-pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Version) -> Result<PathInfo> {
+pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Proto) -> Result<PathInfo> {
     let deriver = read_string(r)
         .await
         .map(|s| (!s.is_empty()).then_some(s)) // "" -> None.
@@ -146,7 +146,7 @@ pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Version) -
 /// Write a PathInfo structure to the stream.
 pub async fn write_pathinfo<W: AsyncWriteExt + Unpin>(
     w: &mut W,
-    proto: Version,
+    proto: Proto,
     pi: &PathInfo,
 ) -> Result<()> {
     write_string(w, pi.deriver.as_ref().map(|s| s.as_str()).unwrap_or(""))
@@ -237,15 +237,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_version() {
+    async fn test_read_proto() {
         // Why are they this way around?? Is this right?
         let mut mock = Builder::new().read(&[34, 12, 0, 0, 0, 0, 0, 0]).build();
-        assert_eq!(Version(12, 34), read_version(&mut mock).await.unwrap());
+        assert_eq!(Proto(12, 34), read_proto(&mut mock).await.unwrap());
     }
     #[tokio::test]
-    async fn test_write_version() {
+    async fn test_write_proto() {
         let mut mock = Builder::new().write(&[34, 12, 0, 0, 0, 0, 0, 0]).build();
-        write_version(&mut mock, Version(12, 34)).await.unwrap();
+        write_proto(&mut mock, Proto(12, 34)).await.unwrap();
     }
 
     // Short strings.
@@ -434,7 +434,7 @@ mod tests {
                 ],
                 ca: None,
             },
-            read_pathinfo(&mut mock, Version(1, 35)).await.unwrap()
+            read_pathinfo(&mut mock, Proto(1, 35)).await.unwrap()
         );
     }
     #[tokio::test]
@@ -492,7 +492,7 @@ mod tests {
                 signatures: vec![],
                 ca: Some("text:sha256:0yjycizc8v9950dz9a69a7qlzcba9gl2gls8svi1g1i75xxf206d".into()),
             },
-            read_pathinfo(&mut mock, Version(1, 35)).await.unwrap()
+            read_pathinfo(&mut mock, Proto(1, 35)).await.unwrap()
         );
     }
 
@@ -528,7 +528,7 @@ mod tests {
             .build();
         write_pathinfo(
             &mut mock,
-            Version(1, 35),
+            Proto(1, 35),
             &PathInfo {
                 deriver: Some(
                     "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv".into(),
@@ -590,7 +590,7 @@ mod tests {
             .build();
         write_pathinfo(
             &mut mock,
-            Version(1, 35),
+            Proto(1, 35),
             &PathInfo {
                 deriver: None,
                 nar_hash: "sha256-1JmbR4NOsYNvgbJlqjp+4/bfm22IvhakiE1DXNfx78s=".into(),
