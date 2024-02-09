@@ -57,8 +57,10 @@ pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
 }
 /// Write a string to the stream. See: NixReader::read_string.
 pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str>>(w: &mut W, s: S) -> Result<()> {
-    let truncated = s.as_ref().split(|b| b=='\0')
-        .next().ok_or_else(|| Error::Invalid("slice::split() returned an empty iterator".to_string()))?;
+    let truncated =
+        s.as_ref().split(|b| b == '\0').next().ok_or_else(|| {
+            Error::Invalid("slice::split() returned an empty iterator".to_string())
+        })?;
     let b = truncated.as_bytes();
     write_u64(w, b.len().try_into().unwrap())
         .await
@@ -202,7 +204,6 @@ mod tests {
     #[tokio::test]
     async fn test_write_u64() {
         let mut mock = Builder::new().write(&1234567890u64.to_le_bytes()).build();
-
         write_u64(&mut mock, 1234567890).await.unwrap();
     }
 
@@ -226,13 +227,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_bool_false() {
         let mut mock = Builder::new().write(&0u64.to_le_bytes()).build();
-
         write_bool(&mut mock, false).await.unwrap();
     }
     #[tokio::test]
     async fn test_write_bool_true() {
         let mut mock = Builder::new().write(&1u64.to_le_bytes()).build();
-
         write_bool(&mut mock, true).await.unwrap();
     }
 
@@ -617,28 +616,26 @@ mod tests {
     #[tokio::test]
     #[allow(non_snake_case)]
     async fn test_cppnix__src_libstore_worker_protocol__string() {
-
-        let mut mock = Builder::new().write(&[
-            // cppnix ./tests/unit/libstore/data/common-protocol/string.bin
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x68, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x77, 0x68, 0x69, 0x74, 0x65, 0x20, 0x72, 0x61,
-            0x62, 0x62, 0x69, 0x74, 0x00, 0x00, 0x00, 0x00,
-            0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xe5, 0xa4, 0xa7, 0xe7, 0x99, 0xbd, 0xe5, 0x85,
-            0x94, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x6f, 0x68, 0x20, 0x6e, 0x6f, 0x20, 0x00, 0x00
-        ]).build();
+        let mut mock = Builder::new()
+            .write(&[
+                // cppnix ./tests/unit/libstore/data/common-protocol/string.bin
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x68, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x77, 0x68, 0x69, 0x74, 0x65, 0x20, 0x72, 0x61, 0x62, 0x62,
+                0x69, 0x74, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xe5, 0xa4, 0xa7, 0xe7, 0x99, 0xbd, 0xe5, 0x85, 0x94, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6f, 0x68, 0x20, 0x6e,
+                0x6f, 0x20, 0x00, 0x00,
+            ])
+            .build();
 
         // cppnix tests/unit/libstore/worker-protocol.cc
         write_string(&mut mock, "").await.unwrap();
         write_string(&mut mock, "hi").await.unwrap();
         write_string(&mut mock, "white rabbit").await.unwrap();
         write_string(&mut mock, "大白兔").await.unwrap();
-        write_string(&mut mock, "oh no \0\0\0 what was that!").await.unwrap();
+        write_string(&mut mock, "oh no \0\0\0 what was that!")
+            .await
+            .unwrap();
     }
-
 }
