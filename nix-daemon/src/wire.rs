@@ -2,14 +2,17 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use crate::{Error, PathInfo, Proto, Result, ResultExt};
+use crate::{Error, PathInfo, Proto, Result, ResultExt, Stderr};
 use async_stream::try_stream;
 use chrono::DateTime;
 use futures::future::OptionFuture;
+use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
 
+/// Magic number sent by the client.
 pub const WORKER_MAGIC_1: u64 = 0x6e697863;
+/// Magic number sent by the daemon.
 pub const WORKER_MAGIC_2: u64 = 0x6478696f;
 
 /// Read a u64 from the stream (little endian).
@@ -95,6 +98,29 @@ pub async fn write_strings<W: AsyncWriteExt + Unpin, S: AsRef<str>>(
         .with_field("<count>")?;
     for s in sl {
         write_string(w, s.as_ref()).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum StderrKind {
+    Last = 0x616c7473,
+}
+
+/// Read a protocol version from the stream.
+pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Stderr>> {
+    match StderrKind::try_from(read_u64(r).await?)
+        .map_err(|TryFromPrimitiveError { number }| Error::Invalid(format!("{:#x}", number)))?
+    {
+        StderrKind::Last => Ok(None),
+    }
+}
+/// Write a protocol version to the stream.
+pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>) -> Result<()> {
+    match v {
+        None => write_u64(w, StderrKind::Last.into()).await?,
+        Some(_) => todo!(),
     }
     Ok(())
 }
