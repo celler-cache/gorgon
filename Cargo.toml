@@ -5,6 +5,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "gorgon-github-events",
     "nix-web",
     "nix-supervisor",
     "nix-daemon",
