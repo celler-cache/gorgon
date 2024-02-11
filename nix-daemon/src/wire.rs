@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use crate::{Error, PathInfo, Proto, Result, ResultExt, Stderr};
+use std::collections::HashMap;
+
+use crate::{Error, PathInfo, Proto, Result, ResultExt, Stderr, Verbosity};
 use async_stream::try_stream;
 use chrono::DateTime;
 use futures::future::OptionFuture;
@@ -39,6 +41,15 @@ pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
 }
 /// Write a protocol version to the stream.
 pub async fn write_proto<W: AsyncWriteExt + Unpin>(w: &mut W, v: Proto) -> Result<()> {
+    write_u64(w, v.into()).await
+}
+
+/// Read a verbosity level from the stream.
+pub async fn read_verbosity<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Verbosity> {
+    Ok(read_u64(r).await?.try_into()?)
+}
+/// Write a verbosity level to the stream.
+pub async fn write_verbosity<W: AsyncWriteExt + Unpin>(w: &mut W, v: Verbosity) -> Result<()> {
     write_u64(w, v.into()).await
 }
 
@@ -261,6 +272,7 @@ mod tests {
         write_bool(&mut mock, true).await.unwrap();
     }
 
+    // Protocol versions.
     #[tokio::test]
     async fn test_read_proto() {
         // Why are they this way around?? Is this right?
@@ -271,6 +283,50 @@ mod tests {
     async fn test_write_proto() {
         let mut mock = Builder::new().write(&[34, 12, 0, 0, 0, 0, 0, 0]).build();
         write_proto(&mut mock, Proto(12, 34)).await.unwrap();
+    }
+
+    // Verbosity.
+    #[tokio::test]
+    async fn test_read_verbosity() {
+        let mut m = Builder::new()
+            .read(&0u64.to_le_bytes()) // Error
+            .read(&1u64.to_le_bytes()) // Warn
+            .read(&2u64.to_le_bytes()) // Notice
+            .read(&3u64.to_le_bytes()) // Info
+            .read(&4u64.to_le_bytes()) // Talkative
+            .read(&5u64.to_le_bytes()) // Chatty
+            .read(&6u64.to_le_bytes()) // Debug
+            .read(&7u64.to_le_bytes()) // Vomit
+            .build();
+        assert_eq!(Verbosity::Error, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Warn, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Notice, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Info, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Talkative, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Chatty, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Debug, read_verbosity(&mut m).await.unwrap());
+        assert_eq!(Verbosity::Vomit, read_verbosity(&mut m).await.unwrap());
+    }
+    #[tokio::test]
+    async fn test_write_verbosity() {
+        let mut m = Builder::new()
+            .write(&0u64.to_le_bytes()) // Error
+            .write(&1u64.to_le_bytes()) // Warn
+            .write(&2u64.to_le_bytes()) // Notice
+            .write(&3u64.to_le_bytes()) // Info
+            .write(&4u64.to_le_bytes()) // Talkative
+            .write(&5u64.to_le_bytes()) // Chatty
+            .write(&6u64.to_le_bytes()) // Debug
+            .write(&7u64.to_le_bytes()) // Vomit
+            .build();
+        write_verbosity(&mut m, Verbosity::Error).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Warn).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Notice).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Info).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Talkative).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Chatty).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Debug).await.unwrap();
+        write_verbosity(&mut m, Verbosity::Vomit).await.unwrap();
     }
 
     // Short strings.

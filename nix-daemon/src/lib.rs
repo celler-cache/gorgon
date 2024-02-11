@@ -5,6 +5,7 @@
 pub mod wire;
 
 use chrono::{DateTime, Utc};
+use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -49,6 +50,12 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
+impl From<TryFromPrimitiveError<Verbosity>> for Error {
+    fn from(value: TryFromPrimitiveError<Verbosity>) -> Self {
+        Self::Invalid(format!("Verbosity({:x})", value.number))
+    }
+}
+
 /// Protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Proto(u8, u8);
@@ -74,6 +81,19 @@ impl Proto {
     fn since(&self, v: u8) -> bool {
         self.1 >= v
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum Verbosity {
+    Error = 0,
+    Warn,
+    Notice,
+    Info,
+    Talkative,
+    Chatty,
+    Debug,
+    Vomit,
 }
 
 /// Data about a Nix store path.
