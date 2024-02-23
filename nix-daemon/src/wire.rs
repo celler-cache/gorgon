@@ -2,13 +2,14 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::HashMap;
-
-use crate::{Error, PathInfo, Proto, Result, ResultExt, Stderr, Verbosity};
+use crate::{
+    ClientSettings, Error, NixError, PathInfo, Proto, Result, ResultExt, Stderr, Verbosity,
+};
 use async_stream::try_stream;
 use chrono::DateTime;
 use futures::future::OptionFuture;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
+use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
 
@@ -16,6 +17,67 @@ use tokio_stream::{Stream, StreamExt};
 pub const WORKER_MAGIC_1: u64 = 0x6e697863;
 /// Magic number sent by the daemon.
 pub const WORKER_MAGIC_2: u64 = 0x6478696f;
+
+/// Opcodes.
+///
+/// Not included are Ops that were obsolete before the earliest Nix version we support:
+///
+/// - Nix 2.0 (2016-04-19: e0204f8d462041387651af388074491fd0bf36d6)
+///   - QueryPathHash = 4
+///   - QueryReferences = 5
+///   - QueryDeriver = 18
+/// - Nix 2.0 (2016-05-04: 538a64e8c314f23ba0c5d76201f1c20e71884a21)
+///   - ExportPath = 16
+///   - ImportPaths = 27
+#[derive(Debug, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum Op {
+    IsValidPath = 1,
+    HasSubstitutes = 3,
+    QueryReferrers = 6,
+    AddToStore = 7,
+    BuildPaths = 9,
+    EnsurePath = 10,
+    AddTempRoot = 11,
+    AddIndirectRoot = 12,
+    SyncWithGC = 13,
+    FindRoots = 14,
+    SetOptions = 19,
+    CollectGarbage = 20,
+    QuerySubstitutablePathInfo = 21,
+    QueryAllValidPaths = 23,
+    QueryFailedPaths = 24,
+    ClearFailedPaths = 25,
+    QueryPathInfo = 26,
+    QueryPathFromHashPart = 29,
+    QuerySubstitutablePathInfos = 30,
+    QueryValidPaths = 31,
+    QuerySubstitutablePaths = 32,
+    QueryValidDerivers = 33,
+    OptimiseStore = 34,
+    VerifyStore = 35,
+    BuildDerivation = 36,
+    AddSignatures = 37,
+    NarFromPath = 38,
+    AddToStoreNar = 39,
+    QueryMissing = 40,
+    QueryDerivationOutputMap = 41,
+    RegisterDrvOutput = 42,
+    QueryRealisation = 43,
+    AddMultipleToStore = 44,
+    AddBuildLog = 45,
+    BuildPathsWithResults = 46,
+
+    /// Obsolete since Nix 2.4, use AddToStore.
+    /// https://github.com/NixOS/nix/commit/c602ebfb34de3626fa0b9110face6ea4b171ac0f
+    AddTextToStore = 8,
+    /// Obsolete since Nix 2.4, use QueryDerivationOutputMap.
+    /// https://github.com/NixOS/nix/commit/d38f860c3ef001a456d4d447f89219de5e3c830c
+    QueryDerivationOutputs = 22,
+    /// Obsolete since Nix 2.4, get it from any derivation struct.
+    /// https://github.com/NixOS/nix/commit/045b07200c77bf1fe19c0a986aafb531e7e1ba54
+    QueryDerivationOutputNames = 28,
+}
 
 /// Read a u64 from the stream (little endian).
 pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {
@@ -41,6 +103,15 @@ pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
 }
 /// Write a protocol version to the stream.
 pub async fn write_proto<W: AsyncWriteExt + Unpin>(w: &mut W, v: Proto) -> Result<()> {
+    write_u64(w, v.into()).await
+}
+
+/// Read an opcode from the stream.
+pub async fn read_op<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Op> {
+    Ok(read_u64(r).await?.try_into()?)
+}
+/// Write an opcode to the stream.
+pub async fn write_op<W: AsyncWriteExt + Unpin>(w: &mut W, v: Op) -> Result<()> {
     write_u64(w, v.into()).await
 }
 
@@ -113,18 +184,91 @@ pub async fn write_strings<W: AsyncWriteExt + Unpin, S: AsRef<str>>(
     Ok(())
 }
 
+/// Read a NixError struct from the stream.
+pub async fn read_error<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<NixError> {
+    read_string(r)
+        .await
+        .and_then(|s| match s.as_str() {
+            "Error" => Ok(()),
+            _ => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
+        })
+        .with_field("Error.__unused_type_1")?;
+
+    let level = read_verbosity(r).await.with_field("Error.level")?;
+
+    read_string(r)
+        .await
+        .and_then(|s| match s.as_str() {
+            "Error" => Ok(()),
+            _ => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
+        })
+        .with_field("Error.__unused_type_2")?;
+
+    let msg = read_string(r).await.with_field("Error.msg")?;
+
+    read_u64(r).await.with_field("Error.__unused_err_pos")?;
+
+    let num_traces = read_u64(r).await.with_field("Error.traces[].<count>")?;
+    let mut traces = Vec::with_capacity(num_traces.try_into().unwrap_or_default());
+    for _ in 0..num_traces {
+        read_u64(r)
+            .await
+            .with_field("Error.traces[].__unused_pos")?;
+        traces.push(read_string(r).await.with_field("Error.traces[].hint")?);
+    }
+
+    Ok(NixError { level, msg, traces })
+}
+
+/// Write a NixError struct to the stream.
+pub async fn write_error<W: AsyncWriteExt + Unpin>(w: &mut W, v: NixError) -> Result<()> {
+    write_string(w, "Error")
+        .await
+        .with_field("Error.__unused_type_1")?;
+
+    write_verbosity(w, v.level)
+        .await
+        .with_field("Error.level")?;
+
+    write_string(w, "Error")
+        .await
+        .with_field("Error.__unused_type_2")?;
+
+    write_string(w, v.msg).await.with_field("Error.msg")?;
+
+    write_u64(w, 0).await.with_field("Error.__unused_err_pos")?;
+
+    write_u64(w, v.traces.len() as u64)
+        .await
+        .with_field("Error.traces[].<count>")?;
+    for trace in v.traces.iter() {
+        write_u64(w, 0)
+            .await
+            .with_field("Error.traces[].__unused_pos")?;
+        write_string(w, trace)
+            .await
+            .with_field("Error.traces[].hint")?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrKind {
     Last = 0x616c7473,
+    Error = 0x63787470,
 }
 
 /// Read a protocol version from the stream.
 pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Stderr>> {
-    match StderrKind::try_from(read_u64(r).await?)
-        .map_err(|TryFromPrimitiveError { number }| Error::Invalid(format!("{:#x}", number)))?
-    {
+    let kind =
+        StderrKind::try_from(read_u64(r).await?).map_err(|TryFromPrimitiveError { number }| {
+            Error::Invalid(format!("Stderr<{:#x}>", number))
+        })?;
+    match kind {
         StderrKind::Last => Ok(None),
+        StderrKind::Error => Ok(Some(Stderr::Error(read_error(r).await?))),
     }
 }
 /// Write a protocol version to the stream.
@@ -133,6 +277,145 @@ pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>
         None => write_u64(w, StderrKind::Last.into()).await?,
         Some(_) => todo!(),
     }
+    Ok(())
+}
+
+/// Read a ClientSettings structure from the stream.
+pub async fn read_client_settings<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    proto: Proto,
+) -> Result<ClientSettings> {
+    let keep_failed = read_bool(r)
+        .await
+        .with_field("ClientSettings.keep_failed")?;
+    let keep_going = read_bool(r).await.with_field("ClientSettings.keep_going")?;
+    let try_fallback = read_bool(r)
+        .await
+        .with_field("ClientSettings.try_fallback")?;
+    let verbosity = read_verbosity(r)
+        .await
+        .with_field("ClientSettings.verbosity")?;
+    let max_build_jobs = read_u64(r)
+        .await
+        .with_field("ClientSettings.max_build_jobs")?;
+    let max_silent_time = read_u64(r)
+        .await
+        .with_field("ClientSettings.max_silent_time")?;
+    read_u64(r)
+        .await
+        .with_field("ClientSettings.__obsolete_use_build_hook")?;
+    let verbose_build = read_verbosity(r)
+        .await
+        .map(|v| v == Verbosity::Error)
+        .with_field("ClientSettings.verbose_build")?;
+    read_u64(r)
+        .await
+        .with_field("ClientSettings.__obsolete_log_type")?;
+    read_u64(r)
+        .await
+        .with_field("ClientSettings.__obsolete_print_build_trace")?;
+    let build_cores = read_u64(r).await.with_field("ClientSettings.build_cores")?;
+    let use_substitutes = read_bool(r)
+        .await
+        .with_field("ClientSettings.use_substitutes")?;
+
+    let overrides = if proto >= Proto(1, 12) {
+        let count = read_u64(r)
+            .await
+            .with_field("ClientSettings.overrides.<count>")? as usize;
+        let mut overrides = HashMap::with_capacity(count as usize);
+        for _ in 0..count {
+            let key = read_string(r)
+                .await
+                .with_field("ClientSettings.overrides[].key")?;
+            let value = read_string(r)
+                .await
+                .with_field("ClientSettings.overrides[].value")?;
+            overrides.insert(key, value);
+        }
+        overrides
+    } else {
+        HashMap::with_capacity(0)
+    };
+
+    Ok(ClientSettings {
+        keep_failed,
+        keep_going,
+        try_fallback,
+        verbosity,
+        max_build_jobs,
+        max_silent_time,
+        verbose_build,
+        build_cores,
+        use_substitutes,
+        overrides,
+    })
+}
+/// Writes a ClientSettings structure to the stream.
+pub async fn write_client_settings<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    proto: Proto,
+    cs: &ClientSettings,
+) -> Result<()> {
+    write_bool(w, cs.keep_failed)
+        .await
+        .with_field("ClientSettings.keep_failed")?;
+    write_bool(w, cs.keep_going)
+        .await
+        .with_field("ClientSettings.keep_going")?;
+    write_bool(w, cs.try_fallback)
+        .await
+        .with_field("ClientSettings.try_fallback")?;
+
+    write_verbosity(w, cs.verbosity)
+        .await
+        .with_field("ClientSettings.verbosity")?;
+    write_u64(w, cs.max_build_jobs)
+        .await
+        .with_field("ClientSettings.max_build_jobs")?;
+    write_u64(w, cs.max_silent_time)
+        .await
+        .with_field("ClientSettings.max_silent_time")?;
+    write_u64(w, 0)
+        .await
+        .with_field("ClientSettings.__obsolete_use_build_hook")?;
+    write_verbosity(
+        w,
+        if cs.verbose_build {
+            Verbosity::Error
+        } else {
+            Verbosity::Vomit
+        },
+    )
+    .await
+    .with_field("ClientSettings.verbose_build")?;
+    write_u64(w, 0)
+        .await
+        .with_field("ClientSettings.__obsolete_log_type")?;
+    write_u64(w, 0)
+        .await
+        .with_field("ClientSettings.__obsolete_print_build_trace")?;
+    write_u64(w, cs.build_cores)
+        .await
+        .with_field("ClientSettings.build_cores")?;
+    write_bool(w, cs.use_substitutes)
+        .await
+        .with_field("ClientSettings.use_substitutes")?;
+
+    if proto >= Proto(1, 12) {
+        write_u64(w, cs.overrides.len() as u64)
+            .await
+            .with_field("ClientSettings.overrides.<count>")?;
+        for (key, value) in cs.overrides.iter() {
+            write_string(w, key)
+                .await
+                .with_field("ClientSettings.overrides[].key")?;
+            write_string(w, value)
+                .await
+                .with_field("ClientSettings.overrides[].value")?;
+        }
+    }
+
     Ok(())
 }
 

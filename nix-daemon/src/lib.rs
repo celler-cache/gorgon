@@ -6,6 +6,8 @@ pub mod wire;
 
 use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
+use std::collections::HashMap;
+use std::future::Future;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -46,13 +48,43 @@ pub enum Error {
     #[error("invalid value: {0}")]
     Invalid(String),
 
+    /// Nix protocol error.
+    #[error("{0}")]
+    NixError(NixError),
+
+    /// Wrapped error returned from a StderrFn.
+    #[error("error from stderr handler: {0}")]
+    StderrFn(Box<dyn std::error::Error>),
+
     #[error(transparent)]
     IO(#[from] std::io::Error),
 }
 
+impl From<TryFromPrimitiveError<wire::Op>> for Error {
+    fn from(value: TryFromPrimitiveError<wire::Op>) -> Self {
+        Self::Invalid(format!("Op({:x})", value.number))
+    }
+}
 impl From<TryFromPrimitiveError<Verbosity>> for Error {
     fn from(value: TryFromPrimitiveError<Verbosity>) -> Self {
         Self::Invalid(format!("Verbosity({:x})", value.number))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct NixError {
+    pub level: Verbosity,
+    pub msg: String,
+    pub traces: Vec<String>,
+}
+
+impl std::fmt::Display for NixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{:?}] {}", self.level, self.msg)?;
+        for trace in self.traces.iter() {
+            write!(f, "\n\t{}", trace)?;
+        }
+        Ok(())
     }
 }
 
@@ -83,6 +115,27 @@ impl Proto {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stderr {
+    Error(NixError),
+}
+
+/// Callback closure that handles incoming Stderr:s, eg. `|stderr| match stderr { ... }`.
+pub trait StderrFn: Fn(Stderr) -> Result<(), Box<dyn std::error::Error>> + Send {}
+impl<F: Fn(Stderr) -> Result<(), Box<dyn std::error::Error>> + Send> StderrFn for F {}
+
+async fn dispatch_stderr<C: AsyncReadExt + Unpin, S: StderrFn>(
+    mut conn: C,
+    stderr: Option<S>,
+) -> Result<()> {
+    while let Some(v) = wire::read_stderr(&mut conn).await? {
+        if let Some(ref stderr) = stderr {
+            stderr(v).map_err(|err| Error::StderrFn(err))?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Verbosity {
@@ -94,6 +147,20 @@ pub enum Verbosity {
     Chatty,
     Debug,
     Vomit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClientSettings {
+    pub keep_failed: bool,
+    pub keep_going: bool,
+    pub try_fallback: bool,
+    pub verbosity: Verbosity,
+    pub max_build_jobs: u64,
+    pub max_silent_time: u64,
+    pub verbose_build: bool,
+    pub build_cores: u64,
+    pub use_substitutes: bool,
+    pub overrides: HashMap<String, String>,
 }
 
 /// Data about a Nix store path.
@@ -120,23 +187,14 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Stderr {}
-
-async fn forward_stderr<C: AsyncReadExt + Unpin, F: Fn(Stderr)>(
-    mut conn: C,
-    f: Option<F>,
-) -> Result<()> {
-    while let Some(stderr) = wire::read_stderr(&mut conn).await? {
-        if let Some(ref f) = f {
-            f(stderr)
-        }
-    }
-    Ok(())
-}
-
 /// Interface to a Store.
-pub trait Store {}
+pub trait Store {
+    fn set_options<S: StderrFn>(
+        &mut self,
+        opts: ClientSettings,
+        stderr: Option<S>,
+    ) -> impl Future<Output = Result<()>> + Send;
+}
 
 /// Store backed by nix-daemon.
 /// TODO: Not sure about this naming. Ask some people?
@@ -146,16 +204,16 @@ pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
 }
 
 impl DaemonStore<UnixStream> {
-    pub async fn connect_unix<P: AsRef<std::path::Path>, F: Fn(Stderr)>(
+    pub async fn connect_unix<P: AsRef<std::path::Path>, S: StderrFn>(
         path: P,
-        f: Option<F>,
+        stderr: Option<S>,
     ) -> Result<Self> {
-        Self::init(UnixStream::connect(path).await?, f).await
+        Self::init(UnixStream::connect(path).await?, stderr).await
     }
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
-    async fn init<F: Fn(Stderr)>(mut conn: C, f: Option<F>) -> Result<Self> {
+    async fn init<S: StderrFn>(mut conn: C, stderr: Option<S>) -> Result<Self> {
         // Exchange magic numbers.
         wire::write_u64(&mut conn, wire::WORKER_MAGIC_1)
             .await
@@ -205,13 +263,27 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
             wire::read_u64(&mut conn).await.with_field("remote_trust")?;
         }
 
-        forward_stderr(&mut conn, f).await?;
+        dispatch_stderr(&mut conn, stderr).await?;
 
         Ok(Self { conn, proto })
     }
 }
 
-impl<C: AsyncReadExt + AsyncWriteExt + Unpin> Store for DaemonStore<C> {}
+impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
+    async fn set_options<S: StderrFn>(
+        &mut self,
+        opts: ClientSettings,
+        stderr: Option<S>,
+    ) -> Result<()> {
+        wire::write_op(&mut self.conn, wire::Op::SetOptions)
+            .await
+            .with_field("SetOptions.<op>")?;
+        wire::write_client_settings(&mut self.conn, self.proto, &opts)
+            .await
+            .with_field("SetOptions.clientSettings")?;
+        dispatch_stderr(&mut self.conn, stderr).await
+    }
+}
 
 #[cfg(test)]
 mod tests {
