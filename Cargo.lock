@@ -1356,6 +1356,7 @@ dependencies = [
  "chrono",
  "futures",
  "num_enum 0.7.1",
+ "tap",
  "thiserror",
  "tokio",
  "tokio-stream",

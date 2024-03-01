@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::collections::HashMap;
 use std::future::Future;
+use tap::TapOptional;
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -51,10 +52,6 @@ pub enum Error {
     /// Nix protocol error.
     #[error("{0}")]
     NixError(NixError),
-
-    /// Wrapped error returned from a StderrFn.
-    #[error("error from stderr handler: {0}")]
-    StderrFn(Box<dyn std::error::Error>),
 
     #[error(transparent)]
     IO(#[from] std::io::Error),
@@ -120,22 +117,6 @@ pub enum Stderr {
     Error(NixError),
 }
 
-/// Callback closure that handles incoming Stderr:s, eg. `|stderr| match stderr { ... }`.
-pub trait StderrFn: Fn(Stderr) -> Result<(), Box<dyn std::error::Error>> + Send {}
-impl<F: Fn(Stderr) -> Result<(), Box<dyn std::error::Error>> + Send> StderrFn for F {}
-
-async fn dispatch_stderr<C: AsyncReadExt + Unpin, S: StderrFn>(
-    mut conn: C,
-    stderr: Option<S>,
-) -> Result<()> {
-    while let Some(v) = wire::read_stderr(&mut conn).await? {
-        if let Some(ref stderr) = stderr {
-            stderr(v).map_err(|err| Error::StderrFn(err))?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Verbosity {
@@ -189,11 +170,58 @@ pub struct PathInfo {
 
 /// Interface to a Store.
 pub trait Store {
-    fn set_options<S: StderrFn>(
+    type C: AsyncReadExt + Unpin;
+
+    type SetOptionsResult: ProgressResult<T = ()>;
+    fn set_options(
         &mut self,
         opts: ClientSettings,
-        stderr: Option<S>,
-    ) -> impl Future<Output = Result<()>> + Send;
+    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
+}
+
+pub trait ProgressResult {
+    type T;
+    fn result(self) -> impl Future<Output = Result<Self::T>> + Send;
+}
+impl ProgressResult for () {
+    type T = ();
+    async fn result(self) -> Result<Self::T> {
+        Ok(())
+    }
+}
+
+pub struct Progress<'c, C: AsyncReadExt + Unpin, R: ProgressResult> {
+    conn: &'c mut C,
+    fuse: bool,
+    then: R,
+}
+
+impl<'c, C: AsyncReadExt + Unpin, R: ProgressResult> Progress<'c, C, R> {
+    fn new(conn: &'c mut C, then: R) -> Self {
+        Self {
+            conn,
+            fuse: false,
+            then,
+        }
+    }
+
+    /// Returns the next Stderr message, or None after all have been consumed.
+    /// This behaves like a fused iterator, and keeps returning None after that.
+    pub async fn next(&mut self) -> Result<Option<Stderr>> {
+        if self.fuse {
+            Ok(None)
+        } else {
+            wire::read_stderr(&mut self.conn)
+                .await
+                .map(|v| v.tap_none(|| self.fuse = true))
+        }
+    }
+
+    /// Discards any remaining Stderr messages and proceeds.
+    pub async fn result(mut self) -> Result<R::T> {
+        while let Some(_) = self.next().await? {}
+        self.then.result().await
+    }
 }
 
 /// Store backed by nix-daemon.
@@ -204,16 +232,13 @@ pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
 }
 
 impl DaemonStore<UnixStream> {
-    pub async fn connect_unix<P: AsRef<std::path::Path>, S: StderrFn>(
-        path: P,
-        stderr: Option<S>,
-    ) -> Result<Self> {
-        Self::init(UnixStream::connect(path).await?, stderr).await
+    pub async fn connect_unix<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        Self::init(UnixStream::connect(path).await?).await
     }
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
-    async fn init<S: StderrFn>(mut conn: C, stderr: Option<S>) -> Result<Self> {
+    async fn init(mut conn: C) -> Result<Self> {
         // Exchange magic numbers.
         wire::write_u64(&mut conn, wire::WORKER_MAGIC_1)
             .await
@@ -263,25 +288,28 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
             wire::read_u64(&mut conn).await.with_field("remote_trust")?;
         }
 
-        dispatch_stderr(&mut conn, stderr).await?;
+        // Discard Stderr. There shouldn't be anything here anyway.
+        while let Some(_) = wire::read_stderr(&mut conn).await? {}
 
         Ok(Self { conn, proto })
     }
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
-    async fn set_options<S: StderrFn>(
+    type C = C;
+
+    type SetOptionsResult = ();
+    async fn set_options(
         &mut self,
         opts: ClientSettings,
-        stderr: Option<S>,
-    ) -> Result<()> {
+    ) -> Result<Progress<Self::C, Self::SetOptionsResult>> {
         wire::write_op(&mut self.conn, wire::Op::SetOptions)
             .await
             .with_field("SetOptions.<op>")?;
         wire::write_client_settings(&mut self.conn, self.proto, &opts)
             .await
             .with_field("SetOptions.clientSettings")?;
-        dispatch_stderr(&mut self.conn, stderr).await
+        Ok(Progress::new(&mut self.conn, ()))
     }
 }
 
