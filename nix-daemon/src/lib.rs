@@ -327,35 +327,21 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
 pub trait Store {
     type C: AsyncReadExt + Unpin + Send;
 
-    type SetOptionsResult: ProgressResult<T = ()> + Send;
-    fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
-
     type IsValidPathResult: ProgressResult<T = bool> + Send;
     fn is_valid_path<S: AsRef<str> + Send + Sync>(
         &mut self,
         path: S,
     ) -> impl Future<Output = Result<Progress<Self::C, Self::IsValidPathResult>>> + Send;
+
+    type SetOptionsResult: ProgressResult<T = ()> + Send;
+    fn set_options(
+        &mut self,
+        opts: ClientSettings,
+    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     type C = C;
-
-    type SetOptionsResult = ();
-    async fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> Result<Progress<Self::C, Self::SetOptionsResult>> {
-        wire::write_op(&mut self.conn, wire::Op::SetOptions)
-            .await
-            .with_field("SetOptions.<op>")?;
-        wire::write_client_settings(&mut self.conn, self.proto, &opts)
-            .await
-            .with_field("SetOptions.clientSettings")?;
-        Ok(Progress::new(&mut self.conn, ()))
-    }
 
     type IsValidPathResult = wire::BoolResult;
     async fn is_valid_path<S: AsRef<str> + Send + Sync>(
@@ -369,6 +355,20 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             .await
             .with_field("IsValidPath.path")?;
         Ok(Progress::new(&mut self.conn, wire::BoolResult()))
+    }
+
+    type SetOptionsResult = ();
+    async fn set_options(
+        &mut self,
+        opts: ClientSettings,
+    ) -> Result<Progress<Self::C, Self::SetOptionsResult>> {
+        wire::write_op(&mut self.conn, wire::Op::SetOptions)
+            .await
+            .with_field("SetOptions.<op>")?;
+        wire::write_client_settings(&mut self.conn, self.proto, &opts)
+            .await
+            .with_field("SetOptions.clientSettings")?;
+        Ok(Progress::new(&mut self.conn, ()))
     }
 }
 
