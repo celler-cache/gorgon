@@ -327,12 +327,14 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
 pub trait Store {
     type C: AsyncReadExt + Unpin + Send;
 
+    /// Returns whether a store path is valid.
     type IsValidPathResult: ProgressResult<T = bool> + Send;
     fn is_valid_path<S: AsRef<str> + Send + Sync>(
         &mut self,
         path: S,
     ) -> impl Future<Output = Result<Progress<Self::C, Self::IsValidPathResult>>> + Send;
 
+    /// Applies client options. This changes the behaviour of future commands.
     type SetOptionsResult: ProgressResult<T = ()> + Send;
     fn set_options(
         &mut self,
@@ -343,6 +345,9 @@ pub trait Store {
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     type C = C;
 
+    // FIXME: The daemon expects /nix/store/foo, not /nix/store/foo/bin/bar.
+    // In the nix codebase, libstore chops the latter into the former before making the
+    // call, but I'm unsure of how to do it here.
     type IsValidPathResult = wire::BoolResult;
     async fn is_valid_path<S: AsRef<str> + Send + Sync>(
         &mut self,
