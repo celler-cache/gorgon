@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{
-    ClientSettings, Error, NixError, PathInfo, Proto, Result, ResultExt, Stderr, Verbosity,
+    ClientSettings, Error, NixError, PathInfo, ProgressResult, Proto, Result, ResultExt, Stderr,
+    Verbosity,
 };
 use async_stream::try_stream;
 use chrono::DateTime;
@@ -88,6 +89,14 @@ pub async fn write_u64<W: AsyncWriteExt + Unpin>(w: &mut W, v: u64) -> Result<()
     Ok(w.write_u64_le(v).await?)
 }
 
+/// ProgressResult that returns a bool.
+pub struct BoolResult();
+impl ProgressResult for BoolResult {
+    type T = bool;
+    async fn result<C: AsyncReadExt + Unpin + Send>(self, conn: &mut C) -> Result<Self::T> {
+        read_bool(conn).await
+    }
+}
 /// Read a boolean from the stream, encoded as u64 (>0 is true).
 pub async fn read_bool<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
     Ok(read_u64(r).await? > 0)

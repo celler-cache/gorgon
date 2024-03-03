@@ -6,9 +6,7 @@ pub mod wire;
 
 use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
-use std::collections::HashMap;
-use std::future::Future;
-use tap::TapOptional;
+use std::{collections::HashMap, future::Future};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -168,35 +166,27 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
-/// Interface to a Store.
-pub trait Store {
-    type C: AsyncReadExt + Unpin;
-
-    type SetOptionsResult: ProgressResult<T = ()>;
-    fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
-}
-
 pub trait ProgressResult {
     type T;
-    fn result(self) -> impl Future<Output = Result<Self::T>> + Send;
+    fn result<C: AsyncReadExt + Unpin + Send>(
+        self,
+        conn: &mut C,
+    ) -> impl Future<Output = Result<Self::T>> + Send;
 }
 impl ProgressResult for () {
     type T = ();
-    async fn result(self) -> Result<Self::T> {
+    async fn result<C: AsyncReadExt + Unpin>(self, _conn: &mut C) -> Result<Self::T> {
         Ok(())
     }
 }
 
-pub struct Progress<'c, C: AsyncReadExt + Unpin, R: ProgressResult> {
+pub struct Progress<'c, C: AsyncReadExt + Unpin + Send, R: ProgressResult> {
     conn: &'c mut C,
     fuse: bool,
     then: R,
 }
 
-impl<'c, C: AsyncReadExt + Unpin, R: ProgressResult> Progress<'c, C, R> {
+impl<'c, C: AsyncReadExt + Unpin + Send, R: ProgressResult> Progress<'c, C, R> {
     fn new(conn: &'c mut C, then: R) -> Self {
         Self {
             conn,
@@ -211,16 +201,54 @@ impl<'c, C: AsyncReadExt + Unpin, R: ProgressResult> Progress<'c, C, R> {
         if self.fuse {
             Ok(None)
         } else {
-            wire::read_stderr(&mut self.conn)
-                .await
-                .map(|v| v.tap_none(|| self.fuse = true))
+            match wire::read_stderr(&mut self.conn).await? {
+                Some(Stderr::Error(err)) => Err(Error::NixError(err)),
+                // Some(stderr) => Ok(Some(stderr)),
+                None => {
+                    self.fuse = true;
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Passes any remaining Stderr messages to the provided function and proceeds.
+    /// If f(stderr) returns Err(err), the Progress is aborted and err is returned.
+    pub async fn each<F: Fn(Stderr) -> Result<()>, E: From<Error>>(
+        mut self,
+        f: F,
+    ) -> Result<R::T, E> {
+        while let Some(stderr) = self.next().await? {
+            f(stderr)?
+        }
+        Ok(self.result().await?)
+    }
+    /// Passes any remaining Stderr messages to the provided function and proceeds.
+    /// Unlike with `each`, the closure passed to `tap` can't return an error.
+    pub async fn tap<F: Fn(Stderr)>(self, f: F) -> Result<R::T> {
+        self.each(|stderr| {
+            f(stderr);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Returns all Stderr messages and the final result.
+    pub async fn collect(mut self) -> (Vec<Stderr>, Result<R::T>) {
+        let mut stderrs = Vec::new();
+        loop {
+            match self.next().await {
+                Ok(Some(stderr)) => stderrs.push(stderr),
+                Ok(None) => break (stderrs, self.result().await),
+                Err(err) => break (stderrs, Err(err)),
+            }
         }
     }
 
     /// Discards any remaining Stderr messages and proceeds.
     pub async fn result(mut self) -> Result<R::T> {
         while let Some(_) = self.next().await? {}
-        self.then.result().await
+        self.then.result(self.conn).await
     }
 }
 
@@ -295,6 +323,23 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
     }
 }
 
+/// Interface to a Store.
+pub trait Store {
+    type C: AsyncReadExt + Unpin + Send;
+
+    type SetOptionsResult: ProgressResult<T = ()> + Send;
+    fn set_options(
+        &mut self,
+        opts: ClientSettings,
+    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
+
+    type IsValidPathResult: ProgressResult<T = bool> + Send;
+    fn is_valid_path<S: AsRef<str> + Send + Sync>(
+        &mut self,
+        path: S,
+    ) -> impl Future<Output = Result<Progress<Self::C, Self::IsValidPathResult>>> + Send;
+}
+
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     type C = C;
 
@@ -310,6 +355,20 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             .await
             .with_field("SetOptions.clientSettings")?;
         Ok(Progress::new(&mut self.conn, ()))
+    }
+
+    type IsValidPathResult = wire::BoolResult;
+    async fn is_valid_path<S: AsRef<str> + Send + Sync>(
+        &mut self,
+        path: S,
+    ) -> Result<Progress<Self::C, Self::IsValidPathResult>> {
+        wire::write_op(&mut self.conn, wire::Op::IsValidPath)
+            .await
+            .with_field("IsValidPath.<op>")?;
+        wire::write_string(&mut self.conn, &path)
+            .await
+            .with_field("IsValidPath.path")?;
+        Ok(Progress::new(&mut self.conn, wire::BoolResult()))
     }
 }
 
