@@ -340,6 +340,13 @@ pub trait Store {
         &mut self,
         opts: ClientSettings,
     ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
+
+    /// Returns a PathInfo struct for the given path.
+    type QueryPathInfoResult: ProgressResult<T = Option<PathInfo>> + Send;
+    fn query_pathinfo<S: AsRef<str> + Send + Sync>(
+        &mut self,
+        path: S,
+    ) -> impl Future<Output = Result<Progress<Self::C, Self::QueryPathInfoResult>>> + Send;
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
@@ -374,6 +381,36 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             .await
             .with_field("SetOptions.clientSettings")?;
         Ok(Progress::new(&mut self.conn, ()))
+    }
+
+    type QueryPathInfoResult = QueryPathInfoResult;
+    async fn query_pathinfo<S: AsRef<str> + Send + Sync>(
+        &mut self,
+        path: S,
+    ) -> Result<Progress<Self::C, Self::QueryPathInfoResult>> {
+        wire::write_op(&mut self.conn, wire::Op::QueryPathInfo)
+            .await
+            .with_field("QueryPathInfo.<op>")?;
+        wire::write_string(&mut self.conn, &path)
+            .await
+            .with_field("QueryPathInfo.path")?;
+        Ok(Progress::new(
+            &mut self.conn,
+            QueryPathInfoResult(self.proto),
+        ))
+    }
+}
+
+/// ProgressResult that returns a PathInfo.
+pub struct QueryPathInfoResult(pub Proto);
+impl ProgressResult for QueryPathInfoResult {
+    type T = Option<PathInfo>;
+    async fn result<C: AsyncReadExt + Unpin + Send>(self, conn: &mut C) -> Result<Self::T> {
+        if wire::read_bool(conn).await? {
+            Ok(Some(wire::read_pathinfo(conn, self.0).await?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
