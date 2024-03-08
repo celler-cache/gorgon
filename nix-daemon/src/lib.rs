@@ -2,30 +2,12 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-pub mod wire;
+pub mod nix;
 
 use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::{collections::HashMap, future::Future};
 use thiserror::Error;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
-};
-
-/// Minimum supported protocol version. Older versions will be rejected.
-///
-/// Protocol 1.35 was introduced in Nix 2.15:
-/// https://github.com/NixOS/nix/blob/2.15.0/src/libstore/worker-protocol.hh#L13
-///
-/// TODO: Support Protocol 1.21, used by Nix 2.3.
-const MIN_PROTO: Proto = Proto(1, 35); // Nix >= 2.15.x
-
-/// Maxmimum supported protocol version. Newer daemons will run in compatibility mode.
-///
-/// Protocol 1.35 is current as of Nix 2.19:
-/// https://github.com/NixOS/nix/blob/2.19.3/src/libstore/worker-protocol.hh#L12
-const MAX_PROTO: Proto = Proto(1, 35); // Nix <= 2.19.x
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -69,33 +51,6 @@ impl std::fmt::Display for NixError {
             write!(f, "\n\t{}", trace)?;
         }
         Ok(())
-    }
-}
-
-/// Protocol version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Proto(u8, u8);
-
-impl From<u64> for Proto {
-    fn from(raw: u64) -> Self {
-        Self(((raw & 0xFF00) >> 8) as u8, (raw & 0x00FF) as u8)
-    }
-}
-impl From<Proto> for u64 {
-    fn from(v: Proto) -> Self {
-        ((v.0 as u64) << 8) | (v.1 as u64)
-    }
-}
-
-impl std::fmt::Display for Proto {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.0, self.1)
-    }
-}
-
-impl Proto {
-    fn since(&self, v: u8) -> bool {
-        self.1 >= v
     }
 }
 
@@ -160,264 +115,64 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
-pub trait ProgressResult {
-    type T;
-    fn result<C: AsyncReadExt + Unpin + Send>(
-        self,
-        conn: &mut C,
-    ) -> impl Future<Output = Result<Self::T>> + Send;
-}
-impl ProgressResult for () {
-    type T = ();
-    async fn result<C: AsyncReadExt + Unpin>(self, _conn: &mut C) -> Result<Self::T> {
-        Ok(())
-    }
-}
-
-pub struct Progress<'c, C: AsyncReadExt + Unpin + Send, R: ProgressResult> {
-    conn: &'c mut C,
-    fuse: bool,
-    then: R,
-}
-
-impl<'c, C: AsyncReadExt + Unpin + Send, R: ProgressResult> Progress<'c, C, R> {
-    fn new(conn: &'c mut C, then: R) -> Self {
-        Self {
-            conn,
-            fuse: false,
-            then,
-        }
-    }
+/// An in-progress operation, which produces a series of status updates before continuing.
+pub trait Progress: Send {
+    type T: Send;
 
     /// Returns the next Stderr message, or None after all have been consumed.
-    /// This behaves like a fused iterator, and keeps returning None after that.
-    pub async fn next(&mut self) -> Result<Option<Stderr>> {
-        if self.fuse {
-            Ok(None)
-        } else {
-            match wire::read_stderr(&mut self.conn).await? {
-                Some(Stderr::Error(err)) => Err(Error::NixError(err)),
-                // Some(stderr) => Ok(Some(stderr)),
-                None => {
-                    self.fuse = true;
-                    Ok(None)
-                }
-            }
-        }
-    }
+    /// This must behave like a fused iterator - once None is returned, all further calls
+    /// must immediately return None, without corrupting the underlying datastream, etc.
+    fn next(&mut self) -> impl Future<Output = Result<Option<Stderr>>> + Send;
 
-    /// Passes any remaining Stderr messages to the provided function and proceeds.
-    /// If f(stderr) returns Err(err), the Progress is aborted and err is returned.
-    pub async fn each<F: Fn(Stderr) -> Result<()>, E: From<Error>>(
-        mut self,
-        f: F,
-    ) -> Result<R::T, E> {
+    /// Discards any further messages from `next()` and proceeds.
+    fn result(self) -> impl Future<Output = Result<Self::T>> + Send;
+}
+
+/// Helper methods for Progress.
+pub trait ProgressExt: Progress {
+    /// Calls `f()` for each message returned from `self.next()`, then `self.result()`.
+    fn tap<F: Fn(Stderr) + Send>(self, f: F) -> impl Future<Output = Result<Self::T>> + Send;
+
+    /// Returns all messages from `self.next()` and `self.result()`.
+    fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T>)> + Send;
+}
+impl<P: Progress> ProgressExt for P {
+    async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T> {
         while let Some(stderr) = self.next().await? {
-            f(stderr)?
+            f(stderr)
         }
-        Ok(self.result().await?)
-    }
-    /// Passes any remaining Stderr messages to the provided function and proceeds.
-    /// Unlike with `each`, the closure passed to `tap` can't return an error.
-    pub async fn tap<F: Fn(Stderr)>(self, f: F) -> Result<R::T> {
-        self.each(|stderr| {
-            f(stderr);
-            Ok(())
-        })
-        .await
+        self.result().await
     }
 
-    /// Returns all Stderr messages and the final result.
-    pub async fn collect(mut self) -> (Vec<Stderr>, Result<R::T>) {
+    async fn split(mut self) -> (Vec<Stderr>, Result<Self::T>) {
         let mut stderrs = Vec::new();
         loop {
             match self.next().await {
                 Ok(Some(stderr)) => stderrs.push(stderr),
-                Ok(None) => break (stderrs, self.result().await),
                 Err(err) => break (stderrs, Err(err)),
+                Ok(None) => break (stderrs, self.result().await),
             }
         }
     }
-
-    /// Discards any remaining Stderr messages and proceeds.
-    pub async fn result(mut self) -> Result<R::T> {
-        while let Some(_) = self.next().await? {}
-        self.then.result(self.conn).await
-    }
 }
 
-/// Store backed by nix-daemon.
-/// TODO: Not sure about this naming. Ask some people?
-pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
-    conn: C,
-    pub proto: Proto,
-}
-
-impl DaemonStore<UnixStream> {
-    pub async fn connect_unix<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        Self::init(UnixStream::connect(path).await?).await
-    }
-}
-
-impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
-    async fn init(mut conn: C) -> Result<Self> {
-        // Exchange magic numbers.
-        wire::write_u64(&mut conn, wire::WORKER_MAGIC_1)
-            .await
-            .with_field("magic1")?;
-        wire::read_u64(&mut conn)
-            .await
-            .and_then(|magic2| match magic2 {
-                wire::WORKER_MAGIC_2 => Ok(magic2),
-                _ => Err(Error::Invalid(format!("{:#x}", magic2))),
-            })
-            .with_field("magic2")?;
-
-        // Check that we're talking to a new enough daemon, tell them our version.
-        let proto = wire::read_proto(&mut conn)
-            .await
-            .and_then(|proto| {
-                if proto.0 != 1 || proto < MIN_PROTO {
-                    return Err(Error::Invalid(format!("{}", proto)));
-                }
-                Ok(proto)
-            })
-            .with_field("daemon_proto")?;
-        wire::write_proto(&mut conn, MAX_PROTO)
-            .await
-            .with_field("client_proto")?;
-
-        // Write some obsolete fields.
-        if proto >= Proto(1, 14) {
-            wire::write_u64(&mut conn, 0)
-                .await
-                .with_field("__obsolete_cpu_affinity")?;
-        }
-        if proto >= Proto(1, 11) {
-            wire::write_bool(&mut conn, false)
-                .await
-                .with_field("__obsolete_reserve_space")?;
-        }
-
-        // And we don't currently do anything with these.
-        if proto >= Proto(1, 33) {
-            wire::read_string(&mut conn)
-                .await
-                .with_field("nix_version")?;
-        }
-        if proto >= Proto(1, 35) {
-            // Option<bool>: 0 = None, 1 = Some(true), 2 = Some(false)
-            wire::read_u64(&mut conn).await.with_field("remote_trust")?;
-        }
-
-        // Discard Stderr. There shouldn't be anything here anyway.
-        while let Some(_) = wire::read_stderr(&mut conn).await? {}
-
-        Ok(Self { conn, proto })
-    }
-}
-
-/// Interface to a Store.
+/// Interface to a Nix store.
 pub trait Store {
-    type C: AsyncReadExt + Unpin + Send;
-
     /// Returns whether a store path is valid.
-    type IsValidPathResult: ProgressResult<T = bool> + Send;
     fn is_valid_path<S: AsRef<str> + Send + Sync>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<Progress<Self::C, Self::IsValidPathResult>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = bool>>> + Send;
 
     /// Applies client options. This changes the behaviour of future commands.
-    type SetOptionsResult: ProgressResult<T = ()> + Send;
     fn set_options(
         &mut self,
         opts: ClientSettings,
-    ) -> impl Future<Output = Result<Progress<Self::C, Self::SetOptionsResult>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
 
     /// Returns a PathInfo struct for the given path.
-    type QueryPathInfoResult: ProgressResult<T = Option<PathInfo>> + Send;
     fn query_pathinfo<S: AsRef<str> + Send + Sync>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<Progress<Self::C, Self::QueryPathInfoResult>>> + Send;
-}
-
-impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
-    type C = C;
-
-    // FIXME: The daemon expects /nix/store/foo, not /nix/store/foo/bin/bar.
-    // In the nix codebase, libstore chops the latter into the former before making the
-    // call, but I'm unsure of how to do it here.
-    type IsValidPathResult = wire::BoolResult;
-    async fn is_valid_path<S: AsRef<str> + Send + Sync>(
-        &mut self,
-        path: S,
-    ) -> Result<Progress<Self::C, Self::IsValidPathResult>> {
-        wire::write_op(&mut self.conn, wire::Op::IsValidPath)
-            .await
-            .with_field("IsValidPath.<op>")?;
-        wire::write_string(&mut self.conn, &path)
-            .await
-            .with_field("IsValidPath.path")?;
-        Ok(Progress::new(&mut self.conn, wire::BoolResult()))
-    }
-
-    type SetOptionsResult = ();
-    async fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> Result<Progress<Self::C, Self::SetOptionsResult>> {
-        wire::write_op(&mut self.conn, wire::Op::SetOptions)
-            .await
-            .with_field("SetOptions.<op>")?;
-        wire::write_client_settings(&mut self.conn, self.proto, &opts)
-            .await
-            .with_field("SetOptions.clientSettings")?;
-        Ok(Progress::new(&mut self.conn, ()))
-    }
-
-    type QueryPathInfoResult = QueryPathInfoResult;
-    async fn query_pathinfo<S: AsRef<str> + Send + Sync>(
-        &mut self,
-        path: S,
-    ) -> Result<Progress<Self::C, Self::QueryPathInfoResult>> {
-        wire::write_op(&mut self.conn, wire::Op::QueryPathInfo)
-            .await
-            .with_field("QueryPathInfo.<op>")?;
-        wire::write_string(&mut self.conn, &path)
-            .await
-            .with_field("QueryPathInfo.path")?;
-        Ok(Progress::new(
-            &mut self.conn,
-            QueryPathInfoResult(self.proto),
-        ))
-    }
-}
-
-/// ProgressResult that returns a PathInfo.
-pub struct QueryPathInfoResult(pub Proto);
-impl ProgressResult for QueryPathInfoResult {
-    type T = Option<PathInfo>;
-    async fn result<C: AsyncReadExt + Unpin + Send>(self, conn: &mut C) -> Result<Self::T> {
-        if wire::read_bool(conn).await? {
-            Ok(Some(wire::read_pathinfo(conn, self.0).await?))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Sanity check for version comparisons.
-    #[test]
-    fn test_version_ord() {
-        assert!(Proto(0, 1) > Proto(0, 0));
-        assert!(Proto(1, 0) > Proto(0, 0));
-        assert!(Proto(1, 0) > Proto(0, 1));
-        assert!(Proto(1, 1) > Proto(1, 0));
-    }
+    ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>>> + Send;
 }
