@@ -79,6 +79,11 @@ pub enum Op {
     /// https://github.com/NixOS/nix/commit/045b07200c77bf1fe19c0a986aafb531e7e1ba54
     QueryDerivationOutputNames = 28,
 }
+impl From<TryFromPrimitiveError<Op>> for Error {
+    fn from(value: TryFromPrimitiveError<Op>) -> Self {
+        Self::Invalid(format!("Op({:x})", value.number))
+    }
+}
 
 /// Read a u64 from the stream (little endian).
 pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {

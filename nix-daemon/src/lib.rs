@@ -55,17 +55,6 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
-impl From<TryFromPrimitiveError<wire::Op>> for Error {
-    fn from(value: TryFromPrimitiveError<wire::Op>) -> Self {
-        Self::Invalid(format!("Op({:x})", value.number))
-    }
-}
-impl From<TryFromPrimitiveError<Verbosity>> for Error {
-    fn from(value: TryFromPrimitiveError<Verbosity>) -> Self {
-        Self::Invalid(format!("Verbosity({:x})", value.number))
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct NixError {
     pub level: Verbosity,
@@ -126,6 +115,11 @@ pub enum Verbosity {
     Chatty,
     Debug,
     Vomit,
+}
+impl From<TryFromPrimitiveError<Verbosity>> for Error {
+    fn from(value: TryFromPrimitiveError<Verbosity>) -> Self {
+        Self::Invalid(format!("Verbosity({:x})", value.number))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
