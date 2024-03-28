@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::{collections::HashMap, future::Future};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -163,6 +164,21 @@ pub trait Store {
         &mut self,
         path: P,
     ) -> impl Future<Output = Result<impl Progress<T = bool>>> + Send;
+
+    /// Adds a file to the store.
+    fn add_to_store<SN: AsRef<str> + Send + Sync, SC: AsRef<str> + Send + Sync, Refs, R>(
+        &mut self,
+        name: SN,
+        cam_str: SC,
+        refs: Refs,
+        repair: bool,
+        source: R,
+    ) -> impl Future<Output = Result<impl Progress<T = (String, PathInfo)>>> + Send
+    where
+        Refs: IntoIterator + Send,
+        Refs::IntoIter: ExactSizeIterator + Send,
+        Refs::Item: AsRef<str> + Send + Sync,
+        R: AsyncReadExt + Unpin + Send;
 
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(

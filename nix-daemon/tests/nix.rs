@@ -6,6 +6,7 @@ use nix_daemon::{
     nix::DaemonStore, ClientSettings, Progress, ProgressExt, Stderr, Store, Verbosity,
 };
 use std::collections::HashMap;
+use tokio_test::io::Builder;
 
 const INVALID_STORE_PATH: &'static str =
     "/nix/store/ffffffffffffffffffffffffffffffff-invalid-1.0.0";
@@ -148,5 +149,61 @@ async fn test_query_pathinfo_some() {
     assert_eq!(
         pi.ca,
         Some("text:sha256:0h9xd0y2mzqnc73x9xnkkkqgi7rvya2b7ksdd0zdczjqsvhf4cpl".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_add_to_store() {
+    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let (stderrs, r) = store
+        .add_to_store(
+            "test_AddToStore",
+            "fixed:r:sha256",
+            Vec::<String>::new(),
+            false,
+            // $ echo -n "DaemonStore::add_to_store()" > test_AddToStore
+            // $ nix-store --dump (nix-store --add test_AddToStore) | xxd -i
+            Builder::new()
+                .read(&[
+                    0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0x69, 0x78, 0x2d, 0x61,
+                    0x72, 0x63, 0x68, 0x69, 0x76, 0x65, 0x2d, 0x31, 0x00, 0x00, 0x00, 0x01, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x79, 0x70, 0x65,
+                    0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x72,
+                    0x65, 0x67, 0x75, 0x6c, 0x61, 0x72, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x63, 0x6f, 0x6e, 0x74, 0x65, 0x6e, 0x74, 0x73, 0x1b, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x53, 0x74,
+                    0x6f, 0x72, 0x65, 0x3a, 0x3a, 0x61, 0x64, 0x64, 0x5f, 0x74, 0x6f, 0x5f, 0x73,
+                    0x74, 0x6f, 0x72, 0x65, 0x28, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00,
+                ])
+                .build(),
+        )
+        .await
+        .expect("IsValidPath failed")
+        .split()
+        .await;
+    assert_eq!(Vec::<Stderr>::new(), stderrs);
+
+    let (name, pi) = r.expect("Progress");
+    assert_eq!(
+        "/nix/store/rplkfskrgxcfm49953si4jbinw9fg8sm-test_AddToStore".to_string(),
+        name
+    );
+    assert_eq!(pi.deriver, None);
+    assert_eq!(pi.references, Vec::<String>::new());
+    assert_eq!(
+        pi.nar_hash,
+        "3c126cf4c0fec8c85cf9791ccdaf670877f9f9faf46b5d1991523d509b341d9e".to_string()
+    );
+    assert_eq!(pi.nar_size, 144);
+    assert_eq!(pi.ultimate, false);
+    assert_eq!(pi.signatures, Vec::<String>::new());
+    assert_eq!(
+        pi.ca,
+        Some("fixed:r:sha256:17hx6jdm0gajj4cmsszlzbwzjxq8cypws73rz5fcij7yq3s6q4iw".to_string())
     );
 }

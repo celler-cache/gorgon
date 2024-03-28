@@ -191,14 +191,17 @@ pub fn read_strings<R: AsyncReadExt + Unpin>(r: &mut R) -> impl Stream<Item = Re
     }
 }
 /// Write a list of strings to the stream.
-pub async fn write_strings<W: AsyncWriteExt + Unpin, S: AsRef<str>>(
-    w: &mut W,
-    sl: &[S],
-) -> Result<()> {
-    write_u64(w, sl.len().try_into().unwrap())
+pub async fn write_strings<W: AsyncWriteExt + Unpin, I>(w: &mut W, si: I) -> Result<()>
+where
+    I: IntoIterator + Send,
+    I::IntoIter: ExactSizeIterator + Send,
+    I::Item: AsRef<str> + Send + Sync,
+{
+    let si = si.into_iter();
+    write_u64(w, si.len().try_into().unwrap())
         .await
         .with_field("<count>")?;
-    for s in sl {
+    for s in si {
         write_string(w, s.as_ref()).await?;
     }
     Ok(())

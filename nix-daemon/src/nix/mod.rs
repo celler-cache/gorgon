@@ -111,6 +111,7 @@ where
 /// Store backed by a nix-daemon.
 pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
     conn: C,
+    buffer: [u8; 1024],
     pub proto: Proto,
 }
 
@@ -174,7 +175,11 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
         // Discard Stderr. There shouldn't be anything here anyway.
         while let Some(_) = wire::read_stderr(&mut conn).await? {}
 
-        Ok(Self { conn, proto })
+        Ok(Self {
+            conn,
+            buffer: [0u8; 1024],
+            proto,
+        })
     }
 }
 
@@ -195,6 +200,57 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         Ok(DaemonProgress::new(self, |s| async move {
             wire::read_bool(&mut s.conn).await
         }))
+    }
+
+    /// Adds a file to the store.
+    async fn add_to_store<SN: AsRef<str> + Send + Sync, SC: AsRef<str> + Send + Sync, Refs, R>(
+        &mut self,
+        name: SN,
+        cam_str: SC,
+        refs: Refs,
+        repair: bool,
+        mut source: R,
+    ) -> Result<impl Progress<T = (String, PathInfo)>>
+    where
+        Refs: IntoIterator + Send,
+        Refs::IntoIter: ExactSizeIterator + Send,
+        Refs::Item: AsRef<str> + Send + Sync,
+        R: AsyncReadExt + Unpin + Send,
+    {
+        match self.proto {
+            Proto(1, 25..) => {
+                wire::write_op(&mut self.conn, wire::Op::AddToStore)
+                    .await
+                    .with_field("AddToStore.<op>")?;
+                wire::write_string(&mut self.conn, name)
+                    .await
+                    .with_field("AddToStore.name")?;
+                wire::write_string(&mut self.conn, cam_str)
+                    .await
+                    .with_field("AddToStore.camStr")?;
+                wire::write_strings(&mut self.conn, refs)
+                    .await
+                    .with_field("AddToStore.refs")?;
+                wire::write_bool(&mut self.conn, repair)
+                    .await
+                    .with_field("AddToStore.repair")?;
+                wire::copy_to_framed(&mut source, &mut self.conn, &mut self.buffer)
+                    .await
+                    .with_field("AddToStore.<source>")?;
+                Ok(DaemonProgress::new(self, |slf| async move {
+                    Ok((
+                        wire::read_string(&mut slf.conn).await.with_field("name")?,
+                        wire::read_pathinfo(&mut slf.conn, slf.proto)
+                            .await
+                            .with_field("PathInfo")?,
+                    ))
+                }))
+            }
+            _ => Err(Error::Invalid(format!(
+                "AddToStore is not implemented for Protocol {}",
+                self.proto
+            ))),
+        }
     }
 
     async fn set_options(&mut self, opts: ClientSettings) -> Result<impl Progress<T = ()>> {
