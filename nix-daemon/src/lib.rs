@@ -159,9 +159,9 @@ impl<P: Progress> ProgressExt for P {
 /// Interface to a Nix store.
 pub trait Store {
     /// Returns whether a store path is valid.
-    fn is_valid_path<S: AsRef<str> + Send + Sync>(
+    fn is_valid_path<P: AsRef<str> + Send + Sync>(
         &mut self,
-        path: S,
+        path: P,
     ) -> impl Future<Output = Result<impl Progress<T = bool>>> + Send;
 
     /// Applies client options. This changes the behaviour of future commands.

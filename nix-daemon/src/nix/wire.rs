@@ -84,6 +84,21 @@ impl From<TryFromPrimitiveError<Op>> for Error {
     }
 }
 
+pub async fn copy_to_framed<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
+    r: &mut R,
+    w: &mut W,
+    buf: &mut [u8],
+) -> Result<()> {
+    loop {
+        let len = r.read(buf).await?;
+        write_u64(w, len as u64).await?;
+        if len == 0 {
+            return Ok(());
+        }
+        w.write_all(&buf[..len]).await?;
+    }
+}
+
 /// Read a u64 from the stream (little endian).
 pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {
     Ok(r.read_u64_le().await?)
@@ -518,6 +533,61 @@ mod tests {
         let mut v = [0u8; L];
         (&mut v[..s.len()]).copy_from_slice(s.as_bytes());
         v
+    }
+
+    #[tokio::test]
+    async fn test_copy_to_framed_empty() {
+        let mut r = Builder::new().read(&[]).build();
+        let mut w = Builder::new().write(&0u64.to_le_bytes()).build();
+        let mut buf = [0u8; 64];
+        copy_to_framed(&mut r, &mut w, &mut buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_copy_to_framed_1() {
+        let mut r = Builder::new().read(&[1, 2, 3, 4]).build();
+        let mut w = Builder::new()
+            .write(&4u64.to_le_bytes())
+            .write(&[1, 2, 3, 4])
+            .write(&0u64.to_le_bytes())
+            .build();
+        let mut buf = [0u8; 64];
+        copy_to_framed(&mut r, &mut w, &mut buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_copy_to_framed_2reads() {
+        // 10 bytes split across 2 reads.
+        let mut r = Builder::new()
+            .read(&[1, 2, 3, 4])
+            .read(&[5, 6, 7, 8, 9, 10])
+            .build();
+        let mut w = Builder::new()
+            .write(&4u64.to_le_bytes())
+            .write(&[1, 2, 3, 4])
+            .write(&6u64.to_le_bytes())
+            .write(&[5, 6, 7, 8, 9, 10])
+            .write(&0u64.to_le_bytes())
+            .build();
+        let mut buf = [0u8; 64];
+        copy_to_framed(&mut r, &mut w, &mut buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_copy_to_framed_3buffers() {
+        // 5 bytes available, but buffer is only 2 bytes.
+        let mut r = Builder::new().read(&[1, 2, 3, 4, 5]).build();
+        let mut w = Builder::new()
+            .write(&2u64.to_le_bytes())
+            .write(&[1, 2])
+            .write(&2u64.to_le_bytes())
+            .write(&[3, 4])
+            .write(&1u64.to_le_bytes())
+            .write(&[5])
+            .write(&0u64.to_le_bytes())
+            .build();
+        let mut buf = [0u8; 2];
+        copy_to_framed(&mut r, &mut w, &mut buf).await.unwrap();
     }
 
     // Integers.
