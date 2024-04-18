@@ -56,7 +56,8 @@ fn create_known_test_file() -> String {
 
 #[tokio::test]
 async fn test_set_options() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     store
@@ -81,7 +82,8 @@ async fn test_set_options() {
 
 #[tokio::test]
 async fn test_is_valid_path_false() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store
@@ -95,7 +97,8 @@ async fn test_is_valid_path_false() {
 }
 #[tokio::test]
 async fn test_is_valid_path_true() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store
@@ -110,7 +113,8 @@ async fn test_is_valid_path_true() {
 
 #[tokio::test]
 async fn test_query_pathinfo_none() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store
@@ -124,7 +128,8 @@ async fn test_query_pathinfo_none() {
 }
 #[tokio::test]
 async fn test_query_pathinfo_some() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store
@@ -154,7 +159,8 @@ async fn test_query_pathinfo_some() {
 
 #[tokio::test]
 async fn test_add_to_store() {
-    let mut store = DaemonStore::connect_unix("/nix/var/nix/daemon-socket/socket")
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store

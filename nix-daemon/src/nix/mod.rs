@@ -108,7 +108,42 @@ where
     }
 }
 
+/// Builder for a DaemonStore.
+#[derive(Debug, Default)]
+pub struct DaemonStoreBuilder {
+    // This will do things in the future.
+}
+
+impl DaemonStoreBuilder {
+    /// Initializes a DaemonStore by adopting a connection.
+    ///
+    /// It's up to the caller that the connection is in a state to begin a nix handshake, eg.
+    /// it behaves like a fresh connection to the daemon socket - if this is a connection through
+    /// a proxy, any proxy handshakes should already have taken place, etc.
+    pub async fn init<C: AsyncReadExt + AsyncWriteExt + Unpin>(
+        self,
+        conn: C,
+    ) -> Result<DaemonStore<C>> {
+        let mut store = DaemonStore {
+            conn,
+            buffer: [0u8; 1024],
+            proto: Proto(0, 0),
+        };
+        store.init().await?;
+        Ok(store)
+    }
+
+    /// Connects to a Nix daemon via a unix socket. The path is usually `/nix/var/nix/daemon-socket/socket`.
+    pub async fn connect_unix<P: AsRef<std::path::Path>>(
+        self,
+        path: P,
+    ) -> Result<DaemonStore<UnixStream>> {
+        self.init(UnixStream::connect(path).await?).await
+    }
+}
+
 /// Store backed by a nix-daemon.
+#[derive(Debug)]
 pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
     conn: C,
     buffer: [u8; 1024],
@@ -116,18 +151,18 @@ pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
 }
 
 impl DaemonStore<UnixStream> {
-    pub async fn connect_unix<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        Self::init(UnixStream::connect(path).await?).await
+    pub fn builder() -> DaemonStoreBuilder {
+        DaemonStoreBuilder::default()
     }
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
-    async fn init(mut conn: C) -> Result<Self> {
+    async fn init(&mut self) -> Result<()> {
         // Exchange magic numbers.
-        wire::write_u64(&mut conn, wire::WORKER_MAGIC_1)
+        wire::write_u64(&mut self.conn, wire::WORKER_MAGIC_1)
             .await
             .with_field("magic1")?;
-        wire::read_u64(&mut conn)
+        wire::read_u64(&mut self.conn)
             .await
             .and_then(|magic2| match magic2 {
                 wire::WORKER_MAGIC_2 => Ok(magic2),
@@ -136,7 +171,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
             .with_field("magic2")?;
 
         // Check that we're talking to a new enough daemon, tell them our version.
-        let proto = wire::read_proto(&mut conn)
+        self.proto = wire::read_proto(&mut self.conn)
             .await
             .and_then(|proto| {
                 if proto.0 != 1 || proto < MIN_PROTO {
@@ -145,41 +180,38 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
                 Ok(proto)
             })
             .with_field("daemon_proto")?;
-        wire::write_proto(&mut conn, MAX_PROTO)
+        wire::write_proto(&mut self.conn, MAX_PROTO)
             .await
             .with_field("client_proto")?;
 
         // Write some obsolete fields.
-        if proto >= Proto(1, 14) {
-            wire::write_u64(&mut conn, 0)
+        if self.proto >= Proto(1, 14) {
+            wire::write_u64(&mut self.conn, 0)
                 .await
                 .with_field("__obsolete_cpu_affinity")?;
         }
-        if proto >= Proto(1, 11) {
-            wire::write_bool(&mut conn, false)
+        if self.proto >= Proto(1, 11) {
+            wire::write_bool(&mut self.conn, false)
                 .await
                 .with_field("__obsolete_reserve_space")?;
         }
 
         // And we don't currently do anything with these.
-        if proto >= Proto(1, 33) {
-            wire::read_string(&mut conn)
+        if self.proto >= Proto(1, 33) {
+            wire::read_string(&mut self.conn)
                 .await
                 .with_field("nix_version")?;
         }
-        if proto >= Proto(1, 35) {
+        if self.proto >= Proto(1, 35) {
             // Option<bool>: 0 = None, 1 = Some(true), 2 = Some(false)
-            wire::read_u64(&mut conn).await.with_field("remote_trust")?;
+            wire::read_u64(&mut self.conn)
+                .await
+                .with_field("remote_trust")?;
         }
 
         // Discard Stderr. There shouldn't be anything here anyway.
-        while let Some(_) = wire::read_stderr(&mut conn).await? {}
-
-        Ok(Self {
-            conn,
-            buffer: [0u8; 1024],
-            proto,
-        })
+        while let Some(_) = wire::read_stderr(&mut self.conn).await? {}
+        Ok(())
     }
 }
 
