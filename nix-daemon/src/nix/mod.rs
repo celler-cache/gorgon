@@ -5,11 +5,13 @@
 pub mod wire;
 
 use crate::{ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store};
+use std::fmt::Debug;
 use std::future::Future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
+use tracing::instrument;
 
 /// Minimum supported protocol version. Older versions will be rejected.
 ///
@@ -129,7 +131,7 @@ impl DaemonStoreBuilder {
             buffer: [0u8; 1024],
             proto: Proto(0, 0),
         };
-        store.init().await?;
+        store.handshake().await?;
         Ok(store)
     }
 
@@ -157,7 +159,8 @@ impl DaemonStore<UnixStream> {
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
-    async fn init(&mut self) -> Result<()> {
+    #[instrument(skip(self))]
+    async fn handshake(&mut self) -> Result<()> {
         // Exchange magic numbers.
         wire::write_u64(&mut self.conn, wire::WORKER_MAGIC_1)
             .await
@@ -219,7 +222,8 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     // FIXME: The daemon expects /nix/store/foo, not /nix/store/foo/bin/bar.
     // In the nix codebase, libstore chops the latter into the former before making the
     // call, but I'm unsure of how to do it here.
-    async fn is_valid_path<S: AsRef<str> + Send + Sync>(
+    #[instrument(skip(self))]
+    async fn is_valid_path<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
     ) -> Result<impl Progress<T = bool>> {
@@ -235,7 +239,13 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     /// Adds a file to the store.
-    async fn add_to_store<SN: AsRef<str> + Send + Sync, SC: AsRef<str> + Send + Sync, Refs, R>(
+    #[instrument(skip(self, source))]
+    async fn add_to_store<
+        SN: AsRef<str> + Send + Sync + Debug,
+        SC: AsRef<str> + Send + Sync + Debug,
+        Refs,
+        R,
+    >(
         &mut self,
         name: SN,
         cam_str: SC,
@@ -244,10 +254,10 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         mut source: R,
     ) -> Result<impl Progress<T = (String, PathInfo)>>
     where
-        Refs: IntoIterator + Send,
+        Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
         Refs::Item: AsRef<str> + Send + Sync,
-        R: AsyncReadExt + Unpin + Send,
+        R: AsyncReadExt + Unpin + Send + Debug,
     {
         match self.proto {
             Proto(1, 25..) => {
@@ -285,6 +295,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }
     }
 
+    #[instrument(skip(self))]
     async fn set_options(&mut self, opts: ClientSettings) -> Result<impl Progress<T = ()>> {
         wire::write_op(&mut self.conn, wire::Op::SetOptions)
             .await
@@ -295,7 +306,8 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         Ok(DaemonProgress::new(self, |_| async move { Ok(()) }))
     }
 
-    async fn query_pathinfo<S: AsRef<str> + Send + Sync>(
+    #[instrument(skip(self))]
+    async fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
     ) -> Result<impl Progress<T = Option<PathInfo>>> {

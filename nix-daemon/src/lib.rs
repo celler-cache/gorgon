@@ -6,6 +6,7 @@ pub mod nix;
 
 use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
+use std::fmt::Debug;
 use std::{collections::HashMap, future::Future};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
@@ -160,13 +161,18 @@ impl<P: Progress> ProgressExt for P {
 /// Interface to a Nix store.
 pub trait Store {
     /// Returns whether a store path is valid.
-    fn is_valid_path<P: AsRef<str> + Send + Sync>(
+    fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
     ) -> impl Future<Output = Result<impl Progress<T = bool>>> + Send;
 
     /// Adds a file to the store.
-    fn add_to_store<SN: AsRef<str> + Send + Sync, SC: AsRef<str> + Send + Sync, Refs, R>(
+    fn add_to_store<
+        SN: AsRef<str> + Send + Sync + Debug,
+        SC: AsRef<str> + Send + Sync + Debug,
+        Refs,
+        R,
+    >(
         &mut self,
         name: SN,
         cam_str: SC,
@@ -175,10 +181,10 @@ pub trait Store {
         source: R,
     ) -> impl Future<Output = Result<impl Progress<T = (String, PathInfo)>>> + Send
     where
-        Refs: IntoIterator + Send,
+        Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
         Refs::Item: AsRef<str> + Send + Sync,
-        R: AsyncReadExt + Unpin + Send;
+        R: AsyncReadExt + Unpin + Send + Debug;
 
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(
@@ -187,7 +193,7 @@ pub trait Store {
     ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
 
     /// Returns a PathInfo struct for the given path.
-    fn query_pathinfo<S: AsRef<str> + Send + Sync>(
+    fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
     ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>>> + Send;

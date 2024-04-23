@@ -10,8 +10,11 @@ use chrono::DateTime;
 use futures::future::OptionFuture;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::collections::HashMap;
+use std::fmt::Debug;
+use tap::{Tap, TapFallible};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_stream::{Stream, StreamExt};
+use tracing::{instrument, trace};
 
 /// Magic number sent by the client.
 pub const WORKER_MAGIC_1: u64 = 0x6e697863;
@@ -84,6 +87,7 @@ impl From<TryFromPrimitiveError<Op>> for Error {
     }
 }
 
+#[instrument(skip_all, level = "trace")]
 pub async fn copy_to_framed<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     r: &mut R,
     w: &mut W,
@@ -93,60 +97,79 @@ pub async fn copy_to_framed<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         let len = r.read(buf).await?;
         write_u64(w, len as u64).await?;
         if len == 0 {
+            trace!("Done");
             return Ok(());
         }
         w.write_all(&buf[..len]).await?;
+        trace!(len, "Copied frame...");
     }
 }
 
 /// Read a u64 from the stream (little endian).
+#[instrument(skip(r), level = "trace")]
 pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {
-    Ok(r.read_u64_le().await?)
+    Ok(r.read_u64_le().await.tap_ok(|v| trace!(v, "<-"))?)
 }
 /// Write a u64 from the stream (little endian).
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_u64<W: AsyncWriteExt + Unpin>(w: &mut W, v: u64) -> Result<()> {
-    Ok(w.write_u64_le(v).await?)
+    Ok(w.write_u64_le(v.tap(|v| trace!(v, "->"))).await?)
 }
 
 /// Read a boolean from the stream, encoded as u64 (>0 is true).
+#[instrument(skip(r), level = "trace")]
 pub async fn read_bool<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
-    Ok(read_u64(r).await? > 0)
+    Ok(read_u64(r)
+        .await
+        .map(|v| v > 0)
+        .tap_ok(|v| trace!(v, "<-"))?)
 }
 /// Write a boolean to the stream, encoded as u64 (>0 is true).
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> Result<()> {
-    Ok(write_u64(w, v.then_some(1u64).unwrap_or(0u64)).await?)
+    Ok(write_u64(w, if v { 1 } else { 0 }.tap(|v| trace!(v, "->"))).await?)
 }
 
 /// Read a protocol version from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
-    read_u64(r).await.map(|raw| raw.into())
+    read_u64(r)
+        .await
+        .map(|raw| raw.into())
+        .tap_ok(|v| trace!(?v, "<-"))
 }
 /// Write a protocol version to the stream.
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_proto<W: AsyncWriteExt + Unpin>(w: &mut W, v: Proto) -> Result<()> {
-    write_u64(w, v.into()).await
+    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
 
 /// Read an opcode from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_op<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Op> {
-    Ok(read_u64(r).await?.try_into()?)
+    Ok(read_u64(r).await?.try_into().tap_ok(|v| trace!(?v, "<-"))?)
 }
 /// Write an opcode to the stream.
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_op<W: AsyncWriteExt + Unpin>(w: &mut W, v: Op) -> Result<()> {
-    write_u64(w, v.into()).await
+    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
 
 /// Read a verbosity level from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_verbosity<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Verbosity> {
-    Ok(read_u64(r).await?.try_into()?)
+    Ok(read_u64(r).await?.try_into().tap_ok(|v| trace!(?v, "<-"))?)
 }
 /// Write a verbosity level to the stream.
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_verbosity<W: AsyncWriteExt + Unpin>(w: &mut W, v: Verbosity) -> Result<()> {
-    write_u64(w, v.into()).await
+    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
 
 /// Read a string from the stream. Strings are prefixed with a u64 length, but the
 /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
 /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
     let len = read_u64(r).await.with_field("<length>")? as usize;
     let padded_len = len + if len % 8 > 0 { 8 - (len % 8) } else { 0 };
@@ -159,9 +182,16 @@ pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
         r.read_exact(&mut buf[..padded_len]).await?;
         Ok(String::from_utf8_lossy(&buf[..len]).to_string())
     }
+    .tap_ok(|v| trace!(v, "<-"))
 }
+
 /// Write a string to the stream. See: NixReader::read_string.
-pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str>>(w: &mut W, s: S) -> Result<()> {
+#[instrument(skip(w, s), level = "trace")]
+pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str> + Debug>(
+    w: &mut W,
+    s: S,
+) -> Result<()> {
+    trace!(v=?s,"->");
     let truncated =
         s.as_ref().split(|b| b == '\0').next().ok_or_else(|| {
             Error::Invalid("slice::split() returned an empty iterator".to_string())
@@ -172,9 +202,12 @@ pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str>>(w: &mut W, s:
         .with_field("<length>")?;
     if b.len() > 0 {
         w.write_all(b).await?;
+        trace!(v = truncated, "->");
         if b.len() % 8 > 0 {
             let pad_buf = [0u8; 7];
-            w.write_all(&pad_buf[..8 - (b.len() % 8)]).await?;
+            let pad_len = 8 - (b.len() % 8);
+            w.write_all(&pad_buf[..pad_len]).await?;
+            trace!(pad_len, "[ padding ]");
         }
     }
     Ok(())
@@ -182,6 +215,7 @@ pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str>>(w: &mut W, s:
 
 /// Read a list (or set) of strings from the stream - a u64 count, followed by that
 /// many strings using the normal `read_string()` encoding.
+#[instrument(skip(r), level = "trace")]
 pub fn read_strings<R: AsyncReadExt + Unpin>(r: &mut R) -> impl Stream<Item = Result<String>> + '_ {
     try_stream! {
         let count = read_u64(r).await.with_field("<count>")? as usize;
@@ -191,6 +225,7 @@ pub fn read_strings<R: AsyncReadExt + Unpin>(r: &mut R) -> impl Stream<Item = Re
     }
 }
 /// Write a list of strings to the stream.
+#[instrument(skip(w, si), level = "trace")]
 pub async fn write_strings<W: AsyncWriteExt + Unpin, I>(w: &mut W, si: I) -> Result<()>
 where
     I: IntoIterator + Send,
@@ -208,6 +243,7 @@ where
 }
 
 /// Read a NixError struct from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_error<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<NixError> {
     read_string(r)
         .await
@@ -244,6 +280,7 @@ pub async fn read_error<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<NixError> 
 }
 
 /// Write a NixError struct to the stream.
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_error<W: AsyncWriteExt + Unpin>(w: &mut W, v: NixError) -> Result<()> {
     write_string(w, "Error")
         .await
@@ -284,18 +321,22 @@ pub enum StderrKind {
 }
 
 /// Read a protocol version from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Stderr>> {
-    let kind =
-        StderrKind::try_from(read_u64(r).await?).map_err(|TryFromPrimitiveError { number }| {
+    let kind = StderrKind::try_from(read_u64(r).await?)
+        .map_err(|TryFromPrimitiveError { number }| {
             Error::Invalid(format!("Stderr<{:#x}>", number))
-        })?;
+        })?
+        .tap(|v| trace!(?v, "<-"));
     match kind {
         StderrKind::Last => Ok(None),
         StderrKind::Error => Ok(Some(Stderr::Error(read_error(r).await?))),
     }
 }
 /// Write a protocol version to the stream.
+#[instrument(skip(w, v), level = "trace")]
 pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>) -> Result<()> {
+    trace!(?v, "->");
     match v {
         None => write_u64(w, StderrKind::Last.into()).await?,
         Some(_) => todo!(),
@@ -304,6 +345,7 @@ pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>
 }
 
 /// Read a ClientSettings structure from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_client_settings<R: AsyncReadExt + Unpin>(
     r: &mut R,
     proto: Proto,
@@ -375,6 +417,7 @@ pub async fn read_client_settings<R: AsyncReadExt + Unpin>(
     })
 }
 /// Writes a ClientSettings structure to the stream.
+#[instrument(skip(w, cs), level = "trace")]
 pub async fn write_client_settings<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     proto: Proto,
@@ -443,6 +486,7 @@ pub async fn write_client_settings<W: AsyncWriteExt + Unpin>(
 }
 
 /// Read a PathInfo structure from the stream.
+#[instrument(skip(r), level = "trace")]
 pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Proto) -> Result<PathInfo> {
     let deriver = read_string(r)
         .await
@@ -489,6 +533,7 @@ pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Proto) -> 
     })
 }
 /// Write a PathInfo structure to the stream.
+#[instrument(skip(w, pi), level = "trace")]
 pub async fn write_pathinfo<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     proto: Proto,

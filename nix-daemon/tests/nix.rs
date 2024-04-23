@@ -2,11 +2,14 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+mod utils;
+
 use nix_daemon::{
     nix::DaemonStore, ClientSettings, Progress, ProgressExt, Stderr, Store, Verbosity,
 };
 use std::collections::HashMap;
 use tokio_test::io::Builder;
+use utils::init_logging;
 
 const INVALID_STORE_PATH: &'static str =
     "/nix/store/ffffffffffffffffffffffffffffffff-invalid-1.0.0";
@@ -56,6 +59,7 @@ fn create_known_test_file() -> String {
 
 #[tokio::test]
 async fn test_set_options() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
@@ -82,6 +86,7 @@ async fn test_set_options() {
 
 #[tokio::test]
 async fn test_is_valid_path_false() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
@@ -97,6 +102,7 @@ async fn test_is_valid_path_false() {
 }
 #[tokio::test]
 async fn test_is_valid_path_true() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
@@ -113,6 +119,7 @@ async fn test_is_valid_path_true() {
 
 #[tokio::test]
 async fn test_query_pathinfo_none() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
@@ -128,6 +135,7 @@ async fn test_query_pathinfo_none() {
 }
 #[tokio::test]
 async fn test_query_pathinfo_some() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
@@ -159,6 +167,7 @@ async fn test_query_pathinfo_some() {
 
 #[tokio::test]
 async fn test_add_to_store() {
+    init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
