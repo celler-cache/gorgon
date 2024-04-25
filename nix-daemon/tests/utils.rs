@@ -3,11 +3,9 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 pub fn init_logging() {
-    use tracing_subscriber::prelude::*;
-
-    tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::filter::LevelFilter::TRACE)
-        .with(tracing_subscriber::fmt::layer())
+    tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::TRACE)
         .try_init()
-        .unwrap_or_default();
+        .unwrap_or_default()
 }
