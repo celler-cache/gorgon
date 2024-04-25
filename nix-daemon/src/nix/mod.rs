@@ -11,6 +11,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
+use tokio_stream::StreamExt;
 use tracing::instrument;
 
 /// Minimum supported protocol version. Older versions will be rejected.
@@ -94,7 +95,7 @@ where
         } else {
             match wire::read_stderr(&mut self.store.conn).await? {
                 Some(Stderr::Error(err)) => Err(Error::NixError(err)),
-                // Some(stderr) => Ok(Some(stderr)),
+                Some(stderr) => Ok(Some(stderr)),
                 None => {
                     self.fuse = true;
                     Ok(None)
@@ -323,6 +324,50 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             } else {
                 Ok(None)
             }
+        }))
+    }
+
+    async fn query_missing<Ps>(
+        &mut self,
+        paths: Ps,
+    ) -> Result<impl Progress<T = crate::QueryMissing>>
+    where
+        Ps: IntoIterator + Send,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync,
+    {
+        wire::write_op(&mut self.conn, wire::Op::QueryMissing)
+            .await
+            .with_field("QueryMissing.<op>")?;
+        wire::write_strings(&mut self.conn, paths)
+            .await
+            .with_field("QueryMissing.paths")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            let will_build = wire::read_strings(&mut s.conn)
+                .collect::<Result<Vec<String>>>()
+                .await
+                .with_field("QueryMissing.will_build")?;
+            let will_substitute = wire::read_strings(&mut s.conn)
+                .collect::<Result<Vec<String>>>()
+                .await
+                .with_field("QueryMissing.will_substitute")?;
+            let unknown = wire::read_strings(&mut s.conn)
+                .collect::<Result<Vec<String>>>()
+                .await
+                .with_field("QueryMissing.unknown")?;
+            let download_size = wire::read_u64(&mut s.conn)
+                .await
+                .with_field("QueryMissing.download_size")?;
+            let nar_size = wire::read_u64(&mut s.conn)
+                .await
+                .with_field("QueryMissing.nar_size")?;
+            Ok(crate::QueryMissing {
+                will_build,
+                will_substitute,
+                unknown,
+                download_size,
+                nar_size,
+            })
         }))
     }
 }

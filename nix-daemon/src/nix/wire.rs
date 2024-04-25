@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{
-    nix::Proto, ClientSettings, Error, NixError, PathInfo, Result, ResultExt, Stderr, Verbosity,
+    nix::Proto, ClientSettings, Error, NixError, PathInfo, Result, ResultExt, Stderr, StderrField,
+    StderrStartActivity, Verbosity,
 };
 use async_stream::try_stream;
 use chrono::DateTime;
@@ -318,6 +319,8 @@ pub async fn write_error<W: AsyncWriteExt + Unpin>(w: &mut W, v: NixError) -> Re
 pub enum StderrKind {
     Last = 0x616c7473,
     Error = 0x63787470,
+    StartActivity = 0x53545254,
+    StopActivity = 0x53544f50,
 }
 
 /// Read a protocol version from the stream.
@@ -327,12 +330,54 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
         .map_err(|TryFromPrimitiveError { number }| {
             Error::Invalid(format!("Stderr<{:#x}>", number))
         })?
-        .tap(|v| trace!(?v, "<-"));
+        .tap(|v| trace!(?v, "kind"));
+
     match kind {
         StderrKind::Last => Ok(None),
         StderrKind::Error => Ok(Some(Stderr::Error(read_error(r).await?))),
+        StderrKind::StartActivity => Ok(Some(Stderr::StartActivity(
+            read_stderr_start_activity(r).await?,
+        ))),
+        StderrKind::StopActivity => Ok(Some(Stderr::StopActivity {
+            id: read_u64(r).await?,
+        })),
     }
 }
+#[instrument(skip(r), level = "trace")]
+pub async fn read_stderr_start_activity<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> Result<StderrStartActivity> {
+    Ok(crate::StderrStartActivity {
+        act_id: read_u64(r).await?.tap(|v| trace!(v, "act_id")),
+        level: read_verbosity(r).await?.tap(|v| trace!(?v, "level")),
+        kind: read_u64(r).await?.try_into().tap(|v| trace!(?v, "kind"))?,
+        s: read_string(r).await?.tap(|s| trace!(s, "s")),
+        fields: {
+            let count = read_u64(r)
+                .await
+                .with_field("StartActivity.fields.<count>")?
+                .tap(|count| trace!(count, "fields[].<count>")) as usize;
+            let mut fields = Vec::with_capacity(count);
+            for n in 0..count {
+                fields.push(
+                    match read_u64(r)
+                        .await
+                        .with_field("StartActivity.fields[].<type>")?
+                    {
+                        1 => Ok(StderrField::Int(read_u64(r).await?)),
+                        3 => Ok(StderrField::String(read_string(r).await?)),
+                        v => Err(Error::Invalid(format!("<type>({})", v))),
+                    }
+                    .with_field("StartActivity.fields[]")?
+                    .tap(|v| trace!(n, count, ?v, "fields[]")),
+                )
+            }
+            fields
+        },
+        parent_id: read_u64(r).await?.tap(|v| trace!(v, "parent_id")),
+    })
+}
+
 /// Write a protocol version to the stream.
 #[instrument(skip(w, v), level = "trace")]
 pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>) -> Result<()> {

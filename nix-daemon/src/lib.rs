@@ -59,6 +59,47 @@ impl std::fmt::Display for NixError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stderr {
     Error(NixError),
+    StartActivity(StderrStartActivity),
+    StopActivity { id: u64 },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct StderrStartActivity {
+    act_id: u64,
+    level: Verbosity,
+    kind: StderrActivityType,
+    s: String,
+    fields: Vec<StderrField>,
+    parent_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum StderrActivityType {
+    Unknown = 0,
+    CopyPath = 100,
+    FileTransfer = 101,
+    Realise = 102,
+    CopyPaths = 103,
+    Builds = 104,
+    Build = 105,
+    OptimiseStore = 106,
+    VerifyPaths = 107,
+    Substitute = 108,
+    QueryPathInfo = 109,
+    PostBuildHook = 110,
+    BuildWaiting = 111,
+}
+impl From<TryFromPrimitiveError<StderrActivityType>> for Error {
+    fn from(value: TryFromPrimitiveError<StderrActivityType>) -> Self {
+        Self::Invalid(format!("StderrActivityType({:x})", value.number))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StderrField {
+    Int(u64),
+    String(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -197,4 +238,24 @@ pub trait Store {
         &mut self,
         path: S,
     ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>>> + Send;
+
+    /// Takes a list of paths and queries which would be built, substituted or unknown,
+    /// along with an estimate of the cumulative download and NAR sizes.
+    fn query_missing<Ps>(
+        &mut self,
+        paths: Ps,
+    ) -> impl Future<Output = Result<impl Progress<T = QueryMissing>>> + Send
+    where
+        Ps: IntoIterator + Send,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct QueryMissing {
+    pub will_build: Vec<String>,
+    pub will_substitute: Vec<String>,
+    pub unknown: Vec<String>,
+    pub download_size: u64,
+    pub nar_size: u64,
 }

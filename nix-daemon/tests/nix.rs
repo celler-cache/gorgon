@@ -222,3 +222,29 @@ async fn test_add_to_store() {
         Some("fixed:r:sha256:17hx6jdm0gajj4cmsszlzbwzjxq8cypws73rz5fcij7yq3s6q4iw".to_string())
     );
 }
+
+#[tokio::test]
+async fn test_query_missing_valid() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let missing = store
+        .query_missing(&[create_known_test_file()][..])
+        .await
+        .expect("QueryMissing failed")
+        .result()
+        .await
+        .expect("Progress");
+    assert_eq!(
+        missing,
+        nix_daemon::QueryMissing {
+            will_build: Vec::new(),
+            will_substitute: Vec::new(),
+            unknown: Vec::new(),
+            download_size: 0,
+            nar_size: 0,
+        }
+    );
+}
