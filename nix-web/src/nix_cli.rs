@@ -61,11 +61,15 @@ pub struct Derivation {
     pub builder: String,
     pub env: BTreeMap<String, String>,
     #[serde(rename = "inputDrvs")]
-    pub input_drvs: BTreeMap<String, Vec<String>>,
+    pub input_drvs: BTreeMap<String, DerivationInput>,
     #[serde(rename = "inputSrcs")]
     pub input_srcs: Vec<String>,
     pub outputs: BTreeMap<String, DerivationOutput>,
     pub system: String,
+}
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DerivationInput {
+    pub outputs: Vec<String>,
 }
 
 impl Derivation {

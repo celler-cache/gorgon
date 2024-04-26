@@ -4,7 +4,7 @@
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
 , nixVersions ? pkgs.nixVersions
-, nixVersion ? "nix_2_17"
+, nixVersion ? "nix_2_18"
 , pkg-config ? pkgs.pkg-config
 , openssl ? pkgs.openssl
 , srcOverride ? import ../nix/src.nix { inherit lib; }
