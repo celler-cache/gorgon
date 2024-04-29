@@ -4,7 +4,9 @@
 
 pub mod wire;
 
-use crate::{ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store};
+use crate::{
+    BuildMode, ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store,
+};
 use std::fmt::Debug;
 use std::future::Future;
 use tokio::{
@@ -294,6 +296,34 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
                 self.proto
             ))),
         }
+    }
+
+    #[instrument(skip(self))]
+    async fn build_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        mode: BuildMode,
+    ) -> Result<impl Progress<T = ()>>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        wire::write_op(&mut self.conn, wire::Op::BuildPaths)
+            .await
+            .with_field("BuildPaths.<op>")?;
+        wire::write_strings(&mut self.conn, paths)
+            .await
+            .with_field("BuildPaths.paths")?;
+        if self.proto >= Proto(1, 15) {
+            wire::write_build_mode(&mut self.conn, mode)
+                .await
+                .with_field("BuildPaths.build_mode")?;
+        }
+        Ok(DaemonProgress::new(self, |s| async move {
+            wire::read_u64(&mut s.conn).await.with_field("__unused__")?;
+            Ok(())
+        }))
     }
 
     #[instrument(skip(self))]

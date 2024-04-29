@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{
-    nix::Proto, ClientSettings, Error, NixError, PathInfo, Result, ResultExt, Stderr, StderrField,
-    StderrStartActivity, Verbosity,
+    nix::Proto, BuildMode, ClientSettings, Error, NixError, PathInfo, Result, ResultExt, Stderr,
+    StderrField, StderrResult, StderrStartActivity, Verbosity,
 };
 use async_stream::try_stream;
 use chrono::DateTime;
@@ -167,6 +167,17 @@ pub async fn write_verbosity<W: AsyncWriteExt + Unpin>(w: &mut W, v: Verbosity) 
     write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
 
+/// Read a build mode from the stream.
+#[instrument(skip(r), level = "trace")]
+pub async fn read_build_mode<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<BuildMode> {
+    Ok(read_u64(r).await?.try_into().tap_ok(|v| trace!(?v, "<-"))?)
+}
+/// Write a build mode to the stream.
+#[instrument(skip(w, v), level = "trace")]
+pub async fn write_build_mode<W: AsyncWriteExt + Unpin>(w: &mut W, v: BuildMode) -> Result<()> {
+    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
+}
+
 /// Read a string from the stream. Strings are prefixed with a u64 length, but the
 /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
 /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
@@ -321,6 +332,7 @@ pub enum StderrKind {
     Error = 0x63787470,
     StartActivity = 0x53545254,
     StopActivity = 0x53544f50,
+    Result = 0x52534c54,
 }
 
 /// Read a protocol version from the stream.
@@ -341,41 +353,53 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
         StderrKind::StopActivity => Ok(Some(Stderr::StopActivity {
             id: read_u64(r).await?,
         })),
+        StderrKind::Result => Ok(Some(Stderr::Result(read_stderr_result(r).await?))),
     }
 }
 #[instrument(skip(r), level = "trace")]
 pub async fn read_stderr_start_activity<R: AsyncReadExt + Unpin>(
     r: &mut R,
 ) -> Result<StderrStartActivity> {
-    Ok(crate::StderrStartActivity {
+    Ok(StderrStartActivity {
         act_id: read_u64(r).await?.tap(|v| trace!(v, "act_id")),
         level: read_verbosity(r).await?.tap(|v| trace!(?v, "level")),
         kind: read_u64(r).await?.try_into().tap(|v| trace!(?v, "kind"))?,
         s: read_string(r).await?.tap(|s| trace!(s, "s")),
-        fields: {
-            let count = read_u64(r)
-                .await
-                .with_field("StartActivity.fields.<count>")?
-                .tap(|count| trace!(count, "fields[].<count>")) as usize;
-            let mut fields = Vec::with_capacity(count);
-            for n in 0..count {
-                fields.push(
-                    match read_u64(r)
-                        .await
-                        .with_field("StartActivity.fields[].<type>")?
-                    {
-                        0 => Ok(StderrField::Int(read_u64(r).await?)),
-                        1 => Ok(StderrField::String(read_string(r).await?)),
-                        v => Err(Error::Invalid(format!("<type>({})", v))),
-                    }
-                    .with_field("StartActivity.fields[]")?
-                    .tap(|v| trace!(n, count, ?v, "fields[]")),
-                )
-            }
-            fields
-        },
+        fields: read_stderr_fields(r).await?.tap(|v| trace!(?v, "fields")),
         parent_id: read_u64(r).await?.tap(|v| trace!(v, "parent_id")),
     })
+}
+#[instrument(skip(r), level = "trace")]
+pub async fn read_stderr_result<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<StderrResult> {
+    Ok(StderrResult {
+        act_id: read_u64(r).await?.tap(|v| trace!(v, "act_id")),
+        kind: read_u64(r).await?.try_into().tap(|v| trace!(?v, "kind"))?,
+        fields: read_stderr_fields(r).await?.tap(|v| trace!(?v, "fields")),
+    })
+}
+
+#[instrument(skip(r), level = "trace")]
+pub async fn read_stderr_fields<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<StderrField>> {
+    let count = read_u64(r)
+        .await
+        .with_field("StartActivity.fields.<count>")?
+        .tap(|count| trace!(count, "fields[].<count>")) as usize;
+    let mut fields = Vec::with_capacity(count);
+    for n in 0..count {
+        fields.push(
+            match read_u64(r)
+                .await
+                .with_field("StartActivity.fields[].<type>")?
+            {
+                0 => Ok(StderrField::Int(read_u64(r).await?)),
+                1 => Ok(StderrField::String(read_string(r).await?)),
+                v => Err(Error::Invalid(format!("<type>({})", v))),
+            }
+            .with_field("StartActivity.fields[]")?
+            .tap(|v| trace!(n, count, ?v, "fields[]")),
+        )
+    }
+    Ok(fields)
 }
 
 /// Write a protocol version to the stream.

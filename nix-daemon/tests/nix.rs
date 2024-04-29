@@ -5,9 +5,10 @@
 mod utils;
 
 use nix_daemon::{
-    nix::DaemonStore, ClientSettings, Progress, ProgressExt, Stderr, Store, Verbosity,
+    nix::DaemonStore, BuildMode, ClientSettings, Progress, ProgressExt, Stderr, Store, Verbosity,
 };
-use std::collections::HashMap;
+use std::io::Write;
+use std::{collections::HashMap, process::Stdio};
 use tokio_test::io::Builder;
 use utils::init_logging;
 
@@ -247,4 +248,88 @@ async fn test_query_missing_valid() {
             nar_size: 0,
         }
     );
+}
+
+#[tokio::test]
+async fn test_build_paths() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+
+    // Random string our built derivation should output. This test expects to
+    // actually build something, so it needs a derivation with a known output,
+    // which is incredibly unlikely to already exist in the user's store.
+    let cookie = {
+        use rand::distributions::{Alphanumeric, DistString};
+        Alphanumeric.sample_string(&mut rand::thread_rng(), 16)
+    };
+
+    // Instantiate a derivation.
+    let mut nix_instantiate = std::process::Command::new("nix-instantiate")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Couldn't spawn nix-instantiate");
+    std::thread::spawn({
+        let mut stdin = nix_instantiate.stdin.take().unwrap();
+        let input = format!(
+            "derivation {{
+                    name = \"test_build_paths_{}\";
+                    builder = \"/bin/sh\";
+                    args = [ \"-c\" \"echo -n $name > $out\" ];
+                    system = builtins.currentSystem;
+                }}",
+            cookie,
+        );
+        move || stdin.write_all(input.as_bytes())
+    });
+    let nix_instantiate_output = nix_instantiate
+        .wait_with_output()
+        .expect("nix-instantiate failed");
+    let drv_path_ = String::from_utf8(nix_instantiate_output.stdout).unwrap();
+    let drv_path = drv_path_.trim();
+    let drv_output = format!("{}!out", drv_path);
+
+    // Double check that it's not already built.
+    let missing = store
+        .query_missing(&[&drv_output][..])
+        .await
+        .expect("QueryMissing failed")
+        .result()
+        .await
+        .expect("QueryMissing Progress");
+    assert_eq!(
+        nix_daemon::QueryMissing {
+            will_build: vec![drv_path.to_string()],
+            will_substitute: vec![],
+            unknown: vec![],
+            download_size: 0,
+            nar_size: 0,
+        },
+        missing
+    );
+
+    // Build it!
+    store
+        .build_paths(&[&drv_output][..], BuildMode::Normal)
+        .await
+        .expect("BuildPaths failed")
+        .result()
+        .await
+        .expect("BuildPaths Progress");
+
+    let nix_store_query = std::process::Command::new("nix-store")
+        .arg("--query")
+        .arg(&drv_path)
+        .output()
+        .expect("Couldn't create known test derivation");
+    let out_path =
+        std::path::PathBuf::from(String::from_utf8(nix_store_query.stdout).unwrap().trim());
+
+    let content = std::fs::read_to_string(out_path).expect("Couldn't read output");
+    assert_eq!(format!("test_build_paths_{}", cookie), content);
 }

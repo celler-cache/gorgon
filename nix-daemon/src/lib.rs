@@ -61,16 +61,7 @@ pub enum Stderr {
     Error(NixError),
     StartActivity(StderrStartActivity),
     StopActivity { id: u64 },
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct StderrStartActivity {
-    act_id: u64,
-    level: Verbosity,
-    kind: StderrActivityType,
-    s: String,
-    fields: Vec<StderrField>,
-    parent_id: u64,
+    Result(StderrResult),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -96,6 +87,43 @@ impl From<TryFromPrimitiveError<StderrActivityType>> for Error {
     }
 }
 
+// TODO: Decode fields.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StderrStartActivity {
+    pub act_id: u64,
+    pub level: Verbosity,
+    pub kind: StderrActivityType,
+    pub s: String,
+    pub fields: Vec<StderrField>,
+    pub parent_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum StderrResultType {
+    FileLinked = 100,
+    BuildLogLine = 101,
+    UntrustedPath = 102,
+    CorruptedPath = 103,
+    SetPhase = 104,
+    Progress = 105,
+    SetExpected = 106,
+    PostBuildLogLine = 107,
+}
+impl From<TryFromPrimitiveError<StderrResultType>> for Error {
+    fn from(value: TryFromPrimitiveError<StderrResultType>) -> Self {
+        Self::Invalid(format!("StderrResultType({:x})", value.number))
+    }
+}
+
+// TODO: Decode fields.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StderrResult {
+    act_id: u64,
+    kind: StderrResultType,
+    fields: Vec<StderrField>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum StderrField {
     Int(u64),
@@ -117,6 +145,19 @@ pub enum Verbosity {
 impl From<TryFromPrimitiveError<Verbosity>> for Error {
     fn from(value: TryFromPrimitiveError<Verbosity>) -> Self {
         Self::Invalid(format!("Verbosity({:x})", value.number))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum BuildMode {
+    Normal,
+    Repair,
+    Check,
+}
+impl From<TryFromPrimitiveError<BuildMode>> for Error {
+    fn from(value: TryFromPrimitiveError<BuildMode>) -> Self {
+        Self::Invalid(format!("BuildMode({:x})", value.number))
     }
 }
 
@@ -180,6 +221,7 @@ pub trait ProgressExt: Progress {
     fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T>)> + Send;
 }
 impl<P: Progress> ProgressExt for P {
+    // TODO: This name is bad.
     async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T> {
         while let Some(stderr) = self.next().await? {
             f(stderr)
@@ -226,6 +268,17 @@ pub trait Store {
         Refs::IntoIter: ExactSizeIterator + Send,
         Refs::Item: AsRef<str> + Send + Sync,
         R: AsyncReadExt + Unpin + Send + Debug;
+
+    /// Builds the specified paths.
+    fn build_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        mode: BuildMode,
+    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync;
 
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(

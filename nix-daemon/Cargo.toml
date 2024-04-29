@@ -23,4 +23,5 @@ tokio-test = "0.4.3"
 tracing = "0.1.40"
 
 [dev-dependencies]
+rand = "0.8.5"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
