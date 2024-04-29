@@ -364,8 +364,8 @@ pub async fn read_stderr_start_activity<R: AsyncReadExt + Unpin>(
                         .await
                         .with_field("StartActivity.fields[].<type>")?
                     {
-                        1 => Ok(StderrField::Int(read_u64(r).await?)),
-                        3 => Ok(StderrField::String(read_string(r).await?)),
+                        0 => Ok(StderrField::Int(read_u64(r).await?)),
+                        1 => Ok(StderrField::String(read_string(r).await?)),
                         v => Err(Error::Invalid(format!("<type>({})", v))),
                     }
                     .with_field("StartActivity.fields[]")?
