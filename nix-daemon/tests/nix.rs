@@ -251,7 +251,7 @@ async fn test_query_missing_valid() {
 }
 
 #[tokio::test]
-async fn test_build_paths() {
+async fn test_build() {
     init_logging();
     let mut store = DaemonStore::builder()
         .connect_unix("/nix/var/nix/daemon-socket/socket")
@@ -322,14 +322,29 @@ async fn test_build_paths() {
         .await
         .expect("BuildPaths Progress");
 
+    // Check the output.
     let nix_store_query = std::process::Command::new("nix-store")
         .arg("--query")
         .arg(&drv_path)
         .output()
         .expect("Couldn't create known test derivation");
-    let out_path =
-        std::path::PathBuf::from(String::from_utf8(nix_store_query.stdout).unwrap().trim());
+    let out_path_ = String::from_utf8(nix_store_query.stdout).unwrap();
+    let out_path = out_path_.trim();
 
-    let content = std::fs::read_to_string(out_path).expect("Couldn't read output");
+    let content =
+        std::fs::read_to_string(std::path::PathBuf::from(out_path)).expect("Couldn't read output");
     assert_eq!(format!("test_build_paths_{}", cookie), content);
+
+    // Try QueryDerivationOutputMap.
+    let outputs = store
+        .query_derivation_output_map(&drv_path)
+        .await
+        .expect("QueryDerivationOutputMap failed")
+        .result()
+        .await
+        .expect("QueryDerivationOutputMap Progress");
+    assert_eq!(
+        HashMap::from([("out".to_string(), out_path.to_string())]),
+        outputs
+    );
 }

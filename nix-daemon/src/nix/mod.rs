@@ -7,8 +7,8 @@ pub mod wire;
 use crate::{
     BuildMode, ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store,
 };
-use std::fmt::Debug;
 use std::future::Future;
+use std::{collections::HashMap, fmt::Debug};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -399,6 +399,35 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
                 download_size,
                 nar_size,
             })
+        }))
+    }
+
+    #[instrument(skip(self))]
+    async fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> Result<impl Progress<T = HashMap<String, String>>> {
+        wire::write_op(&mut self.conn, wire::Op::QueryDerivationOutputMap)
+            .await
+            .with_field("QueryDerivationOutputMap.<op>")?;
+        wire::write_string(&mut self.conn, path)
+            .await
+            .with_field("QueryDerivationOutputMap.paths")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            let mut outputs = HashMap::new();
+            let count = wire::read_u64(&mut s.conn)
+                .await
+                .with_field("QueryDerivationOutputMap.outputs[].<count>")?;
+            for _ in 0..count {
+                let name = wire::read_string(&mut s.conn)
+                    .await
+                    .with_field("QueryDerivationOutputMap.outputs[].name")?;
+                let path = wire::read_string(&mut s.conn)
+                    .await
+                    .with_field("QueryDerivationOutputMap.outputs[].path")?;
+                outputs.insert(name, path);
+            }
+            Ok(outputs)
         }))
     }
 }

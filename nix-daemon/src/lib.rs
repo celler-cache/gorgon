@@ -302,6 +302,11 @@ pub trait Store {
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync;
+
+    fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>>> + Send;
 }
 
 #[derive(Debug, PartialEq, Eq)]
