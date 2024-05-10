@@ -299,7 +299,7 @@ pub trait Store {
         paths: Ps,
     ) -> impl Future<Output = Result<impl Progress<T = QueryMissing>>> + Send
     where
-        Ps: IntoIterator + Send,
+        Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync;
 }

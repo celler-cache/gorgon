@@ -357,12 +357,13 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }))
     }
 
+    #[instrument(skip(self))]
     async fn query_missing<Ps>(
         &mut self,
         paths: Ps,
     ) -> Result<impl Progress<T = crate::QueryMissing>>
     where
-        Ps: IntoIterator + Send,
+        Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync,
     {
