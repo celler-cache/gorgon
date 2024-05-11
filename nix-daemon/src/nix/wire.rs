@@ -335,14 +335,13 @@ pub enum StderrKind {
     Result = 0x52534c54,
 }
 
-/// Read a protocol version from the stream.
 #[instrument(skip(r), level = "trace")]
 pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Stderr>> {
     let kind = StderrKind::try_from(read_u64(r).await?)
         .map_err(|TryFromPrimitiveError { number }| {
             Error::Invalid(format!("Stderr<{:#x}>", number))
         })?
-        .tap(|v| trace!(?v, "kind"));
+        .tap(|kind| trace!(?kind, "<-"));
 
     match kind {
         StderrKind::Last => Ok(None),
@@ -355,27 +354,30 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
         })),
         StderrKind::Result => Ok(Some(Stderr::Result(read_stderr_result(r).await?))),
     }
+    .tap_ok(|stderr| trace!(?stderr, "<-"))
 }
 #[instrument(skip(r), level = "trace")]
 pub async fn read_stderr_start_activity<R: AsyncReadExt + Unpin>(
     r: &mut R,
 ) -> Result<StderrStartActivity> {
     Ok(StderrStartActivity {
-        act_id: read_u64(r).await?.tap(|v| trace!(v, "act_id")),
-        level: read_verbosity(r).await?.tap(|v| trace!(?v, "level")),
-        kind: read_u64(r).await?.try_into().tap(|v| trace!(?v, "kind"))?,
-        s: read_string(r).await?.tap(|s| trace!(s, "s")),
-        fields: read_stderr_fields(r).await?.tap(|v| trace!(?v, "fields")),
-        parent_id: read_u64(r).await?.tap(|v| trace!(v, "parent_id")),
-    })
+        act_id: read_u64(r).await?,
+        level: read_verbosity(r).await?,
+        kind: read_u64(r).await?.try_into()?,
+        s: read_string(r).await?,
+        fields: read_stderr_fields(r).await?,
+        parent_id: read_u64(r).await?,
+    }
+    .tap(|act| trace!(?act, "<-")))
 }
 #[instrument(skip(r), level = "trace")]
 pub async fn read_stderr_result<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<StderrResult> {
     Ok(StderrResult {
-        act_id: read_u64(r).await?.tap(|v| trace!(v, "act_id")),
-        kind: read_u64(r).await?.try_into().tap(|v| trace!(?v, "kind"))?,
-        fields: read_stderr_fields(r).await?.tap(|v| trace!(?v, "fields")),
-    })
+        act_id: read_u64(r).await?,
+        kind: read_u64(r).await?.try_into()?,
+        fields: read_stderr_fields(r).await?,
+    }
+    .tap(|res| trace!(?res, "<-")))
 }
 
 #[instrument(skip(r), level = "trace")]
@@ -402,7 +404,6 @@ pub async fn read_stderr_fields<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Ve
     Ok(fields)
 }
 
-/// Write a protocol version to the stream.
 #[instrument(skip(w, v), level = "trace")]
 pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>) -> Result<()> {
     trace!(?v, "->");
