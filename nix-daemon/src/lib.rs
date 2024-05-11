@@ -303,6 +303,7 @@ pub trait Store {
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync;
 
+    /// Returns a map of (output, store path) for the given derivation.
     fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
