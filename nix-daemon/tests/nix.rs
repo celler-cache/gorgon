@@ -370,6 +370,21 @@ async fn test_build() {
         .expect("FindRoots Progress");
     assert_eq!(roots[root_path_str], out_path);
 
+    // Delete the indirect root, watch it get deregistered.
+    std::fs::remove_file(&root_path).expect("Couldn't remove root");
+    let roots2 = store
+        .find_roots()
+        .await
+        .expect("FindRoots 2 failed")
+        .result()
+        .await
+        .expect("FindRoots 2 Progress");
+    assert_eq!(
+        false,
+        roots2.contains_key(root_path_str),
+        "Deleted root persisted?"
+    );
+
     // Try QueryDerivationOutputMap.
     let outputs = store
         .query_derivation_output_map(&drv_path)

@@ -328,6 +328,7 @@ pub async fn write_error<W: AsyncWriteExt + Unpin>(w: &mut W, v: NixError) -> Re
 #[derive(Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrKind {
+    Next = 0x6f6c6d67,
     Last = 0x616c7473,
     Error = 0x63787470,
     StartActivity = 0x53545254,
@@ -344,6 +345,7 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
         .tap(|kind| trace!(?kind, "<-"));
 
     match kind {
+        StderrKind::Next => Ok(Some(Stderr::Next(read_string(r).await?))),
         StderrKind::Last => Ok(None),
         StderrKind::Error => Ok(Some(Stderr::Error(read_error(r).await?))),
         StderrKind::StartActivity => Ok(Some(Stderr::StartActivity(

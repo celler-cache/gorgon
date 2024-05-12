@@ -58,9 +58,15 @@ impl std::fmt::Display for NixError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stderr {
+    /// A plain line of stderr output.
+    Next(String),
+    /// An error propagated from Nix.
     Error(NixError),
+    /// An activity (such as a build) was started.
     StartActivity(StderrStartActivity),
+    /// An activity (such as a build) finished.
     StopActivity { id: u64 },
+    /// A progress update from an activity.
     Result(StderrResult),
 }
 
