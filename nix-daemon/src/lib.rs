@@ -280,6 +280,23 @@ pub trait Store {
         Paths::IntoIter: ExactSizeIterator + Send,
         Paths::Item: AsRef<str> + Send + Sync;
 
+    /// Creates a temporary GC root, which persists until the daemon restarts.
+    fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+
+    /// Creates a persistent GC root. This is what's normally meant by a GC root.
+    fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+
+    /// Returns the (link, target) of all known GC roots.
+    fn find_roots(
+        &mut self,
+    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>>> + Send;
+
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(
         &mut self,

@@ -10,13 +10,14 @@ use nix_daemon::{
 use std::io::Write;
 use std::{collections::HashMap, process::Stdio};
 use tokio_test::io::Builder;
+use tracing::warn;
 use utils::init_logging;
 
 const INVALID_STORE_PATH: &'static str =
     "/nix/store/ffffffffffffffffffffffffffffffff-invalid-1.0.0";
 
 // Find the store path for the system's `nix` command.
-fn find_nix_derivation() -> String {
+fn find_nix_in_store() -> String {
     for dir in std::env::var("PATH").unwrap().split(":") {
         let path = std::path::Path::new(dir).join("nix");
         if path.try_exists().unwrap() {
@@ -109,7 +110,7 @@ async fn test_is_valid_path_true() {
         .await
         .expect("Couldn't connect to daemon");
     let (stderrs, r) = store
-        .is_valid_path(find_nix_derivation())
+        .is_valid_path(find_nix_in_store())
         .await
         .expect("IsValidPath failed")
         .split()
@@ -334,6 +335,40 @@ async fn test_build() {
     let content =
         std::fs::read_to_string(std::path::PathBuf::from(out_path)).expect("Couldn't read output");
     assert_eq!(format!("test_build_paths_{}", cookie), content);
+
+    // Add a temporary root.
+    store
+        .add_temp_root(&drv_path)
+        .await
+        .expect("AddTempRoot failed")
+        .result()
+        .await
+        .expect("AddTempRoot Progress");
+
+    // Add an indirect root, check that it's registered properly.
+    let root_path = std::env::temp_dir().join("test_build_result");
+    let root_path_str = root_path.to_str().unwrap();
+    if root_path.try_exists().expect("Couldn't check stale root") {
+        warn!(?root_path, "Removing stale root");
+        std::fs::remove_file(&root_path).expect("Couldn't remove stale root");
+    }
+    std::os::unix::fs::symlink(&out_path, &root_path).expect("Couldn't symlink");
+
+    store
+        .add_indirect_root(&root_path_str)
+        .await
+        .expect("AddIndirectRoot failed")
+        .result()
+        .await
+        .expect("AddIndirectRoot Progress");
+    let roots = store
+        .find_roots()
+        .await
+        .expect("FindRoots failed")
+        .result()
+        .await
+        .expect("FindRoots Progress");
+    assert_eq!(roots[root_path_str], out_path);
 
     // Try QueryDerivationOutputMap.
     let outputs = store

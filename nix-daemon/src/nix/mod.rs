@@ -327,6 +327,63 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     #[instrument(skip(self))]
+    async fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = ()>> {
+        wire::write_op(&mut self.conn, wire::Op::AddTempRoot)
+            .await
+            .with_field("AddTempRoot.<op>")?;
+        wire::write_string(&mut self.conn, path)
+            .await
+            .with_field("AddTempRoot.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            wire::read_u64(&mut s.conn).await.with_field("__unused__")?;
+            Ok(())
+        }))
+    }
+
+    #[instrument(skip(self))]
+    async fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = ()>> {
+        wire::write_op(&mut self.conn, wire::Op::AddIndirectRoot)
+            .await
+            .with_field("AddIndirectRoot.<op>")?;
+        wire::write_string(&mut self.conn, path)
+            .await
+            .with_field("AddIndirectRoot.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            wire::read_u64(&mut s.conn).await.with_field("__unused__")?;
+            Ok(())
+        }))
+    }
+
+    #[instrument(skip(self))]
+    async fn find_roots(&mut self) -> Result<impl Progress<T = HashMap<String, String>>> {
+        wire::write_op(&mut self.conn, wire::Op::FindRoots)
+            .await
+            .with_field("FindRoots.<op>")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            let count = wire::read_u64(&mut s.conn)
+                .await
+                .with_field("FindRoots.roots[].<count>")?;
+            let mut roots = HashMap::with_capacity(count as usize);
+            for _ in 0..count {
+                let link = wire::read_string(&mut s.conn)
+                    .await
+                    .with_field("FindRoots.roots[].link")?;
+                let target = wire::read_string(&mut s.conn)
+                    .await
+                    .with_field("FindRoots.roots[].target")?;
+                roots.insert(link, target);
+            }
+            Ok(roots)
+        }))
+    }
+
+    #[instrument(skip(self))]
     async fn set_options(&mut self, opts: ClientSettings) -> Result<impl Progress<T = ()>> {
         wire::write_op(&mut self.conn, wire::Op::SetOptions)
             .await
