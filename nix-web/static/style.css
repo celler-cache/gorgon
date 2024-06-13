@@ -7,13 +7,3 @@
 .derivation-item a.badge {
     text-decoration: none;
 }
-
-li.unknown {
-    list-style-type: '? ';
-}
-li.miss {
-    list-style-type: circle;
-}
-li.succ {
-    list-style-type: disc;
-}

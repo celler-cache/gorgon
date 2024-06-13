@@ -6,8 +6,8 @@ pub mod aterm;
 pub mod nix_cli;
 pub mod supervisor_api;
 
-use crate::nix_cli::{Derivation, DerivationOutput, DerivationStatus, PathInfo};
 use askama::Template;
+use aterm::{Derivation, DerivationInputDerivation};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderName, StatusCode},
@@ -18,12 +18,12 @@ use axum::{
 use clap::Parser;
 use hyper::header;
 use listenfd::ListenFd;
+use nix_daemon::{nix::DaemonStore, Progress, Store};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, Row};
-use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
-use std::sync::Arc;
-use tracing::{debug, debug_span, info, instrument, trace};
+use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeSet, sync::Arc};
+use tracing::{debug, error, info, instrument, warn};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -50,6 +50,10 @@ pub enum Error {
     URL(#[from] url::ParseError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    NixDaemon(#[from] nix_daemon::Error),
+    #[error(transparent)]
+    ATerm(#[from] aterm::Error),
 
     #[error("request handler panicked - this is a bug: {0}")]
     Panic(String),
@@ -92,6 +96,10 @@ struct Args {
     /// Path to the nix store.
     #[arg(long, default_value = "/nix/store")]
     nix_store_path: PathBuf,
+
+    /// Path to the nix daemon socket.
+    #[arg(long, default_value = "/nix/var/nix/daemon-socket/socket")]
+    nix_daemon_sock: PathBuf,
 
     /// Increase log level.
     #[arg(long, short, action=clap::ArgAction::Count)]
@@ -145,7 +153,8 @@ async fn main() -> Result<()> {
         .route("/", get(get_index))
         .route("/static/*path", get(get_static))
         .route("/goto", get(get_goto))
-        .route("/nix/store/*path", get(get_derivation))
+        .route("/nix/store/:path", get(get_derivation))
+        .route("/nix/store/:path/*_", get(get_derivation_trailing))
         .route("/api/nix/store/:drv/poll", get(get_api_derivation_poll))
         .with_state(state)
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -245,52 +254,81 @@ async fn get_goto(query: Query<GotoQuery>) -> Response {
 #[derive(Template)]
 #[template(path = "derivation.html")]
 struct DerivationTemplate<'a> {
-    root: &'a Derivation,
-    root_builds: Vec<supervisor_api::Build>,
-    root_outputs: Vec<(&'a String, &'a String, Option<&'a PathInfo>)>,
-    root_input_tmpls: Vec<DerivationItemTemplate<'a>>,
-    root_env_html: Vec<(&'a String, String)>,
+    in_path: &'a str,
+    roots: Vec<DerivationRootTemplate>,
 }
 
 #[derive(Template)]
-#[template(path = "_derivation_item.html")]
-struct DerivationItemTemplate<'a> {
-    drv: &'a Derivation,
-    input_tmpls: Vec<DerivationItemTemplate<'a>>,
-    is_seen_before: bool,
+#[template(path = "_derivation_root.html")]
+struct DerivationRootTemplate {
+    path: String,
+    drv: Derivation,
+    is_built: bool,
+    outputs: Vec<(String, String, bool)>,
+    input_tmpls: Vec<DerivationInputTemplate>,
+    env_html: Vec<(String, String)>,
+
+    builds: Vec<supervisor_api::Build>,
 }
 
-impl<'a> DerivationItemTemplate<'a> {
-    // Recursively builds a batch of DerivationItemTemplates, shallow-first.
-    fn build_batch<P: Iterator<Item = &'a String>>(
-        drvs: &'a BTreeMap<String, Derivation>,
-        out_pis: &'a BTreeMap<String, PathInfo>,
-        paths: P,
-        mut seen: HashSet<&'a str>,
-    ) -> (Vec<Self>, HashSet<&'a str>) {
-        let mut batch = Vec::new();
+#[derive(Template)]
+#[template(path = "_derivation_input.html")]
+struct DerivationInputTemplate {
+    path: String,
+    is_valid: bool,
+    is_seen_before: bool,
+    input_tmpls: Vec<DerivationInputTemplate>,
+}
 
-        // Fill the batch and flag each derivation as seen, shallow-first.
-        for path in paths {
-            let drv = &drvs[path];
-            let is_seen_before = seen.contains(&path.as_str());
-            if !is_seen_before {
-                seen.insert(path);
+impl DerivationInputTemplate {
+    async fn build_batch(
+        store: &mut impl Store,
+        drvs: &mut BTreeMap<String, Derivation>,
+        paths_valid: &mut BTreeMap<String, bool>,
+        drvs_built: &mut BTreeMap<String, bool>,
+        seen: &mut BTreeSet<String>,
+        inputs: &BTreeMap<String, DerivationInputDerivation>,
+    ) -> Result<Vec<Self>> {
+        let mut tmpls = Vec::new();
+        for (drv_path, input) in inputs.iter() {
+            if let Some(drv) = read_derivation(drvs, &drv_path)? {
+                for out_name in input.outputs.iter() {
+                    if let Some(out) = drv.outputs.get(out_name) {
+                        let is_seen_before = seen.contains(&out.path);
+                        if !is_seen_before {
+                            seen.insert(out.path.clone());
+                        }
+
+                        let is_valid = check_path_valid(store, paths_valid, &out.path).await?;
+                        let input_tmpls = if !is_seen_before {
+                            Box::pin(Self::build_batch(
+                                store,
+                                drvs,
+                                paths_valid,
+                                drvs_built,
+                                seen,
+                                &drv.input_drvs,
+                            ))
+                            .await?
+                        } else {
+                            vec![]
+                        };
+                        tmpls.push(Self {
+                            path: out.path.clone(),
+                            is_valid,
+                            is_seen_before,
+                            input_tmpls,
+                        });
+                    } else {
+                        // This should never happen.
+                        error!(drv_path, out_name, "Input references bad output");
+                    }
+                }
+            } else {
+                error!(drv_path, "Input references bad derivation");
             }
-            batch.push(Self {
-                drv,
-                input_tmpls: Vec::with_capacity(drv.input_drvs.len()),
-                is_seen_before,
-            });
         }
-
-        // Fill in references for derivations we haven't seen before.
-        for tmpl in batch.iter_mut().filter(|t| !t.is_seen_before) {
-            let (tmpls, seen_) = Self::build_batch(drvs, out_pis, tmpl.drv.input_drvs.keys(), seen);
-            tmpl.input_tmpls = tmpls;
-            seen = seen_;
-        }
-        (batch, seen)
+        Ok(tmpls)
     }
 }
 
@@ -306,6 +344,16 @@ pub enum GetDerivationPage {
 pub struct GetDerivationQuery {
     #[serde(rename = "p")]
     page: Option<GetDerivationPage>,
+}
+
+// Swallows a trailing path, eg. /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26/bin/bash
+// should be /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26.
+async fn get_derivation_trailing(
+    State(state): State<Arc<AppState>>,
+    Path((store_path, _)): Path<(String, String)>,
+    Query(query): Query<GetDerivationQuery>,
+) -> Result<Response> {
+    get_derivation(State(state), Path(store_path), Query(query)).await
 }
 
 async fn get_derivation(
@@ -327,111 +375,83 @@ async fn get_derivation_info(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
 ) -> Result<Html<String>> {
-    // Collect info from nix.
-    let (mut drvs, mut out_pis) = {
-        let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
-        let path = path_buf.to_str().unwrap();
-        let drvs = nix_cli::Derivation::get(["-r"], [path]);
-        let out_pis = nix_cli::PathInfo::get(["-r", "--derivation"], [path]);
-        (
-            drvs.await?,
-            match out_pis.await {
-                Ok(v) => v,
-                // If this is an invalid path, still render the page.
-                Err(Error::NixCommandError(..)) => BTreeMap::new(),
-                Err(e) => return Err(e),
-            },
-        )
+    let in_path = PathBuf::from(NIX_STORE_PATH).join(&store_path);
+    let in_path_str = in_path.to_str().expect("in_path contains invalid UTF-8");
+
+    let mut store = DaemonStore::builder()
+        .connect_unix(state.args.nix_daemon_sock.clone())
+        .await?;
+
+    // If this isn't a derivation (ends with ".drv"), resolve its deriver(s).
+    let derivers = if in_path_str.ends_with(".drv") {
+        vec![in_path_str.to_string()]
+    } else {
+        store
+            .query_valid_derivers(in_path_str)
+            .await?
+            .result()
+            .await?
     };
 
-    // Correlate Derivations and PathInfos.
-    let mut need_pathinfo_check = HashSet::<&String>::new();
-    for (path, drv) in drvs.iter_mut() {
-        let span = debug_span!("drv", path);
-        let _enter = span.enter();
+    // Cache for seen derivations, build statuses and path validity.
+    let mut drvs = BTreeMap::new();
+    let mut drvs_built = BTreeMap::<String, bool>::new();
+    let mut paths_valid = BTreeMap::<String, bool>::new();
 
-        // If the initial `nix path-info` has one of our outputs, it's a success.
-        drv.status = if drv
-            .outputs
-            .iter()
-            .any(|(_, DerivationOutput { path })| out_pis.contains_key(path))
-        {
-            // There's an output; it's a success.
-            trace!(
-                path = drv.path,
-                "confirmed by primary `nix path-info` -- marking as success"
-            );
-            DerivationStatus::Success
-        } else {
-            // The initial `nix path-info` didn't include any outputs - this may mean
-            // that it failed, that it's still building, or just that it's a build
-            // dependency that isn't referenced by the final product.
-            //
-            // The only way to find out is a second round of `nix path-info`.
-            need_pathinfo_check.insert(&path);
-            DerivationStatus::Missing
-        };
-    }
+    let mut roots: Vec<DerivationRootTemplate> = Vec::with_capacity(drvs.len());
+    for path in derivers.iter() {
+        if let Some(drv) = read_derivation(&mut drvs, path)? {
+            let is_built =
+                check_drv_built(&mut store, &mut paths_valid, &mut drvs_built, &path, &drv).await?;
 
-    // Run a second round of `nix path-info` checks on outputs we're unsure about.
-    if need_pathinfo_check.len() > 0 {
-        let span = debug_span!("pathinfo2");
-        let _enter = span.enter();
-        trace!(
-            count = need_pathinfo_check.len(),
-            "running secondary `nix path-info`"
-        );
-
-        for (_, pi) in nix_cli::PathInfo::get(
-            ["--"],
-            need_pathinfo_check
-                .drain()
-                .map(|path| format!("{}^*", path)),
-        )
-        .await?
-        {
-            if let Some(drv) = drvs.get_mut(&pi.path) {
-                trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
-                drv.status = DerivationStatus::Success
+            let mut outputs = Vec::with_capacity(drv.outputs.len());
+            for (name, out) in drv.outputs.iter() {
+                let valid = check_path_valid(&mut store, &mut paths_valid, &out.path).await?;
+                outputs.push((name.clone(), out.path.clone(), valid))
             }
-            if let Some(deriver) = &pi.deriver {
-                if let Some(drv) = drvs.get_mut(deriver) {
-                    trace!(path=?pi.path, "confirmed by secondary `nix path-info` -- marking as success");
-                    drv.status = DerivationStatus::Success
-                }
-            }
-            out_pis.insert(pi.path.clone(), pi);
+
+            let mut inputs_seen = BTreeSet::<String>::new();
+            let input_tmpls = DerivationInputTemplate::build_batch(
+                &mut store,
+                &mut drvs,
+                &mut paths_valid,
+                &mut drvs_built,
+                &mut inputs_seen,
+                &drv.input_drvs,
+            )
+            .await?;
+
+            let env_html = drv
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), env_value_to_html(&value.to_string())))
+                .collect();
+
+            // If nix-supervisor integration is enabled, ask if it knows about this derivation.
+            let builds = if state.args.nix_supervisor {
+                supervisor_api::Build::list(&state.args.nix_supervisor_addr, &path)
+                    .await?
+                    .builds
+            } else {
+                vec![]
+            };
+
+            roots.push(DerivationRootTemplate {
+                path: path.clone(),
+                drv: drv.clone(),
+                is_built,
+                outputs,
+                input_tmpls,
+                env_html,
+                builds,
+            })
         }
     }
 
-    let root = &drvs[find_tree_root(&drvs)];
-
-    // If nix-supervisor integration is enabled, ask if it knows anything about the root.
-    let root_builds = if state.args.nix_supervisor {
-        supervisor_api::Build::list(&state.args.nix_supervisor_addr, &root.path)
-            .await?
-            .builds
-    } else {
-        vec![]
-    };
-
     Ok(Html(
         DerivationTemplate {
-            root,
-            root_builds,
-            root_outputs: find_outputs(&out_pis, root),
-            root_input_tmpls: DerivationItemTemplate::build_batch(
-                &drvs,
-                &out_pis,
-                root.input_drvs.keys(),
-                HashSet::new(),
-            )
-            .0,
-            root_env_html: root
-                .env
-                .iter()
-                .map(|(key, value)| (key, env_value_to_html(&value)))
-                .collect(),
+            in_path: in_path_str,
+            roots,
         }
         .render()?,
     ))
@@ -465,33 +485,72 @@ fn env_value_to_html(unescaped_value: &String) -> String {
     }
 }
 
-fn find_outputs<'a>(
-    out_pis: &'a BTreeMap<String, PathInfo>,
-    drv: &'a Derivation,
-) -> Vec<(&'a String, &'a String, Option<&'a PathInfo>)> {
-    let mut outputs = drv
-        .outputs
-        .iter()
-        .map(|(name, out)| (name, &out.path, out_pis.get(&out.path)))
-        .collect::<Vec<_>>();
-    outputs.sort_unstable_by_key(|v| v.0);
-    outputs
-}
-
-fn find_tree_root<'a>(nodes: &'a BTreeMap<String, Derivation>) -> &'a String {
-    let mut root_set = HashSet::<&'a String>::from_iter(nodes.keys());
-    for (_, n) in nodes {
-        for r in n.input_drvs.keys() {
-            root_set.remove(r);
+/// Reads a derivation from disk. Returns Ok(None) if the path doesn't exist or is invalid.
+#[instrument(skip(drvs))]
+pub fn read_derivation<'a>(
+    drvs: &mut BTreeMap<String, Derivation>,
+    path: &str,
+) -> Result<Option<Derivation>> {
+    if let Some(drv) = drvs.get(path) {
+        Ok(Some(drv.clone()))
+    } else {
+        match std::fs::read_to_string(path) {
+            Ok(data) => {
+                let drv = Derivation::parse(&data)?;
+                drvs.insert(path.to_string(), drv.clone());
+                Ok(Some(drv))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                warn!(path, "Attempted to read invalid path");
+                Ok(None)
+            }
+            Err(err) => Err(err.into()),
         }
     }
-    root_set.iter().next().unwrap()
+}
+
+#[instrument(skip(store, paths_valid))]
+pub async fn check_path_valid(
+    store: &mut impl Store,
+    paths_valid: &mut BTreeMap<String, bool>,
+    path: &str,
+) -> Result<bool> {
+    if let Some(valid) = paths_valid.get(path) {
+        Ok(*valid)
+    } else {
+        let valid = store.is_valid_path(path).await?.result().await?;
+        paths_valid.insert(path.to_string(), valid);
+        Ok(valid)
+    }
+}
+
+#[instrument(skip(store, paths_valid, drvs_built, drv))]
+pub async fn check_drv_built(
+    store: &mut impl Store,
+    paths_valid: &mut BTreeMap<String, bool>,
+    drvs_built: &mut BTreeMap<String, bool>,
+    path: &str,
+    drv: &Derivation,
+) -> Result<bool> {
+    if let Some(status) = drvs_built.get(path) {
+        Ok(*status)
+    } else {
+        let mut built = false;
+        for (_, out) in drv.outputs.iter() {
+            if check_path_valid(store, paths_valid, &out.path).await? {
+                built = true;
+                break;
+            }
+        }
+        drvs_built.insert(path.to_string(), built);
+        Ok(built)
+    }
 }
 
 #[derive(Template)]
 #[template(path = "derivation_log.html")]
 struct DerivationLogTemplate {
-    root: Derivation,
+    root_path: String,
     is_final: bool,
     log: String,
 }
@@ -500,17 +559,30 @@ async fn get_derivation_log(
     State(state): State<Arc<AppState>>,
     Path(store_path): Path<String>,
 ) -> Result<DerivationLogTemplate> {
-    let path_buf = PathBuf::from(NIX_STORE_PATH).join(&store_path);
-    let path = path_buf.to_str().unwrap();
+    let in_path = PathBuf::from(NIX_STORE_PATH).join(&store_path);
+    let in_path_str = in_path.to_str().unwrap();
 
-    let root = nix_cli::Derivation::get(["--"], [path])
-        .await?
-        .remove(path)
-        .unwrap();
-    let (is_final, log) = read_derivation_log(&state.args, path).await?;
+    let mut store = DaemonStore::builder()
+        .connect_unix(state.args.nix_daemon_sock.clone())
+        .await?;
+
+    // If this isn't a derivation (ends with ".drv"), resolve its deriver(s).
+    let root_path = if in_path_str.ends_with(".drv") {
+        in_path_str.to_string()
+    } else {
+        store
+            .query_valid_derivers(in_path_str)
+            .await?
+            .result()
+            .await?
+            .drain(..)
+            .next()
+            .expect("No derivers??")
+    };
+    let (is_final, log) = read_derivation_log(&state.args, &root_path).await?;
 
     Ok(DerivationLogTemplate {
-        root,
+        root_path,
         is_final,
         log,
     })

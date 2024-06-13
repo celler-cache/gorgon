@@ -1382,6 +1382,7 @@ dependencies = [
  "hyper",
  "lazy_static",
  "listenfd",
+ "nix-daemon",
  "regex",
  "reqwest",
  "serde",

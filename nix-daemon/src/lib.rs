@@ -205,6 +205,21 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
+impl Default for PathInfo {
+    fn default() -> Self {
+        Self {
+            deriver: None,
+            references: vec![],
+            nar_hash: String::default(),
+            nar_size: 0,
+            ultimate: false,
+            signatures: vec![],
+            ca: None,
+            registration_time: DateTime::default(),
+        }
+    }
+}
+
 /// An in-progress operation, which produces a series of status updates before continuing.
 pub trait Progress: Send {
     type T: Send;
