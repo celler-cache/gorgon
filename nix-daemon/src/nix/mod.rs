@@ -415,6 +415,25 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     #[instrument(skip(self))]
+    async fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: S,
+    ) -> Result<impl Progress<T = Vec<String>>> {
+        wire::write_op(&mut self.conn, wire::Op::QueryValidDerivers)
+            .await
+            .with_field("QueryValidDerivers.<op>")?;
+        wire::write_string(&mut self.conn, &path)
+            .await
+            .with_field("QueryValidDerivers.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            Ok(wire::read_strings(&mut s.conn)
+                .collect::<Result<Vec<String>>>()
+                .await
+                .with_field("QueryValidDerivers.paths")?)
+        }))
+    }
+
+    #[instrument(skip(self))]
     async fn query_missing<Ps>(
         &mut self,
         paths: Ps,

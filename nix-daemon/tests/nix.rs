@@ -385,6 +385,16 @@ async fn test_build() {
         "Deleted root persisted?"
     );
 
+    // Try QueryValidDerivers.
+    let valid_derivers = store
+        .query_valid_derivers(&out_path)
+        .await
+        .expect("QueryValidDerivers failed")
+        .result()
+        .await
+        .expect("QueryValidDerivers Progress");
+    assert_eq!(vec![drv_path], valid_derivers);
+
     // Try QueryDerivationOutputMap.
     let outputs = store
         .query_derivation_output_map(&drv_path)

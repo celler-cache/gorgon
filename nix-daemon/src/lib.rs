@@ -315,6 +315,13 @@ pub trait Store {
         path: S,
     ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>>> + Send;
 
+    /// Returns a list of valid derivers for a path.
+    /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
+    fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: S,
+    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>>>> + Send;
+
     /// Takes a list of paths and queries which would be built, substituted or unknown,
     /// along with an estimate of the cumulative download and NAR sizes.
     fn query_missing<Ps>(
