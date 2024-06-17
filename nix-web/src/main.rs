@@ -346,8 +346,8 @@ pub struct GetDerivationQuery {
     page: Option<GetDerivationPage>,
 }
 
-// Swallows a trailing path, eg. /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26/bin/bash
-// should be /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26.
+// Swallows a trailing path, eg. /nix/store/ h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26/bin/bash
+// should be /nix/store/ h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26.
 async fn get_derivation_trailing(
     State(state): State<Arc<AppState>>,
     Path((store_path, _)): Path<(String, String)>,
@@ -457,13 +457,13 @@ async fn get_derivation_info(
     ))
 }
 
-fn env_value_to_html(unescaped_value: &String) -> String {
+fn env_value_to_html<S: AsRef<str>>(unescaped_value: S) -> String {
     // HTML escape the value.
     let mut escaped = {
         use askama_escape::Escaper;
         let mut s = String::new();
         (askama_escape::Html {})
-            .write_escaped(&mut s, &unescaped_value)
+            .write_escaped(&mut s, unescaped_value.as_ref())
             .unwrap();
         s
     };
@@ -630,13 +630,13 @@ mod tests {
 
     #[test]
     fn test_env_value_to_html_nop() {
-        assert_eq!(env_value_to_html(&"hello world".into()), "hello world");
+        assert_eq!(env_value_to_html("hello world"), "hello world");
     }
 
     #[test]
     fn test_env_value_to_html_sneaky() {
         assert_eq!(
-            env_value_to_html(&"<blink>hello world</blink>".into()),
+            env_value_to_html("<blink>hello world</blink>"),
             "&lt;blink&gt;hello world&lt;/blink&gt;"
         );
     }
@@ -644,24 +644,37 @@ mod tests {
     #[test]
     fn test_env_value_to_html_multiline() {
         assert_eq!(
-            env_value_to_html(&"hello\nworld".into()),
+            env_value_to_html("hello\nworld"),
             "<pre style=\"white-space: pre-wrap;\">hello\nworld</pre>"
         );
     }
 
     #[test]
     fn test_env_value_to_html_store_path() {
+        let path = concat!(
+            "/nix/store/",
+            "5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin"
+        );
         assert_eq!(
-            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin".into()),
-            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>"
+            env_value_to_html(&path),
+            format!("<a href=\"{0}\">{0}</a>", &path),
         );
     }
 
     #[test]
     fn test_env_value_to_html_store_path_subpath() {
+        let in_path = concat!(
+            "/nix/store/",
+            "5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin",
+            "/bin/sqlite3"
+        );
+        let store_path = concat!(
+            "/nix/store/",
+            "5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin"
+        );
         assert_eq!(
-            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin/bin/sqlite3".into()),
-            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>/bin/sqlite3"
+            env_value_to_html(&in_path),
+            format!("<a href=\"{0}\">{0}</a>/bin/sqlite3", &store_path),
         );
     }
 }

@@ -950,7 +950,7 @@ mod tests {
         let mut mock = Builder::new()
             .read(&61u64.to_le_bytes()) // deriver
             .read(&pad_str::<64>(
-                "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv",
+                concat!("/nix/store/", "xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv"),
             ))
             .read(&51u64.to_le_bytes()) // nar_hash
             .read(&pad_str::<56>(
@@ -959,11 +959,11 @@ mod tests {
             .read(&2u64.to_le_bytes()) // references[]
             .read(&52u64.to_le_bytes()) // references[0]
             .read(&pad_str::<56>(
-                "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3",
+                concat!("/nix/store/", "8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3"),
             ))
              .read(&57u64.to_le_bytes()) // references[1]
              .read(&pad_str::<64>(
-                 "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27",
+                 concat!("/nix/store/", "qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27"),
              ))
              .read(&1700495600u64.to_le_bytes()) // registration_time
              .read(&1768960u64.to_le_bytes()) // nar_size
@@ -978,12 +978,12 @@ mod tests {
         assert_eq!(
             PathInfo {
                 deriver: Some(
-                    "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv".into()
+                    concat!("/nix/store/", "xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv").into()
                 ),
                 nar_hash: "sha256-sUu8vqpIoy7ZpnQPcwvQasNqX2jJOSXeEwd1yFtTukU=".into(),
                 references: vec![
-                    "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3".into(),
-                    "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27".into(),
+                    concat!("/nix/store/", "8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3").into(),
+                    concat!("/nix/store/", "qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27").into(),
                 ],
                 registration_time: Utc.with_ymd_and_hms(2023, 11, 20, 15, 53, 20).unwrap(),
                 nar_size: 1768960,
@@ -1006,25 +1006,30 @@ mod tests {
             ))
             .read(&5u64.to_le_bytes()) // references[]
             .read(&60u64.to_le_bytes()) // references[0]
-            .read(&pad_str::<64>(
-                "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv",
-            ))
+            .read(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv"
+            )))
             .read(&58u64.to_le_bytes()) // references[1]
-            .read(&pad_str::<64>(
-                "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv",
-            ))
+            .read(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv"
+            )))
             .read(&54u64.to_le_bytes()) // references[2]
-            .read(&pad_str::<56>(
-                "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh",
-            ))
+            .read(&pad_str::<56>(concat!(
+                "/nix/store/",
+                "g0gn91m56b267ncx05w93kihyqia39cm-builder.sh"
+            )))
             .read(&60u64.to_le_bytes()) // references[3]
-            .read(&pad_str::<64>(
-                "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv",
-            ))
+            .read(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv"
+            )))
             .read(&60u64.to_le_bytes()) // references[4]
-            .read(&pad_str::<64>(
-                "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv",
-            ))
+            .read(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv"
+            )))
             .read(&1700854586u64.to_le_bytes()) // registration_time
             .read(&3008u64.to_le_bytes()) // nar_size
             .read(&0u64.to_le_bytes()) // ultimate
@@ -1039,11 +1044,27 @@ mod tests {
                 deriver: None,
                 nar_hash: "sha256-1JmbR4NOsYNvgbJlqjp+4/bfm22IvhakiE1DXNfx78s=".into(),
                 references: vec![
-                    "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv".into(),
-                    "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv".into(),
-                    "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh".into(),
-                    "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv".into(),
-                    "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv".into(),
+                    concat!(
+                        "/nix/store/",
+                        "09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv"
+                    )
+                    .into(),
+                    concat!(
+                        "/nix/store/",
+                        "74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv"
+                    )
+                    .into(),
+                    concat!("/nix/store/", "g0gn91m56b267ncx05w93kihyqia39cm-builder.sh").into(),
+                    concat!(
+                        "/nix/store/",
+                        "mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv"
+                    )
+                    .into(),
+                    concat!(
+                        "/nix/store/",
+                        "qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv"
+                    )
+                    .into(),
                 ],
                 registration_time: Utc.with_ymd_and_hms(2023, 11, 24, 19, 36, 26).unwrap(),
                 nar_size: 3008,
@@ -1060,7 +1081,7 @@ mod tests {
         let mut mock = Builder::new()
             .write(&61u64.to_le_bytes()) // deriver
             .write(&pad_str::<64>(
-                "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv",
+                concat!("/nix/store/", "xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv"),
             ))
             .write(&51u64.to_le_bytes()) // nar_hash
             .write(&pad_str::<56>(
@@ -1069,11 +1090,11 @@ mod tests {
             .write(&2u64.to_le_bytes()) // references[]
             .write(&52u64.to_le_bytes()) // references[0]
             .write(&pad_str::<56>(
-                "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3",
+                concat!("/nix/store/", "8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3"),
             ))
             .write(&57u64.to_le_bytes()) // references[1]
             .write(&pad_str::<64>(
-                "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27",
+                concat!("/nix/store/", "qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27"),
             ))
             .write(&1700495600u64.to_le_bytes()) // registration_time
             .write(&1768960u64.to_le_bytes()) // nar_size
@@ -1090,12 +1111,12 @@ mod tests {
             Proto(1, 35),
             &PathInfo {
                 deriver: Some(
-                    "/nix/store/xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv".into(),
+                    concat!("/nix/store/", "xc1b35sn5lzqwpx23lzdfbhshbdbsdr1-sqlite-3.43.2.drv").into(),
                 ),
                 nar_hash: "sha256-sUu8vqpIoy7ZpnQPcwvQasNqX2jJOSXeEwd1yFtTukU=".into(),
                 references: vec![
-                    "/nix/store/8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3".into(),
-                    "/nix/store/qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27".into(),
+                    concat!("/nix/store/", "8xgb8phqmfn9h971q7dg369h647i1aa0-zlib-1.3").into(),
+                    concat!("/nix/store/", "qn3ggz5sf3hkjs2c797xf7nan3amdxmp-glibc-2.38-27").into(),
                 ],
                 registration_time: Utc.with_ymd_and_hms(2023, 11, 20, 15, 53, 20).unwrap(),
                 nar_size: 1768960,
@@ -1119,25 +1140,30 @@ mod tests {
             ))
             .write(&5u64.to_le_bytes()) // references[]
             .write(&60u64.to_le_bytes()) // references[0]
-            .write(&pad_str::<64>(
-                "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv",
-            ))
+            .write(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv"
+            )))
             .write(&58u64.to_le_bytes()) // references[1]
-            .write(&pad_str::<64>(
-                "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv",
-            ))
+            .write(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv"
+            )))
             .write(&54u64.to_le_bytes()) // references[2]
-            .write(&pad_str::<56>(
-                "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh",
-            ))
+            .write(&pad_str::<56>(concat!(
+                "/nix/store/",
+                "g0gn91m56b267ncx05w93kihyqia39cm-builder.sh"
+            )))
             .write(&60u64.to_le_bytes()) // references[3]
-            .write(&pad_str::<64>(
-                "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv",
-            ))
+            .write(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv"
+            )))
             .write(&60u64.to_le_bytes()) // references[4]
-            .write(&pad_str::<64>(
-                "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv",
-            ))
+            .write(&pad_str::<64>(concat!(
+                "/nix/store/",
+                "qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv"
+            )))
             .write(&1700854586u64.to_le_bytes()) // registration_time
             .write(&3008u64.to_le_bytes()) // nar_size
             .write(&0u64.to_le_bytes()) // ultimate
@@ -1154,11 +1180,27 @@ mod tests {
                 deriver: None,
                 nar_hash: "sha256-1JmbR4NOsYNvgbJlqjp+4/bfm22IvhakiE1DXNfx78s=".into(),
                 references: vec![
-                    "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv".into(),
-                    "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv".into(),
-                    "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh".into(),
-                    "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv".into(),
-                    "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv".into(),
+                    concat!(
+                        "/nix/store/",
+                        "09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv"
+                    )
+                    .into(),
+                    concat!(
+                        "/nix/store/",
+                        "74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv"
+                    )
+                    .into(),
+                    concat!("/nix/store/", "g0gn91m56b267ncx05w93kihyqia39cm-builder.sh").into(),
+                    concat!(
+                        "/nix/store/",
+                        "mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv"
+                    )
+                    .into(),
+                    concat!(
+                        "/nix/store/",
+                        "qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv"
+                    )
+                    .into(),
                 ],
                 registration_time: Utc.with_ymd_and_hms(2023, 11, 24, 19, 36, 26).unwrap(),
                 nar_size: 3008,
