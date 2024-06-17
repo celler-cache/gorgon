@@ -7,8 +7,11 @@
 }:
 
 let
-  supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
-    (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.13");
+  # supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
+  #   (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.18");
+
+  # FIXME: Handshakes are currently broken with Nix 2.20.
+  supportedNixVersions = { inherit (pkgs.nixVersions) nix_2_18 nix_2_19; };
 in
 
 pkgs.testers.nixosTest ({ lib, ... }: {
@@ -50,6 +53,9 @@ pkgs.testers.nixosTest ({ lib, ... }: {
     for specialisation in listdir('${specialisations}'):
         machine.succeed(f'${specialisations}/{specialisation}/bin/switch-to-configuration test')
         machine.wait_for_unit("nix-supervisor")
+
+        # Check the current nix version.
+        machine.succeed("nix --version");
 
         # Regular, old-fashioned CLI.
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-build '<nixpkgs>' -A hello >&2")

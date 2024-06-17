@@ -7,7 +7,7 @@
 
 let
   supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
-    (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.13");
+    (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.18");
 
   testDrv = derivation {
     name = "test";
