@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+pub mod aterm;
 pub mod nix_cli;
 pub mod supervisor_api;
 

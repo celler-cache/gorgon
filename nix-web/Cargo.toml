@@ -32,3 +32,4 @@ tap = "1.0"
 reqwest = { version = "0.11", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.4"
+yap = "0.12.0"
