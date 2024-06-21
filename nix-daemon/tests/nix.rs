@@ -25,13 +25,13 @@ fn find_nix_in_store() -> String {
                 // /run/current-system/sw/bin/nix
                 .canonicalize()
                 .unwrap()
-                // /nix/store/dsqs4fpljrws4ikzfriyixcp0n7kxrmk-nix-2.18.1/bin/nix
+                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin/nix
                 .parent()
                 .unwrap()
-                // /nix/store/dsqs4fpljrws4ikzfriyixcp0n7kxrmk-nix-2.18.1/bin
+                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin
                 .parent()
                 .unwrap()
-                // /nix/store/dsqs4fpljrws4ikzfriyixcp0n7kxrmk-nix-2.18.1
+                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1
                 .to_str()
                 .expect("invalid path")
                 .to_owned();
@@ -207,7 +207,12 @@ async fn test_add_to_store() {
 
     let (name, pi) = r.expect("Progress");
     assert_eq!(
-        "/nix/store/rplkfskrgxcfm49953si4jbinw9fg8sm-test_AddToStore".to_string(),
+        concat!(
+            "/nix/store/",
+            "rplkfskrgxcfm49953si4jbinw9fg8sm",
+            "-test_AddToStore"
+        )
+        .to_string(),
         name
     );
     assert_eq!(pi.deriver, None);

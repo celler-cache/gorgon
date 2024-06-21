@@ -346,8 +346,8 @@ pub struct GetDerivationQuery {
     page: Option<GetDerivationPage>,
 }
 
-// Swallows a trailing path, eg. /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26/bin/bash
-// should be /nix/store/h3bhzvz9ipglcybbcvkxvm4vg9lwvqg4-bash-5.2p26.
+// Swallows a trailing path, eg. /nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26/bin/bash
+// should be /nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26.
 async fn get_derivation_trailing(
     State(state): State<Arc<AppState>>,
     Path((store_path, _)): Path<(String, String)>,
@@ -652,16 +652,16 @@ mod tests {
     #[test]
     fn test_env_value_to_html_store_path() {
         assert_eq!(
-            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin".into()),
-            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>"
+            env_value_to_html(&"/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin".into()),
+            "<a href=\"/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin\">/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin</a>"
         );
     }
 
     #[test]
     fn test_env_value_to_html_store_path_subpath() {
         assert_eq!(
-            env_value_to_html(&"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin/bin/sqlite3".into()),
-            "<a href=\"/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin\">/nix/store/5k6jjkhrm9xkbnn8ih75gvkibgipai0p-sqlite-3.41.2-bin</a>/bin/sqlite3"
+            env_value_to_html(&"/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin/bin/sqlite3".into()),
+            "<a href=\"/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin\">/nix/store/ffffffffffffffffffffffffffffffff-sqlite-3.41.2-bin</a>/bin/sqlite3"
         );
     }
 }

@@ -9,7 +9,7 @@ pkgs.callPackage ({ runCommand, ripgrep }: runCommand "gorgon-no-refs" {
   inherit src;
   nativeBuildInputs = [ ripgrep ];
 } ''
-  rg '/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[0-9a-zA-Z+._?=-]+' $src && exit 1
+  rg --pcre2 '(?!ffffffffffffffffffffffffffffffff)[0-9abcdfghijklmnpqrsvwxyz]{32}-[0-9a-zA-Z+._?=-]+'  $src && exit 1
   touch $out
 ''
 ) {}

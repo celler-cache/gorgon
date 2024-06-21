@@ -217,53 +217,53 @@ mod tests {
 
     #[test]
     fn test_parse_derivation() {
-        let data = "Derive([(\"out\",\"/nix/store/26hfx324n1rbz24024h041d13ip5j42f-hello-2.12.1\",\"\",\"\")],[(\"/nix/store/h2bwx1s0rr504l50pp30lxnyf7i4nk0l-bash-5.2p26.drv\",[\"out\"]),(\"/nix/store/hx82706fhr7gf902cg1hb82q732235vb-hello-2.12.1.tar.gz.drv\",[\"out\"]),(\"/nix/store/zwb5rgg58af3y5zypqnc6bi5zf2i143g-stdenv-linux.drv\",[\"out\"])],[\"/nix/store/v6x3cs394jgqfbi0a42pam708flxaphh-default-builder.sh\"],\"x86_64-linux\",\"/nix/store/agkxax48k35wdmkhmmija2i2sxg8i7ny-bash-5.2p26/bin/bash\",[\"-e\",\"/nix/store/v6x3cs394jgqfbi0a42pam708flxaphh-default-builder.sh\"],[(\"__structuredAttrs\",\"\"),(\"buildInputs\",\"\"),(\"builder\",\"/nix/store/agkxax48k35wdmkhmmija2i2sxg8i7ny-bash-5.2p26/bin/bash\"),(\"cmakeFlags\",\"\"),(\"configureFlags\",\"\"),(\"depsBuildBuild\",\"\"),(\"depsBuildBuildPropagated\",\"\"),(\"depsBuildTarget\",\"\"),(\"depsBuildTargetPropagated\",\"\"),(\"depsHostHost\",\"\"),(\"depsHostHostPropagated\",\"\"),(\"depsTargetTarget\",\"\"),(\"depsTargetTargetPropagated\",\"\"),(\"doCheck\",\"1\"),(\"doInstallCheck\",\"1\"),(\"mesonFlags\",\"\"),(\"name\",\"hello-2.12.1\"),(\"nativeBuildInputs\",\"\"),(\"out\",\"/nix/store/26hfx324n1rbz24024h041d13ip5j42f-hello-2.12.1\"),(\"outputs\",\"out\"),(\"patches\",\"\"),(\"pname\",\"hello\"),(\"postInstallCheck\",\"stat \\\"${!outputBin}/bin/hello\\\"\n\"),(\"propagatedBuildInputs\",\"\"),(\"propagatedNativeBuildInputs\",\"\"),(\"src\",\"/nix/store/pa10z4ngm0g83kx9mssrqzz30s84vq7k-hello-2.12.1.tar.gz\"),(\"stdenv\",\"/nix/store/d3dzfy4amjl826fb8j00qp1d9887h7hm-stdenv-linux\"),(\"strictDeps\",\"\"),(\"system\",\"x86_64-linux\"),(\"version\",\"2.12.1\")])";
+        let data = "Derive([(\"out\",\"/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1\",\"\",\"\")],[(\"/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26.drv\",[\"out\"]),(\"/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1.tar.gz.drv\",[\"out\"]),(\"/nix/store/ffffffffffffffffffffffffffffffff-stdenv-linux.drv\",[\"out\"])],[\"/nix/store/ffffffffffffffffffffffffffffffff-default-builder.sh\"],\"x86_64-linux\",\"/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26/bin/bash\",[\"-e\",\"/nix/store/ffffffffffffffffffffffffffffffff-default-builder.sh\"],[(\"__structuredAttrs\",\"\"),(\"buildInputs\",\"\"),(\"builder\",\"/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26/bin/bash\"),(\"cmakeFlags\",\"\"),(\"configureFlags\",\"\"),(\"depsBuildBuild\",\"\"),(\"depsBuildBuildPropagated\",\"\"),(\"depsBuildTarget\",\"\"),(\"depsBuildTargetPropagated\",\"\"),(\"depsHostHost\",\"\"),(\"depsHostHostPropagated\",\"\"),(\"depsTargetTarget\",\"\"),(\"depsTargetTargetPropagated\",\"\"),(\"doCheck\",\"1\"),(\"doInstallCheck\",\"1\"),(\"mesonFlags\",\"\"),(\"name\",\"hello-2.12.1\"),(\"nativeBuildInputs\",\"\"),(\"out\",\"/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1\"),(\"outputs\",\"out\"),(\"patches\",\"\"),(\"pname\",\"hello\"),(\"postInstallCheck\",\"stat \\\"${!outputBin}/bin/hello\\\"\n\"),(\"propagatedBuildInputs\",\"\"),(\"propagatedNativeBuildInputs\",\"\"),(\"src\",\"/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1.tar.gz\"),(\"stdenv\",\"/nix/store/ffffffffffffffffffffffffffffffff-stdenv-linux\"),(\"strictDeps\",\"\"),(\"system\",\"x86_64-linux\"),(\"version\",\"2.12.1\")])";
         assert_eq!(
             Derivation {
                 outputs: BTreeMap::from_iter([(
                     "out".into(),
                     DerivationOutput {
-                        path: "/nix/store/26hfx324n1rbz24024h041d13ip5j42f-hello-2.12.1".into(),
+                        path: "/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1".into(),
                         algo: String::new(),
                         hash: String::new(),
                     }
                 )]),
                 input_drvs: BTreeMap::from_iter([
                     (
-                        "/nix/store/h2bwx1s0rr504l50pp30lxnyf7i4nk0l-bash-5.2p26.drv".into(),
+                        "/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26.drv".into(),
                         DerivationInputDerivation {
                             outputs: vec!["out".into()],
                         }
                     ),
                     (
-                        "/nix/store/hx82706fhr7gf902cg1hb82q732235vb-hello-2.12.1.tar.gz.drv"
+                        "/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1.tar.gz.drv"
                             .into(),
                         DerivationInputDerivation {
                             outputs: vec!["out".into()],
                         }
                     ),
                     (
-                        "/nix/store/zwb5rgg58af3y5zypqnc6bi5zf2i143g-stdenv-linux.drv".into(),
+                        "/nix/store/ffffffffffffffffffffffffffffffff-stdenv-linux.drv".into(),
                         DerivationInputDerivation {
                             outputs: vec!["out".into()],
                         }
                     ),
                 ]),
                 input_srcs: vec![
-                    "/nix/store/v6x3cs394jgqfbi0a42pam708flxaphh-default-builder.sh".into()
+                    "/nix/store/ffffffffffffffffffffffffffffffff-default-builder.sh".into()
                 ],
                 system: "x86_64-linux".into(),
-                builder: "/nix/store/agkxax48k35wdmkhmmija2i2sxg8i7ny-bash-5.2p26/bin/bash".into(),
+                builder: "/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26/bin/bash".into(),
                 args: vec![
                     "-e".into(),
-                    "/nix/store/v6x3cs394jgqfbi0a42pam708flxaphh-default-builder.sh".into(),
+                    "/nix/store/ffffffffffffffffffffffffffffffff-default-builder.sh".into(),
                 ],
                 env: BTreeMap::from_iter([
                     ("__structuredAttrs".into(), "".into()),
                     ("buildInputs".into(), "".into()),
                     (
                         "builder".into(),
-                        "/nix/store/agkxax48k35wdmkhmmija2i2sxg8i7ny-bash-5.2p26/bin/bash".into()
+                        "/nix/store/ffffffffffffffffffffffffffffffff-bash-5.2p26/bin/bash".into()
                     ),
                     ("cmakeFlags".into(), "".into()),
                     ("configureFlags".into(), "".into()),
@@ -282,7 +282,7 @@ mod tests {
                     ("nativeBuildInputs".into(), "".into()),
                     (
                         "out".into(),
-                        "/nix/store/26hfx324n1rbz24024h041d13ip5j42f-hello-2.12.1".into()
+                        "/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1".into()
                     ),
                     ("outputs".into(), "out".into()),
                     ("patches".into(), "".into()),
@@ -295,11 +295,11 @@ mod tests {
                     ("propagatedNativeBuildInputs".into(), "".into()),
                     (
                         "src".into(),
-                        "/nix/store/pa10z4ngm0g83kx9mssrqzz30s84vq7k-hello-2.12.1.tar.gz".into()
+                        "/nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1.tar.gz".into()
                     ),
                     (
                         "stdenv".into(),
-                        "/nix/store/d3dzfy4amjl826fb8j00qp1d9887h7hm-stdenv-linux".into()
+                        "/nix/store/ffffffffffffffffffffffffffffffff-stdenv-linux".into()
                     ),
                     ("strictDeps".into(), "".into()),
                     ("system".into(), "x86_64-linux".into()),
