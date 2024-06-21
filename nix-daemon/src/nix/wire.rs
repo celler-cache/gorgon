@@ -1015,7 +1015,7 @@ mod tests {
             ))
             .read(&54u64.to_le_bytes()) // references[2]
             .read(&pad_str::<56>(
-                "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh",
+                "/nix/store/ffffffffffffffffffffffffffffffff-builder.sh",
             ))
             .read(&60u64.to_le_bytes()) // references[3]
             .read(&pad_str::<64>(
@@ -1041,7 +1041,7 @@ mod tests {
                 references: vec![
                     "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv".into(),
                     "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv".into(),
-                    "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh".into(),
+                    "/nix/store/ffffffffffffffffffffffffffffffff-builder.sh".into(),
                     "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv".into(),
                     "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv".into(),
                 ],
@@ -1128,7 +1128,7 @@ mod tests {
             ))
             .write(&54u64.to_le_bytes()) // references[2]
             .write(&pad_str::<56>(
-                "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh",
+                "/nix/store/ffffffffffffffffffffffffffffffff-builder.sh",
             ))
             .write(&60u64.to_le_bytes()) // references[3]
             .write(&pad_str::<64>(
@@ -1156,7 +1156,7 @@ mod tests {
                 references: vec![
                     "/nix/store/09wshq4g5mc2xjx24wmxlw018ly5mxgl-bash-5.2-p15.drv".into(),
                     "/nix/store/74b93p6rw3xjrg0nds4dq2jpi66fapc1-curl-8.4.0.drv".into(),
-                    "/nix/store/g0gn91m56b267ncx05w93kihyqia39cm-builder.sh".into(),
+                    "/nix/store/ffffffffffffffffffffffffffffffff-builder.sh".into(),
                     "/nix/store/mb9hk9cqwgrgl7gyipypn2h1wfz49h4s-stdenv-linux.drv".into(),
                     "/nix/store/qbymsj2c80smzdqp0bx3z5minxri0ri3-mirrors-list.drv".into(),
                 ],
