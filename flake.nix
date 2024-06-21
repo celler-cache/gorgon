@@ -43,6 +43,10 @@
             inherit pkgs;
             src = self;
           };
+          no-refs = import nix/no-refs.nix {
+            inherit pkgs;
+            src = self;
+          };
         };
       }
     ) [
