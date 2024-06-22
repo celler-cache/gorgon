@@ -182,7 +182,7 @@ pub struct ClientSettings {
 }
 
 /// Data about a Nix store path.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct PathInfo {
     /// Derivation that produced this path.
     pub deriver: Option<String>,
@@ -203,21 +203,6 @@ pub struct PathInfo {
 
     /// When the path was registered, eg. placed into the local store.
     pub registration_time: DateTime<Utc>,
-}
-
-impl Default for PathInfo {
-    fn default() -> Self {
-        Self {
-            deriver: None,
-            references: vec![],
-            nar_hash: String::default(),
-            nar_size: 0,
-            ultimate: false,
-            signatures: vec![],
-            ca: None,
-            registration_time: DateTime::default(),
-        }
-    }
 }
 
 /// An in-progress operation, which produces a series of status updates before continuing.
