@@ -168,13 +168,12 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
         wire::write_u64(&mut self.conn, wire::WORKER_MAGIC_1)
             .await
             .with_field("magic1")?;
-        wire::read_u64(&mut self.conn)
-            .await
-            .and_then(|magic2| match magic2 {
-                wire::WORKER_MAGIC_2 => Ok(magic2),
-                _ => Err(Error::Invalid(format!("{:#x}", magic2))),
-            })
-            .with_field("magic2")?;
+        match wire::read_u64(&mut self.conn).await {
+            Ok(magic2 @ wire::WORKER_MAGIC_2) => Ok(magic2),
+            Ok(v) => Err(Error::Invalid(format!("{:#x}", v))),
+            Err(err) => Err(err.into()),
+        }
+        .with_field("magic2")?;
 
         // Check that we're talking to a new enough daemon, tell them our version.
         self.proto = wire::read_proto(&mut self.conn)
@@ -237,7 +236,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             .await
             .with_field("IsValidPath.path")?;
         Ok(DaemonProgress::new(self, |s| async move {
-            wire::read_bool(&mut s.conn).await
+            Ok(wire::read_bool(&mut s.conn).await?)
         }))
     }
 

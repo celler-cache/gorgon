@@ -8,12 +8,12 @@ use crate::{
 };
 use async_stream::try_stream;
 use chrono::DateTime;
-use futures::future::OptionFuture;
+use futures::{future::OptionFuture, Future};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use tap::{Tap, TapFallible};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{instrument, trace};
 
@@ -88,6 +88,52 @@ impl From<TryFromPrimitiveError<Op>> for Error {
     }
 }
 
+pub struct FramedReader<'r, R: AsyncReadExt + Unpin> {
+    r: &'r mut R,
+    frame_len: usize,
+}
+
+impl<'r, R: AsyncReadExt + Unpin> FramedReader<'r, R> {
+    pub fn new(r: &'r mut R) -> Self {
+        Self { r, frame_len: 0 }
+    }
+
+    pub async fn read_chunked(&mut self, buf: &mut ReadBuf<'_>) -> std::io::Result<()> {
+        if self.frame_len == 0 {
+            self.frame_len = read_u64(self.r)
+                .await?
+                .try_into()
+                .expect("u64 chunk length doesn't fit into usize");
+            trace!(self.frame_len, "read frame header");
+        }
+        if self.frame_len > 0 {
+            let chunk_len = self
+                .r
+                .read(buf.initialize_unfilled_to(self.frame_len))
+                .await?;
+            buf.advance(chunk_len);
+            self.frame_len = self
+                .frame_len
+                .checked_sub(chunk_len)
+                .expect("read more than chunk_len, somehow");
+            trace!(chunk_len, remaining = self.frame_len, "read frame chunk");
+        }
+        Ok(())
+    }
+}
+
+impl<'r, R: AsyncReadExt + Unpin> AsyncRead for FramedReader<'r, R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let read = self.read_chunked(buf);
+        tokio::pin!(read);
+        read.as_mut().as_mut().poll(cx)
+    }
+}
+
 #[instrument(skip_all, level = "trace")]
 pub async fn copy_to_framed<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     r: &mut R,
@@ -108,18 +154,18 @@ pub async fn copy_to_framed<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
 /// Read a u64 from the stream (little endian).
 #[instrument(skip(r), level = "trace")]
-pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<u64> {
+pub async fn read_u64<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<u64> {
     Ok(r.read_u64_le().await.tap_ok(|v| trace!(v, "<-"))?)
 }
 /// Write a u64 from the stream (little endian).
 #[instrument(skip(w, v), level = "trace")]
-pub async fn write_u64<W: AsyncWriteExt + Unpin>(w: &mut W, v: u64) -> Result<()> {
+pub async fn write_u64<W: AsyncWriteExt + Unpin>(w: &mut W, v: u64) -> std::io::Result<()> {
     Ok(w.write_u64_le(v.tap(|v| trace!(v, "->"))).await?)
 }
 
 /// Read a boolean from the stream, encoded as u64 (>0 is true).
 #[instrument(skip(r), level = "trace")]
-pub async fn read_bool<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
+pub async fn read_bool<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<bool> {
     Ok(read_u64(r)
         .await
         .map(|v| v > 0)
@@ -127,22 +173,22 @@ pub async fn read_bool<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<bool> {
 }
 /// Write a boolean to the stream, encoded as u64 (>0 is true).
 #[instrument(skip(w, v), level = "trace")]
-pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> Result<()> {
+pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> std::io::Result<()> {
     Ok(write_u64(w, if v { 1 } else { 0 }.tap(|v| trace!(v, "->"))).await?)
 }
 
 /// Read a protocol version from the stream.
 #[instrument(skip(r), level = "trace")]
 pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
-    read_u64(r)
+    Ok(read_u64(r)
         .await
         .map(|raw| raw.into())
-        .tap_ok(|v| trace!(?v, "<-"))
+        .tap_ok(|v| trace!(?v, "<-"))?)
 }
 /// Write a protocol version to the stream.
 #[instrument(skip(w, v), level = "trace")]
 pub async fn write_proto<W: AsyncWriteExt + Unpin>(w: &mut W, v: Proto) -> Result<()> {
-    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
+    Ok(write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await?)
 }
 
 /// Read an opcode from the stream.
@@ -153,7 +199,7 @@ pub async fn read_op<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Op> {
 /// Write an opcode to the stream.
 #[instrument(skip(w, v), level = "trace")]
 pub async fn write_op<W: AsyncWriteExt + Unpin>(w: &mut W, v: Op) -> Result<()> {
-    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
+    Ok(write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await?)
 }
 
 /// Read a verbosity level from the stream.
@@ -164,7 +210,7 @@ pub async fn read_verbosity<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Verbos
 /// Write a verbosity level to the stream.
 #[instrument(skip(w, v), level = "trace")]
 pub async fn write_verbosity<W: AsyncWriteExt + Unpin>(w: &mut W, v: Verbosity) -> Result<()> {
-    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
+    Ok(write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await?)
 }
 
 /// Read a build mode from the stream.
@@ -174,7 +220,10 @@ pub async fn read_build_mode<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Build
 }
 /// Write a build mode to the stream.
 #[instrument(skip(w, v), level = "trace")]
-pub async fn write_build_mode<W: AsyncWriteExt + Unpin>(w: &mut W, v: BuildMode) -> Result<()> {
+pub async fn write_build_mode<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    v: BuildMode,
+) -> std::io::Result<()> {
     write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
 
@@ -182,8 +231,8 @@ pub async fn write_build_mode<W: AsyncWriteExt + Unpin>(w: &mut W, v: BuildMode)
 /// data is padded to the next 8-byte boundary, eg. a 1-byte string becomes 16 bytes
 /// on the wire: 8 for the length, 1 for the data, then 7 bytes of discarded 0x00s.
 #[instrument(skip(r), level = "trace")]
-pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
-    let len = read_u64(r).await.with_field("<length>")? as usize;
+pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<String> {
+    let len = read_u64(r).await? as usize;
     let padded_len = len + if len % 8 > 0 { 8 - (len % 8) } else { 0 };
     if padded_len <= 1024 {
         let mut buf = [0u8; 1024];
@@ -202,16 +251,16 @@ pub async fn read_string<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String> {
 pub async fn write_string<W: AsyncWriteExt + Unpin, S: AsRef<str> + Debug>(
     w: &mut W,
     s: S,
-) -> Result<()> {
+) -> std::io::Result<()> {
     trace!(v=?s,"->");
-    let truncated =
-        s.as_ref().split(|b| b == '\0').next().ok_or_else(|| {
-            Error::Invalid("slice::split() returned an empty iterator".to_string())
-        })?;
+    let truncated = s.as_ref().split(|b| b == '\0').next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            Error::Invalid("slice::split() returned an empty iterator".to_string()),
+        )
+    })?;
     let b = truncated.as_bytes();
-    write_u64(w, b.len().try_into().unwrap())
-        .await
-        .with_field("<length>")?;
+    write_u64(w, b.len().try_into().unwrap()).await?;
     if b.len() > 0 {
         w.write_all(b).await?;
         trace!(v = truncated, "->");
@@ -238,16 +287,14 @@ pub fn read_strings<R: AsyncReadExt + Unpin>(r: &mut R) -> impl Stream<Item = Re
 }
 /// Write a list of strings to the stream.
 #[instrument(skip(w, si), level = "trace")]
-pub async fn write_strings<W: AsyncWriteExt + Unpin, I>(w: &mut W, si: I) -> Result<()>
+pub async fn write_strings<W: AsyncWriteExt + Unpin, I>(w: &mut W, si: I) -> std::io::Result<()>
 where
     I: IntoIterator + Send,
     I::IntoIter: ExactSizeIterator + Send,
     I::Item: AsRef<str> + Send + Sync,
 {
     let si = si.into_iter();
-    write_u64(w, si.len().try_into().unwrap())
-        .await
-        .with_field("<count>")?;
+    write_u64(w, si.len().try_into().unwrap()).await?;
     for s in si {
         write_string(w, s.as_ref()).await?;
     }
@@ -257,23 +304,21 @@ where
 /// Read a NixError struct from the stream.
 #[instrument(skip(r), level = "trace")]
 pub async fn read_error<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<NixError> {
-    read_string(r)
-        .await
-        .and_then(|s| match s.as_str() {
-            "Error" => Ok(()),
-            _ => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
-        })
-        .with_field("Error.__unused_type_1")?;
+    match read_string(r).await {
+        Err(err) => Err(err.into()),
+        Ok(s) if s.as_str() == "Error" => Ok(()),
+        Ok(s) => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
+    }
+    .with_field("Error.__unused_type_1")?;
 
     let level = read_verbosity(r).await.with_field("Error.level")?;
 
-    read_string(r)
-        .await
-        .and_then(|s| match s.as_str() {
-            "Error" => Ok(()),
-            _ => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
-        })
-        .with_field("Error.__unused_type_2")?;
+    match read_string(r).await {
+        Err(err) => Err(err.into()),
+        Ok(s) if s.as_str() == "Error" => Ok(()),
+        Ok(s) => Err(Error::Invalid(format!("expected 'Error', got '{}'", s))),
+    }
+    .with_field("Error.__unused_type_2")?;
 
     let msg = read_string(r).await.with_field("Error.msg")?;
 
@@ -1197,5 +1242,51 @@ mod tests {
         write_string(&mut mock, "oh no \0\0\0 what was that!")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_framedreader_empty() {
+        let mut mock = Builder::new().read(&0u64.to_le_bytes()).build();
+        let mut buf = Vec::new();
+        let len = FramedReader::new(&mut mock)
+            .read_to_end(&mut buf)
+            .await
+            .unwrap();
+        assert_eq!(0, len);
+        assert_eq!(0, buf.len());
+    }
+
+    #[tokio::test]
+    async fn test_framedreader_1f() {
+        let mut mock = Builder::new()
+            .read(&4u64.to_le_bytes())
+            .read(&[0x01, 0x02, 0x03, 0x04])
+            .read(&0u64.to_le_bytes())
+            .build();
+        let mut buf = Vec::new();
+        let len = FramedReader::new(&mut mock)
+            .read_to_end(&mut buf)
+            .await
+            .unwrap();
+        assert_eq!(&[0x01, 0x02, 0x03, 0x04], &buf[..]);
+        assert_eq!(4, len);
+    }
+
+    #[tokio::test]
+    async fn test_framedreader_2f() {
+        let mut mock = Builder::new()
+            .read(&4u64.to_le_bytes())
+            .read(&[0x01, 0x02, 0x03, 0x04])
+            .read(&2u64.to_le_bytes())
+            .read(&[0x05, 0x06])
+            .read(&0u64.to_le_bytes())
+            .build();
+        let mut buf = Vec::new();
+        let len = FramedReader::new(&mut mock)
+            .read_to_end(&mut buf)
+            .await
+            .unwrap();
+        assert_eq!(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], &buf[..]);
+        assert_eq!(6, len);
     }
 }
