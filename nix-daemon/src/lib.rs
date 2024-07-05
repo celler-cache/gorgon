@@ -39,7 +39,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NixError {
     pub level: Verbosity,
     pub msg: String,
@@ -56,7 +56,7 @@ impl std::fmt::Display for NixError {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stderr {
     /// A plain line of stderr output.
     Next(String),
@@ -94,7 +94,7 @@ impl From<TryFromPrimitiveError<StderrActivityType>> for Error {
 }
 
 // TODO: Decode fields.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrStartActivity {
     pub act_id: u64,
     pub level: Verbosity,
@@ -123,14 +123,14 @@ impl From<TryFromPrimitiveError<StderrResultType>> for Error {
 }
 
 // TODO: Decode fields.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrResult {
     act_id: u64,
     kind: StderrResultType,
     fields: Vec<StderrField>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StderrField {
     Int(u64),
     String(String),
