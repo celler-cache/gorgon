@@ -110,7 +110,7 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> FramedReader<'r, R> {
         if self.frame_len > 0 {
             let chunk_len = self
                 .r
-                .read(buf.initialize_unfilled_to(self.frame_len))
+                .read(buf.initialize_unfilled_to(std::cmp::min(self.frame_len, buf.remaining())))
                 .await?;
             buf.advance(chunk_len);
             self.frame_len = self
@@ -1260,8 +1260,8 @@ mod tests {
     #[tokio::test]
     async fn test_framedreader_1f() {
         let mut mock = Builder::new()
-            .read(&4u64.to_le_bytes())
-            .read(&[0x01, 0x02, 0x03, 0x04])
+            .read(&2u64.to_le_bytes())
+            .read(&[1, 2])
             .read(&0u64.to_le_bytes())
             .build();
         let mut buf = Vec::new();
@@ -1269,17 +1269,17 @@ mod tests {
             .read_to_end(&mut buf)
             .await
             .unwrap();
-        assert_eq!(&[0x01, 0x02, 0x03, 0x04], &buf[..]);
-        assert_eq!(4, len);
+        assert_eq!(&[1, 2], &buf[..]);
+        assert_eq!(2, len);
     }
 
     #[tokio::test]
     async fn test_framedreader_2f() {
         let mut mock = Builder::new()
-            .read(&4u64.to_le_bytes())
-            .read(&[0x01, 0x02, 0x03, 0x04])
             .read(&2u64.to_le_bytes())
-            .read(&[0x05, 0x06])
+            .read(&[1, 2])
+            .read(&4u64.to_le_bytes())
+            .read(&[3, 4, 5, 6])
             .read(&0u64.to_le_bytes())
             .build();
         let mut buf = Vec::new();
@@ -1289,5 +1289,25 @@ mod tests {
             .unwrap();
         assert_eq!(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], &buf[..]);
         assert_eq!(6, len);
+    }
+
+    #[tokio::test]
+    async fn test_framedreader_2f_overflow() {
+        let mut mock = Builder::new()
+            .read(&2u64.to_le_bytes())
+            .read(&[1, 2])
+            .read(&4u64.to_le_bytes())
+            .read(&[3, 4, 5, 6])
+            .read(&0u64.to_le_bytes())
+            .build();
+        let mut buf = [0u8; 2];
+        let mut r = FramedReader::new(&mut mock);
+        assert_eq!(2, r.read(&mut buf).await.unwrap());
+        assert_eq!(&[1, 2], &buf[..]);
+        assert_eq!(2, r.read(&mut buf).await.unwrap());
+        assert_eq!(&[3, 4], &buf[..]);
+        assert_eq!(2, r.read(&mut buf).await.unwrap());
+        assert_eq!(&[5, 6], &buf[..]);
+        assert_eq!(0, r.read(&mut buf).await.unwrap());
     }
 }
