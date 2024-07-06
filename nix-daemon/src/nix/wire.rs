@@ -88,12 +88,13 @@ impl From<TryFromPrimitiveError<Op>> for Error {
     }
 }
 
-pub struct FramedReader<'r, R: AsyncReadExt + Unpin> {
+#[derive(Debug)]
+pub struct FramedReader<'r, R: AsyncReadExt + Unpin + Debug> {
     r: &'r mut R,
     frame_len: usize,
 }
 
-impl<'r, R: AsyncReadExt + Unpin> FramedReader<'r, R> {
+impl<'r, R: AsyncReadExt + Unpin + Debug> FramedReader<'r, R> {
     pub fn new(r: &'r mut R) -> Self {
         Self { r, frame_len: 0 }
     }
@@ -122,7 +123,7 @@ impl<'r, R: AsyncReadExt + Unpin> FramedReader<'r, R> {
     }
 }
 
-impl<'r, R: AsyncReadExt + Unpin> AsyncRead for FramedReader<'r, R> {
+impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
