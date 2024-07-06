@@ -208,34 +208,38 @@ pub struct PathInfo {
 /// An in-progress operation, which produces a series of status updates before continuing.
 pub trait Progress: Send {
     type T: Send;
+    type Error: From<Error> + Send + Sync;
 
     /// Returns the next Stderr message, or None after all have been consumed.
     /// This must behave like a fused iterator - once None is returned, all further calls
     /// must immediately return None, without corrupting the underlying datastream, etc.
-    fn next(&mut self) -> impl Future<Output = Result<Option<Stderr>>> + Send;
+    fn next(&mut self) -> impl Future<Output = Result<Option<Stderr>, Self::Error>> + Send;
 
     /// Discards any further messages from `next()` and proceeds.
-    fn result(self) -> impl Future<Output = Result<Self::T>> + Send;
+    fn result(self) -> impl Future<Output = Result<Self::T, Self::Error>> + Send;
 }
 
 /// Helper methods for Progress.
 pub trait ProgressExt: Progress {
     /// Calls `f()` for each message returned from `self.next()`, then `self.result()`.
-    fn tap<F: Fn(Stderr) + Send>(self, f: F) -> impl Future<Output = Result<Self::T>> + Send;
+    fn tap<F: Fn(Stderr) + Send>(
+        self,
+        f: F,
+    ) -> impl Future<Output = Result<Self::T, Self::Error>> + Send;
 
     /// Returns all messages from `self.next()` and `self.result()`.
-    fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T>)> + Send;
+    fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T, Self::Error>)> + Send;
 }
 impl<P: Progress> ProgressExt for P {
     // TODO: This name is bad.
-    async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T> {
+    async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T, Self::Error> {
         while let Some(stderr) = self.next().await? {
             f(stderr)
         }
         self.result().await
     }
 
-    async fn split(mut self) -> (Vec<Stderr>, Result<Self::T>) {
+    async fn split(mut self) -> (Vec<Stderr>, Result<Self::T, Self::Error>) {
         let mut stderrs = Vec::new();
         loop {
             match self.next().await {
@@ -255,7 +259,7 @@ pub trait Store {
     fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = bool>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
 
     /// Adds a file to the store.
     fn add_to_store<
@@ -270,7 +274,9 @@ pub trait Store {
         refs: Refs,
         repair: bool,
         source: R,
-    ) -> impl Future<Output = Result<impl Progress<T = (String, PathInfo)>, Self::Error>> + Send
+    ) -> impl Future<
+        Output = Result<impl Progress<T = (String, PathInfo), Error = Self::Error>, Self::Error>,
+    > + Send
     where
         Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
@@ -282,7 +288,7 @@ pub trait Store {
         &mut self,
         paths: Paths,
         mode: BuildMode,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send
+    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -292,50 +298,60 @@ pub trait Store {
     fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
     /// Creates a temporary GC root, which persists until the daemon restarts.
     fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
     /// Creates a persistent GC root. This is what's normally meant by a GC root.
     fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
     /// Returns the (link, target) of all known GC roots.
     fn find_roots(
         &mut self,
-    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>, Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            impl Progress<T = HashMap<String, String>, Error = Self::Error>,
+            Self::Error,
+        >,
+    > + Send;
 
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(
         &mut self,
         opts: ClientSettings,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
     /// Returns a PathInfo struct for the given path.
     fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>, Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>, Self::Error>,
+    > + Send;
 
     /// Returns a list of valid derivers for a path.
     /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
     fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
+           + Send;
 
     /// Takes a list of paths and queries which would be built, substituted or unknown,
     /// along with an estimate of the cumulative download and NAR sizes.
     fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> impl Future<Output = Result<impl Progress<T = QueryMissing>, Self::Error>> + Send
+    ) -> impl Future<
+        Output = Result<impl Progress<T = QueryMissing, Error = Self::Error>, Self::Error>,
+    > + Send
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -345,7 +361,12 @@ pub trait Store {
     fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>, Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            impl Progress<T = HashMap<String, String>, Error = Self::Error>,
+            Self::Error,
+        >,
+    > + Send;
 }
 
 #[derive(Debug, PartialEq, Eq)]

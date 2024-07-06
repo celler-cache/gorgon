@@ -88,6 +88,7 @@ where
     FF: Future<Output = Result<T>> + Send,
 {
     type T = T;
+    type Error = Error;
 
     /// Returns the next Stderr message, or None after all have been consumed.
     /// This behaves like a fused iterator, and keeps returning None after that.
@@ -230,7 +231,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn is_valid_path<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> Result<impl Progress<T = bool>> {
+    ) -> Result<impl Progress<T = bool, Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::IsValidPath)
             .await
             .with_field("IsValidPath.<op>")?;
@@ -256,7 +257,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         refs: Refs,
         repair: bool,
         mut source: R,
-    ) -> Result<impl Progress<T = (String, PathInfo)>>
+    ) -> Result<impl Progress<T = (String, PathInfo), Error = Self::Error>>
     where
         Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
@@ -304,7 +305,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         &mut self,
         paths: Paths,
         mode: BuildMode,
-    ) -> Result<impl Progress<T = ()>>
+    ) -> Result<impl Progress<T = (), Error = Self::Error>>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -331,7 +332,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = ()>> {
+    ) -> Result<impl Progress<T = (), Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::EnsurePath)
             .await
             .with_field("EnsurePath.<op>")?;
@@ -348,7 +349,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = ()>> {
+    ) -> Result<impl Progress<T = (), Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::AddTempRoot)
             .await
             .with_field("AddTempRoot.<op>")?;
@@ -365,7 +366,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = ()>> {
+    ) -> Result<impl Progress<T = (), Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::AddIndirectRoot)
             .await
             .with_field("AddIndirectRoot.<op>")?;
@@ -379,7 +380,9 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     #[instrument(skip(self))]
-    async fn find_roots(&mut self) -> Result<impl Progress<T = HashMap<String, String>>> {
+    async fn find_roots(
+        &mut self,
+    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::FindRoots)
             .await
             .with_field("FindRoots.<op>")?;
@@ -402,7 +405,10 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     #[instrument(skip(self))]
-    async fn set_options(&mut self, opts: ClientSettings) -> Result<impl Progress<T = ()>> {
+    async fn set_options(
+        &mut self,
+        opts: ClientSettings,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::SetOptions)
             .await
             .with_field("SetOptions.<op>")?;
@@ -416,7 +422,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> Result<impl Progress<T = Option<PathInfo>>> {
+    ) -> Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::QueryPathInfo)
             .await
             .with_field("QueryPathInfo.<op>")?;
@@ -436,7 +442,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> Result<impl Progress<T = Vec<String>>> {
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::QueryValidDerivers)
             .await
             .with_field("QueryValidDerivers.<op>")?;
@@ -455,7 +461,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> Result<impl Progress<T = crate::QueryMissing>>
+    ) -> Result<impl Progress<T = crate::QueryMissing, Error = Self::Error>>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -500,7 +506,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> Result<impl Progress<T = HashMap<String, String>>> {
+    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>> {
         wire::write_op(&mut self.conn, wire::Op::QueryDerivationOutputMap)
             .await
             .with_field("QueryDerivationOutputMap.<op>")?;
@@ -873,7 +879,7 @@ where
 async fn forward_stderr<W: AsyncWriteExt + Unpin, P: Progress>(
     w: &mut W,
     mut prog: P,
-) -> Result<P::T> {
+) -> Result<P::T, P::Error> {
     while let Some(stderr) = prog.next().await? {
         wire::write_stderr(w, Some(stderr)).await?;
     }
