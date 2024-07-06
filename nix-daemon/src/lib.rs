@@ -286,6 +286,12 @@ pub trait Store {
         Paths::IntoIter: ExactSizeIterator + Send,
         Paths::Item: AsRef<str> + Send + Sync;
 
+    /// Ensure the specified store path exists.
+    fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+
     /// Creates a temporary GC root, which persists until the daemon restarts.
     fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,

@@ -326,6 +326,23 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     #[instrument(skip(self))]
+    async fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = ()>> {
+        wire::write_op(&mut self.conn, wire::Op::EnsurePath)
+            .await
+            .with_field("EnsurePath.<op>")?;
+        wire::write_string(&mut self.conn, path)
+            .await
+            .with_field("EnsurePath.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            wire::read_u64(&mut s.conn).await.with_field("__unused__")?;
+            Ok(())
+        }))
+    }
+
+    #[instrument(skip(self))]
     async fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
