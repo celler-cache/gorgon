@@ -451,12 +451,86 @@ pub async fn read_stderr_fields<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Ve
     Ok(fields)
 }
 
-#[instrument(skip(w, v), level = "trace")]
+#[instrument(skip(w), level = "trace")]
 pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>) -> Result<()> {
     trace!(?v, "->");
     match v {
         None => write_u64(w, StderrKind::Last.into()).await?,
-        Some(_) => todo!(),
+        Some(Stderr::Next(s)) => {
+            write_u64(w, StderrKind::Next.into()).await?;
+            write_string(w, s).await?;
+        }
+        Some(Stderr::Error(err)) => {
+            write_u64(w, StderrKind::Error.into()).await?;
+            write_error(w, err).await?;
+        }
+        Some(Stderr::StartActivity(start)) => {
+            write_u64(w, StderrKind::StartActivity.into()).await?;
+            write_stderr_start_activity(w, start).await?;
+        }
+        Some(Stderr::StopActivity { id }) => {
+            write_u64(w, StderrKind::StopActivity.into()).await?;
+            write_u64(w, id).await?;
+        }
+        Some(Stderr::Result(res)) => {
+            write_u64(w, StderrKind::Result.into()).await?;
+            write_stderr_result(w, res).await?;
+        }
+    }
+    Ok(())
+}
+#[instrument(skip(w, v), level = "trace")]
+pub async fn write_stderr_start_activity<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    v: StderrStartActivity,
+) -> Result<()> {
+    trace!(?v, "->");
+    write_u64(w, v.act_id).await?;
+    write_verbosity(w, v.level).await?;
+    write_u64(w, v.kind.into()).await?;
+    write_string(w, v.s).await?;
+    write_stderr_fields(w, v.fields).await?;
+    write_u64(w, v.parent_id).await?;
+    Ok(())
+}
+#[instrument(skip(w, v), level = "trace")]
+pub async fn write_stderr_result<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    v: StderrResult,
+) -> Result<()> {
+    trace!(?v, "->");
+    write_u64(w, v.act_id).await?;
+    write_u64(w, v.kind.into()).await?;
+    write_stderr_fields(w, v.fields).await?;
+    Ok(())
+}
+#[instrument(skip(w, vs), level = "trace")]
+pub async fn write_stderr_fields<W: AsyncWriteExt + Unpin, I>(w: &mut W, vs: I) -> Result<()>
+where
+    I: IntoIterator + Send,
+    I::IntoIter: ExactSizeIterator<Item = StderrField> + Send,
+{
+    let vs = vs.into_iter();
+    write_u64(w, vs.len() as u64)
+        .await
+        .with_field("StartActivity.fields.<count>")?;
+    for field in vs {
+        match field {
+            StderrField::Int(v) => {
+                write_u64(w, 0)
+                    .await
+                    .with_field("StartActivity.fields[].<type>")?;
+                write_u64(w, v).await.with_field("StartActivity.fields[]")?;
+            }
+            StderrField::String(v) => {
+                write_u64(w, 0)
+                    .await
+                    .with_field("StartActivity.fields[].<type>")?;
+                write_string(w, v)
+                    .await
+                    .with_field("StartActivity.fields[]")?;
+            }
+        }
     }
     Ok(())
 }
