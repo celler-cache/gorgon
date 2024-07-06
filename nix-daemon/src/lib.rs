@@ -167,7 +167,7 @@ impl From<TryFromPrimitiveError<BuildMode>> for Error {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub keep_failed: bool,
     pub keep_going: bool,
@@ -182,7 +182,7 @@ pub struct ClientSettings {
 }
 
 /// Data about a Nix store path.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PathInfo {
     /// Derivation that produced this path.
     pub deriver: Option<String>,
