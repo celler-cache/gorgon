@@ -281,14 +281,17 @@ struct DerivationInputTemplate {
 }
 
 impl DerivationInputTemplate {
-    async fn build_batch(
-        store: &mut impl Store,
+    async fn build_batch<S: Store>(
+        store: &mut S,
         drvs: &mut BTreeMap<String, Derivation>,
         paths_valid: &mut BTreeMap<String, bool>,
         drvs_built: &mut BTreeMap<String, bool>,
         seen: &mut BTreeSet<String>,
         inputs: &BTreeMap<String, DerivationInputDerivation>,
-    ) -> Result<Vec<Self>> {
+    ) -> Result<Vec<Self>>
+    where
+        Error: From<S::Error>,
+    {
         let mut tmpls = Vec::new();
         for (drv_path, input) in inputs.iter() {
             if let Some(drv) = read_derivation(drvs, &drv_path)? {
@@ -510,11 +513,14 @@ pub fn read_derivation<'a>(
 }
 
 #[instrument(skip(store, paths_valid))]
-pub async fn check_path_valid(
-    store: &mut impl Store,
+pub async fn check_path_valid<S: Store>(
+    store: &mut S,
     paths_valid: &mut BTreeMap<String, bool>,
     path: &str,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    Error: From<S::Error>,
+{
     if let Some(valid) = paths_valid.get(path) {
         Ok(*valid)
     } else {
@@ -525,13 +531,16 @@ pub async fn check_path_valid(
 }
 
 #[instrument(skip(store, paths_valid, drvs_built, drv))]
-pub async fn check_drv_built(
-    store: &mut impl Store,
+pub async fn check_drv_built<S: Store>(
+    store: &mut S,
     paths_valid: &mut BTreeMap<String, bool>,
     drvs_built: &mut BTreeMap<String, bool>,
     path: &str,
     drv: &Derivation,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    Error: From<S::Error>,
+{
     if let Some(status) = drvs_built.get(path) {
         Ok(*status)
     } else {

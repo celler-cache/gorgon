@@ -221,6 +221,8 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
 }
 
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
+    type Error = Error;
+
     // FIXME: The daemon expects /nix/store/foo, not /nix/store/foo/bin/bar.
     // In the nix codebase, libstore chops the latter into the former before making the
     // call, but I'm unsure of how to do it here.
@@ -654,7 +656,7 @@ where
         Ok(Self { r, w, store, proto })
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<(), S::Error> {
         loop {
             match wire::read_op(&mut self.r).await {
                 Ok(wire::Op::IsValidPath) => {
@@ -703,7 +705,8 @@ where
                         return Err(Error::Invalid(format!(
                             "AddToStore is not implemented for Protocol {}",
                             self.proto
-                        )))
+                        ))
+                        .into())
                     }
                 },
                 Ok(wire::Op::BuildPaths) => {
@@ -861,7 +864,7 @@ where
                     info!("Client disconnected");
                     return Ok(());
                 }
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             }
         }
     }

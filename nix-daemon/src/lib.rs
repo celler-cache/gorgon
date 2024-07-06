@@ -249,11 +249,13 @@ impl<P: Progress> ProgressExt for P {
 
 /// Interface to a Nix store.
 pub trait Store {
+    type Error: From<Error> + Send + Sync;
+
     /// Returns whether a store path is valid.
     fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = bool>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = bool>, Self::Error>> + Send;
 
     /// Adds a file to the store.
     fn add_to_store<
@@ -268,7 +270,7 @@ pub trait Store {
         refs: Refs,
         repair: bool,
         source: R,
-    ) -> impl Future<Output = Result<impl Progress<T = (String, PathInfo)>>> + Send
+    ) -> impl Future<Output = Result<impl Progress<T = (String, PathInfo)>, Self::Error>> + Send
     where
         Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
@@ -280,7 +282,7 @@ pub trait Store {
         &mut self,
         paths: Paths,
         mode: BuildMode,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send
+    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -290,50 +292,50 @@ pub trait Store {
     fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
 
     /// Creates a temporary GC root, which persists until the daemon restarts.
     fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
 
     /// Creates a persistent GC root. This is what's normally meant by a GC root.
     fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
 
     /// Returns the (link, target) of all known GC roots.
     fn find_roots(
         &mut self,
-    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>, Self::Error>> + Send;
 
     /// Applies client options. This changes the behaviour of future commands.
     fn set_options(
         &mut self,
         opts: ClientSettings,
-    ) -> impl Future<Output = Result<impl Progress<T = ()>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = ()>, Self::Error>> + Send;
 
     /// Returns a PathInfo struct for the given path.
     fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = Option<PathInfo>>, Self::Error>> + Send;
 
     /// Returns a list of valid derivers for a path.
     /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
     fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>>, Self::Error>> + Send;
 
     /// Takes a list of paths and queries which would be built, substituted or unknown,
     /// along with an estimate of the cumulative download and NAR sizes.
     fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> impl Future<Output = Result<impl Progress<T = QueryMissing>>> + Send
+    ) -> impl Future<Output = Result<impl Progress<T = QueryMissing>, Self::Error>> + Send
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -343,7 +345,7 @@ pub trait Store {
     fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>>> + Send;
+    ) -> impl Future<Output = Result<impl Progress<T = HashMap<String, String>>, Self::Error>> + Send;
 }
 
 #[derive(Debug, PartialEq, Eq)]
