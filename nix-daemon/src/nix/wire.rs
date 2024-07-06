@@ -391,8 +391,8 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
         .tap(|kind| trace!(?kind, "<-"));
 
     match kind {
-        StderrKind::Next => Ok(Some(Stderr::Next(read_string(r).await?))),
         StderrKind::Last => Ok(None),
+        StderrKind::Next => Ok(Some(Stderr::Next(read_string(r).await?))),
         StderrKind::Error => Ok(Some(Stderr::Error(read_error(r).await?))),
         StderrKind::StartActivity => Ok(Some(Stderr::StartActivity(
             read_stderr_start_activity(r).await?,
@@ -427,7 +427,6 @@ pub async fn read_stderr_result<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<St
     }
     .tap(|res| trace!(?res, "<-")))
 }
-
 #[instrument(skip(r), level = "trace")]
 pub async fn read_stderr_fields<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<StderrField>> {
     let count = read_u64(r)
