@@ -398,7 +398,7 @@ pub async fn read_stderr<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<St
             read_stderr_start_activity(r).await?,
         ))),
         StderrKind::StopActivity => Ok(Some(Stderr::StopActivity {
-            id: read_u64(r).await?,
+            act_id: read_u64(r).await?,
         })),
         StderrKind::Result => Ok(Some(Stderr::Result(read_stderr_result(r).await?))),
     }
@@ -468,9 +468,9 @@ pub async fn write_stderr<W: AsyncWriteExt + Unpin>(w: &mut W, v: Option<Stderr>
             write_u64(w, StderrKind::StartActivity.into()).await?;
             write_stderr_start_activity(w, start).await?;
         }
-        Some(Stderr::StopActivity { id }) => {
+        Some(Stderr::StopActivity { act_id }) => {
             write_u64(w, StderrKind::StopActivity.into()).await?;
-            write_u64(w, id).await?;
+            write_u64(w, act_id).await?;
         }
         Some(Stderr::Result(res)) => {
             write_u64(w, StderrKind::Result.into()).await?;

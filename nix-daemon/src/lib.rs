@@ -65,7 +65,7 @@ pub enum Stderr {
     /// An activity (such as a build) was started.
     StartActivity(StderrStartActivity),
     /// An activity (such as a build) finished.
-    StopActivity { id: u64 },
+    StopActivity { act_id: u64 },
     /// A progress update from an activity.
     Result(StderrResult),
 }
