@@ -14,7 +14,7 @@ use tokio::{
     net::UnixStream,
 };
 use tokio_stream::StreamExt;
-use tracing::instrument;
+use tracing::{info, instrument};
 
 /// Minimum supported protocol version. Older versions will be rejected.
 ///
@@ -522,6 +522,360 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             Ok(outputs)
         }))
     }
+}
+
+/// Builder for a DaemonProtocolAdapter.
+#[derive(Debug)]
+pub struct DaemonProtocolAdapterBuilder<'s, S: Store> {
+    pub store: &'s mut S,
+    pub nix_version: String,
+    pub remote_trust: Option<bool>,
+}
+
+impl<'s, S: Store> DaemonProtocolAdapterBuilder<'s, S> {
+    fn new(store: &'s mut S) -> Self {
+        Self {
+            store,
+            nix_version: concat!("gorgon/nix-daemon ", env!("CARGO_PKG_VERSION")).to_string(),
+            remote_trust: None,
+        }
+    }
+
+    /// Initializes a DaemonProtocolAdapter by adopting a connection.
+    ///
+    /// It's up to the caller that the connection is in a state to begin a nix handshake, eg.
+    /// it behaves like a fresh connection to the daemon socket - if this is a connection through
+    /// a proxy, any proxy handshakes should already have taken place, etc.
+    pub async fn adopt<
+        R: AsyncReadExt + Unpin + Send + Debug,
+        W: AsyncWriteExt + Unpin + Send + Debug,
+    >(
+        self,
+        r: R,
+        w: W,
+    ) -> Result<DaemonProtocolAdapter<'s, S, R, W>> {
+        DaemonProtocolAdapter::handshake(r, w, self.store, self.nix_version, self.remote_trust)
+            .await
+    }
+}
+
+pub struct DaemonProtocolAdapter<'s, S: Store, R, W>
+where
+    R: AsyncReadExt + Unpin + Send + Debug,
+    W: AsyncWriteExt + Unpin + Send + Debug,
+{
+    r: R,
+    w: W,
+    pub store: &'s mut S,
+    pub proto: Proto,
+}
+
+impl<'s, S: Store>
+    DaemonProtocolAdapter<'s, S, tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf>
+{
+    pub fn builder(store: &'s mut S) -> DaemonProtocolAdapterBuilder<'s, S> {
+        DaemonProtocolAdapterBuilder::new(store)
+    }
+}
+
+impl<'s, S: Store, R, W> DaemonProtocolAdapter<'s, S, R, W>
+where
+    R: AsyncReadExt + Unpin + Send + Debug,
+    W: AsyncWriteExt + Unpin + Send + Debug,
+{
+    #[instrument(skip(r, w, store))]
+    async fn handshake(
+        mut r: R,
+        mut w: W,
+        store: &'s mut S,
+        nix_version: String,
+        remote_trust: Option<bool>,
+    ) -> Result<Self> {
+        // Exchange magic numbers.
+        match wire::read_u64(&mut r).await {
+            Ok(magic1 @ wire::WORKER_MAGIC_1) => Ok(magic1),
+            Ok(v) => Err(Error::Invalid(format!("{:#x}", v))),
+            Err(err) => Err(err.into()),
+        }
+        .with_field("magic1")?;
+        wire::write_u64(&mut w, wire::WORKER_MAGIC_2)
+            .await
+            .with_field("magic2")?;
+
+        // Tell the client our latest supported protocol version, then they pick that or lower.
+        wire::write_proto(&mut w, MAX_PROTO)
+            .await
+            .with_field("daemon_proto")?;
+        let proto = wire::read_proto(&mut r)
+            .await
+            .and_then(|proto| {
+                if proto.0 != 1 || proto < MIN_PROTO {
+                    return Err(Error::Invalid(format!("{}", proto)));
+                }
+                Ok(proto)
+            })
+            .with_field("client_proto")?;
+
+        // Discard some obsolete fields.
+        if proto >= Proto(1, 14) {
+            wire::read_u64(&mut r)
+                .await
+                .with_field("__obsolete_cpu_affinity")?;
+        }
+        if proto >= Proto(1, 11) {
+            wire::read_bool(&mut r)
+                .await
+                .with_field("__obsolete_reserve_space")?;
+        }
+
+        // And use values from the builder for these.
+        if proto >= Proto(1, 33) {
+            wire::write_string(&mut w, &nix_version)
+                .await
+                .with_field("nix_version")?;
+        }
+        if proto >= Proto(1, 35) {
+            wire::write_u64(
+                &mut w,
+                match remote_trust {
+                    None => 0,
+                    Some(true) => 1,
+                    Some(false) => 2,
+                },
+            )
+            .await
+            .with_field("remote_trust")?;
+        }
+
+        // Stderr is always empty.
+        wire::write_stderr(&mut w, None)
+            .await
+            .with_field("stderr")?;
+        Ok(Self { r, w, store, proto })
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        loop {
+            match wire::read_op(&mut self.r).await {
+                Ok(wire::Op::IsValidPath) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("IsValidPath.path")?;
+
+                    let is_valid =
+                        forward_stderr(&mut self.w, self.store.is_valid_path(path).await?).await?;
+                    wire::write_bool(&mut self.w, is_valid)
+                        .await
+                        .with_field("IsValidPath.is_valid")?;
+                }
+                Ok(wire::Op::AddToStore) => match self.proto {
+                    Proto(1, 25..) => {
+                        let name = wire::read_string(&mut self.r)
+                            .await
+                            .with_field("AddToStore.name")?;
+                        let cam_str = wire::read_string(&mut self.r)
+                            .await
+                            .with_field("AddToStore.camStr")?;
+                        let refs = wire::read_strings(&mut self.r)
+                            .collect::<Result<Vec<_>>>()
+                            .await
+                            .with_field("AddToStore.refs")?;
+                        let repair = wire::read_bool(&mut self.r)
+                            .await
+                            .with_field("AddToStore.repair")?;
+                        let source = wire::FramedReader::new(&mut self.r);
+
+                        let (name, pi) = forward_stderr(
+                            &mut self.w,
+                            self.store
+                                .add_to_store(name, cam_str, refs, repair, source)
+                                .await?,
+                        )
+                        .await?;
+                        wire::write_string(&mut self.w, name)
+                            .await
+                            .with_field("AddToStore.name")?;
+                        wire::write_pathinfo(&mut self.w, self.proto, &pi)
+                            .await
+                            .with_field("AddToStore.pi")?;
+                    }
+                    _ => {
+                        return Err(Error::Invalid(format!(
+                            "AddToStore is not implemented for Protocol {}",
+                            self.proto
+                        )))
+                    }
+                },
+                Ok(wire::Op::BuildPaths) => {
+                    let paths = wire::read_strings(&mut self.r)
+                        .collect::<Result<Vec<_>>>()
+                        .await
+                        .with_field("BuildPaths.paths")?;
+                    let mode = if self.proto >= Proto(1, 15) {
+                        wire::read_build_mode(&mut self.r)
+                            .await
+                            .with_field("BuildPaths.build_mode")?
+                    } else {
+                        BuildMode::Normal
+                    };
+
+                    forward_stderr(&mut self.w, self.store.build_paths(paths, mode).await?).await?;
+                    wire::write_u64(&mut self.w, 1)
+                        .await
+                        .with_field("BuildPaths.__unused__")?;
+                }
+                Ok(wire::Op::EnsurePath) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("EnsurePath.path")?;
+                    forward_stderr(&mut self.w, self.store.ensure_path(path).await?).await?;
+                    wire::write_u64(&mut self.w, 1)
+                        .await
+                        .with_field("EnsurePath.__unused__")?;
+                }
+                Ok(wire::Op::AddTempRoot) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("AddTempRoot.path")?;
+
+                    forward_stderr(&mut self.w, self.store.add_temp_root(path).await?).await?;
+                    wire::write_u64(&mut self.w, 1)
+                        .await
+                        .with_field("AddTempRoot.__unused__")?;
+                }
+                Ok(wire::Op::AddIndirectRoot) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("AddIndirectRoot.path")?;
+
+                    forward_stderr(&mut self.w, self.store.add_indirect_root(path).await?).await?;
+                    wire::write_u64(&mut self.w, 1)
+                        .await
+                        .with_field("AddIndirectRoot.__unused__")?;
+                }
+                Ok(wire::Op::FindRoots) => {
+                    let roots = forward_stderr(&mut self.w, self.store.find_roots().await?).await?;
+
+                    wire::write_u64(&mut self.w, roots.len() as u64)
+                        .await
+                        .with_field("FindRoots.roots[].<count>")?;
+                    for (link, target) in roots {
+                        wire::write_string(&mut self.w, link)
+                            .await
+                            .with_field("FindRoots.roots[].link")?;
+                        wire::write_string(&mut self.w, target)
+                            .await
+                            .with_field("FindRoots.roots[].target")?;
+                    }
+                }
+                Ok(wire::Op::SetOptions) => {
+                    let ops = wire::read_client_settings(&mut self.r, self.proto)
+                        .await
+                        .with_field("SetOptions.clientSettings")?;
+                    forward_stderr(&mut self.w, self.store.set_options(ops).await?).await?;
+                }
+                Ok(wire::Op::QueryPathInfo) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("QueryPathInfo.path")?;
+
+                    let pi =
+                        forward_stderr(&mut self.w, self.store.query_pathinfo(path).await?).await?;
+
+                    wire::write_bool(&mut self.w, pi.is_some())
+                        .await
+                        .with_field("QueryPathInfo.is_valid")?;
+                    if let Some(pi) = pi {
+                        wire::write_pathinfo(&mut self.w, self.proto, &pi)
+                            .await
+                            .with_field("QueryPathInfo.path_info")?;
+                    }
+                }
+                Ok(wire::Op::QueryMissing) => {
+                    let paths = wire::read_strings(&mut self.r)
+                        .collect::<Result<Vec<_>>>()
+                        .await
+                        .with_field("QueryMissing.paths")?;
+
+                    let crate::QueryMissing {
+                        will_build,
+                        will_substitute,
+                        unknown,
+                        download_size,
+                        nar_size,
+                    } = forward_stderr(&mut self.w, self.store.query_missing(paths).await?).await?;
+
+                    wire::write_strings(&mut self.w, will_build)
+                        .await
+                        .with_field("QueryMissing.will_build")?;
+                    wire::write_strings(&mut self.w, will_substitute)
+                        .await
+                        .with_field("QueryMissing.will_substitute")?;
+                    wire::write_strings(&mut self.w, unknown)
+                        .await
+                        .with_field("QueryMissing.unknown")?;
+                    wire::write_u64(&mut self.w, download_size)
+                        .await
+                        .with_field("QueryMissing.download_size")?;
+                    wire::write_u64(&mut self.w, nar_size)
+                        .await
+                        .with_field("QueryMissing.nar_size")?;
+                }
+                Ok(wire::Op::QueryValidDerivers) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("QueryValidDerivers.path")?;
+
+                    let derivers =
+                        forward_stderr(&mut self.w, self.store.query_valid_derivers(path).await?)
+                            .await?;
+                    wire::write_strings(&mut self.w, derivers)
+                        .await
+                        .with_field("QueryValidDerivers.paths")?
+                }
+                Ok(wire::Op::QueryDerivationOutputMap) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("QueryDerivationOutputMap.paths")?;
+
+                    let outputs = forward_stderr(
+                        &mut self.w,
+                        self.store.query_derivation_output_map(path).await?,
+                    )
+                    .await?;
+                    wire::write_u64(&mut self.w, outputs.len() as u64)
+                        .await
+                        .with_field("QueryDerivationOutputMap.outputs[].<count>")?;
+                    for (name, path) in outputs {
+                        wire::write_string(&mut self.w, name)
+                            .await
+                            .with_field("QueryDerivationOutputMap.outputs[].name")?;
+                        wire::write_string(&mut self.w, path)
+                            .await
+                            .with_field("QueryDerivationOutputMap.outputs[].path")?;
+                    }
+                }
+                Ok(v) => todo!("{:#?}", v),
+
+                Err(Error::IO(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    info!("Client disconnected");
+                    return Ok(());
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+async fn forward_stderr<W: AsyncWriteExt + Unpin, P: Progress>(
+    w: &mut W,
+    mut prog: P,
+) -> Result<P::T> {
+    while let Some(stderr) = prog.next().await? {
+        wire::write_stderr(w, Some(stderr)).await?;
+    }
+    wire::write_stderr(w, None).await?;
+    prog.result().await
 }
 
 #[cfg(test)]
