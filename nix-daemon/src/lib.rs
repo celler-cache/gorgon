@@ -125,9 +125,9 @@ impl From<TryFromPrimitiveError<StderrResultType>> for Error {
 // TODO: Decode fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrResult {
-    act_id: u64,
-    kind: StderrResultType,
-    fields: Vec<StderrField>,
+    pub act_id: u64,
+    pub kind: StderrResultType,
+    pub fields: Vec<StderrField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
