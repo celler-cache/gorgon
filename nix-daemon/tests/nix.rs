@@ -120,6 +120,73 @@ async fn test_is_valid_path_true() {
 }
 
 #[tokio::test]
+async fn test_query_valid_paths_false() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let r = store
+        .query_valid_paths(&[INVALID_STORE_PATH], true)
+        .await
+        .expect("QueryValidPaths failed")
+        .result()
+        .await;
+    assert_eq!(Vec::<String>::new(), r.unwrap());
+}
+#[tokio::test]
+async fn test_query_valid_paths_true() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let nix_path = find_nix_in_store();
+    let r = store
+        .query_valid_paths(&[&nix_path], true)
+        .await
+        .expect("QueryValidPaths failed")
+        .result()
+        .await;
+    assert_eq!(vec![nix_path], r.unwrap());
+}
+
+#[tokio::test]
+async fn test_has_substitutes() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let (stderrs, r) = store
+        .has_substitutes(find_nix_in_store())
+        .await
+        .expect("HasSubstitutes failed")
+        .split()
+        .await;
+    assert_eq!(Vec::<Stderr>::new(), stderrs);
+    assert_eq!(true, r.unwrap());
+}
+
+#[tokio::test]
+async fn test_query_substitutable_paths() {
+    init_logging();
+    let mut store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let nix_path = find_nix_in_store();
+    let (stderrs, r) = store
+        .query_substitutable_paths(&[&nix_path])
+        .await
+        .expect("QuerySubstitutablePaths failed")
+        .split()
+        .await;
+    assert_eq!(Vec::<Stderr>::new(), stderrs);
+    assert_eq!(vec![nix_path], r.unwrap());
+}
+
+#[tokio::test]
 async fn test_query_pathinfo_none() {
     init_logging();
     let mut store = DaemonStore::builder()

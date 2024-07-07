@@ -279,6 +279,12 @@ pub trait Store {
         path: P,
     ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
 
+    /// Returns whether QuerySubstitutablePathInfos would return anything.
+    fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
+
     /// Adds a file to the store.
     fn add_to_store<
         SN: AsRef<str> + Send + Sync + Debug,
@@ -353,6 +359,29 @@ pub trait Store {
     ) -> impl Future<
         Output = Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>, Self::Error>,
     > + Send;
+
+    /// Returns which of the passed paths are valid.
+    fn query_valid_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        use_substituters: bool,
+    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
+           + Send
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync;
+
+    /// Returns paths which can be substituted.
+    fn query_substitutable_paths<Paths>(
+        &mut self,
+        paths: Paths,
+    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
+           + Send
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync;
 
     /// Returns a list of valid derivers for a path.
     /// This is sort of like PathInfo.deriver, but it doesn't lie to you.

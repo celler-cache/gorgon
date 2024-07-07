@@ -243,6 +243,23 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }))
     }
 
+    /// Returns whether QuerySubstitutablePathInfos would return anything.
+    #[instrument(skip(self))]
+    async fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> Result<impl Progress<T = bool, Error = Self::Error>, Self::Error> {
+        wire::write_op(&mut self.conn, wire::Op::HasSubstitutes)
+            .await
+            .with_field("HasSubstitutes.<op>")?;
+        wire::write_string(&mut self.conn, &path)
+            .await
+            .with_field("HasSubstitutes.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            Ok(wire::read_bool(&mut s.conn).await?)
+        }))
+    }
+
     /// Adds a file to the store.
     #[instrument(skip(self, source))]
     async fn add_to_store<
@@ -435,6 +452,69 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             } else {
                 Ok(None)
             }
+        }))
+    }
+
+    /// Returns which of the passed paths are valid.
+    async fn query_valid_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        use_substituters: bool,
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        match self.proto {
+            Proto(1, 12..) => {
+                wire::write_op(&mut self.conn, wire::Op::QueryValidPaths)
+                    .await
+                    .with_field("QueryValidPaths.<op>")?;
+                wire::write_strings(&mut self.conn, paths)
+                    .await
+                    .with_field("QueryValidPaths.path")?;
+                if self.proto >= Proto(1, 27) {
+                    wire::write_bool(&mut self.conn, use_substituters)
+                        .await
+                        .with_field("QueryValidPaths.use_substituters")?;
+                }
+                Ok(DaemonProgress::new(self, |s| async move {
+                    wire::read_strings(&mut s.conn)
+                        .collect::<Result<Vec<_>>>()
+                        .await
+                }))
+            }
+            _ => Err(Error::Invalid(format!(
+                "QueryValidPaths is not implemented for Protocol {}",
+                self.proto
+            ))),
+        }
+    }
+
+    /// Returns paths which can be substituted.
+    ///
+    /// Trigger with: $ nix-env --query -s
+    #[instrument(skip(self))]
+    async fn query_substitutable_paths<Paths>(
+        &mut self,
+        paths: Paths,
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        wire::write_op(&mut self.conn, wire::Op::QuerySubstitutablePaths)
+            .await
+            .with_field("QuerySubstitutablePaths.<op>")?;
+        wire::write_strings(&mut self.conn, paths)
+            .await
+            .with_field("QuerySubstitutablePaths.path")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            wire::read_strings(&mut s.conn)
+                .collect::<Result<Vec<_>>>()
+                .await
         }))
     }
 
@@ -676,6 +756,17 @@ where
                         .await
                         .with_field("IsValidPath.is_valid")?;
                 }
+                Ok(wire::Op::HasSubstitutes) => {
+                    let path = wire::read_string(&mut self.r)
+                        .await
+                        .with_field("HasSubstitutes.path")?;
+                    let has_substitutes =
+                        forward_stderr(&mut self.w, self.store.has_substitutes(path).await?)
+                            .await?;
+                    wire::write_bool(&mut self.w, has_substitutes)
+                        .await
+                        .with_field("HasSubstitutes.has_substitutes")?;
+                }
                 Ok(wire::Op::AddToStore) => match self.proto {
                     Proto(1, 25..) => {
                         let name = wire::read_string(&mut self.r)
@@ -799,6 +890,54 @@ where
                             .await
                             .with_field("QueryPathInfo.path_info")?;
                     }
+                }
+                Ok(wire::Op::QueryValidPaths) => match self.proto {
+                    Proto(1, 12..) => {
+                        let paths = wire::read_strings(&mut self.r)
+                            .collect::<Result<Vec<_>>>()
+                            .await
+                            .with_field("QueryValidPaths.path")?;
+                        let use_substituters = if self.proto >= Proto(1, 27) {
+                            wire::read_bool(&mut self.r)
+                                .await
+                                .with_field("QueryValidPaths.use_substituters")?
+                        } else {
+                            true
+                        };
+
+                        let valid_paths = forward_stderr(
+                            &mut self.w,
+                            self.store
+                                .query_valid_paths(paths, use_substituters)
+                                .await?,
+                        )
+                        .await?;
+
+                        wire::write_strings(&mut self.w, valid_paths)
+                            .await
+                            .with_field("QueryValidPaths.valid_path")?;
+                    }
+                    _ => {
+                        return Err(Error::Invalid(format!(
+                            "QueryValidPaths is not implemented for Protocol {}",
+                            self.proto
+                        ))
+                        .into())
+                    }
+                },
+                Ok(wire::Op::QuerySubstitutablePaths) => {
+                    let paths = wire::read_strings(&mut self.r)
+                        .collect::<Result<Vec<_>>>()
+                        .await
+                        .with_field("QuerySubstitutablePaths.paths")?;
+                    let sub_paths = forward_stderr(
+                        &mut self.w,
+                        self.store.query_substitutable_paths(paths).await?,
+                    )
+                    .await?;
+                    wire::write_strings(&mut self.w, sub_paths)
+                        .await
+                        .with_field("QuerySubstitutablePaths.sub_paths")?;
                 }
                 Ok(wire::Op::QueryMissing) => {
                     let paths = wire::read_strings(&mut self.r)
