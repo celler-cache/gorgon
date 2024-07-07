@@ -136,6 +136,24 @@ pub enum StderrField {
     String(String),
 }
 
+impl StderrField {
+    pub fn as_int(&self) -> Option<&u64> {
+        if let Self::Int(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&String> {
+        if let Self::String(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Verbosity {

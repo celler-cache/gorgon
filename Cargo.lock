@@ -1353,6 +1353,7 @@ dependencies = [
  "chrono",
  "clap",
  "listenfd",
+ "nix-daemon",
  "num_enum 0.6.1",
  "sea-orm",
  "sea-orm-migration",

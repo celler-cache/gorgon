@@ -11,6 +11,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::prelude::*;
 use clap::Parser;
 use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, Stream};
+use nix_daemon::{
+    nix::{DaemonProtocolAdapter, DaemonStore},
+    Store,
+};
 use sea_orm::{prelude::*, Database, Set};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
@@ -211,7 +215,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(
                     async move {
                         info!("Client connected");
-                        if let Err(err) = run_session(args_, shutdown_, db_, cstream).await {
+                        if let Err(err) = run_session2(args_, shutdown_, db_, cstream).await {
                             error!("{:?}", err);
                         }
                         drop(shutdown_send_);
@@ -269,6 +273,30 @@ impl State {
     pub fn since(&self, minor: u32) -> bool {
         self.handshake.client_proto.1 >= minor
     }
+}
+
+async fn run_session2(
+    args: Args,
+    _cancel: CancellationToken,
+    _db: Arc<DatabaseConnection>,
+    cstream: UnixStream,
+) -> Result<()> {
+    debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
+    let mut store = DaemonStore::builder()
+        .connect_unix(&args.nix_daemon_sock)
+        .await
+        .with_context(|| {
+            format!(
+                "Couldn't connect to nix daemon socket: {}",
+                args.nix_daemon_sock.to_string_lossy()
+            )
+        })?;
+
+    let (cr, cw) = cstream.into_split();
+    let mut adapter = DaemonProtocolAdapter::builder(&mut store)
+        .adopt(cr, cw)
+        .await?;
+    Ok(adapter.run().await?)
 }
 
 async fn run_session(
