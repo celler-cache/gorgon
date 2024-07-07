@@ -170,6 +170,9 @@ impl StderrField {
             None
         }
     }
+    pub fn as_activity_type(&self) -> Option<StderrActivityType> {
+        self.as_int().and_then(|v| (*v).try_into().ok())
+    }
 
     /// If this is a Self::String, return the value, else None.
     pub fn as_string(&self) -> Option<&String> {

@@ -3,25 +3,25 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 mod api;
-mod daemon_proto;
 mod entity;
 mod migration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
+use async_tempfile::TempFile;
 use chrono::prelude::*;
 use clap::Parser;
-use daemon_proto::{ActivityType, Direction, Interjection, Op, ResultType, Stream};
 use nix_daemon::{
     nix::{DaemonProtocolAdapter, DaemonStore},
-    Store,
+    BuildMode, BuildResult, ClientSettings, NixError, PathInfo, Progress, QueryMissing, Stderr,
+    StderrActivityType, StderrResult, StderrResultType, StderrStartActivity, Store,
 };
 use sea_orm::{prelude::*, Database, Set};
 use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
+use std::{fmt::Debug, ops::Deref};
 use tap::{Tap, TapFallible};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{
-    io::{BufReader, BufWriter},
     net::{UnixListener, UnixStream},
     select,
 };
@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(
                     async move {
                         info!("Client connected");
-                        if let Err(err) = run_session2(args_, shutdown_, db_, cstream).await {
+                        if let Err(err) = run_session(args_, shutdown_, db_, cstream).await {
                             error!("{:?}", err);
                         }
                         drop(shutdown_send_);
@@ -262,27 +262,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct State {
-    pub handshake: daemon_proto::Handshake,
-    pub db: Arc<DatabaseConnection>,
-}
-
-impl State {
-    /// Returns whether the protocol minor version is newer than `minor`.
-    pub fn since(&self, minor: u32) -> bool {
-        self.handshake.client_proto.1 >= minor
-    }
-}
-
-async fn run_session2(
+async fn run_session(
     args: Args,
     _cancel: CancellationToken,
-    _db: Arc<DatabaseConnection>,
+    db: Arc<DatabaseConnection>,
     cstream: UnixStream,
 ) -> Result<()> {
+    // Connect to the real nix-daemon.
     debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
-    let mut store = DaemonStore::builder()
+    let store = DaemonStore::builder()
         .connect_unix(&args.nix_daemon_sock)
         .await
         .with_context(|| {
@@ -292,352 +280,145 @@ async fn run_session2(
             )
         })?;
 
+    // Wrap the store in our proxy.
+    let mut proxy = ProxyStore { store, db };
+
+    // Run a daemon protocol adapter.
     let (cr, cw) = cstream.into_split();
-    let mut adapter = DaemonProtocolAdapter::builder(&mut store)
+    let mut adapter = DaemonProtocolAdapter::builder(&mut proxy)
         .adopt(cr, cw)
         .await?;
     Ok(adapter.run().await?)
 }
 
-async fn run_session(
-    args: Args,
-    cancel: CancellationToken,
-    db: Arc<DatabaseConnection>,
-    mut cstream: UnixStream,
-) -> Result<()> {
-    // We've got a client connection already; connect to the daemon on their behalf.
-    debug!(?args.nix_daemon_sock, "Connecting to nix daemon on client's behalf...");
-    let mut dstream = UnixStream::connect(&args.nix_daemon_sock)
-        .await
-        .with_context(|| {
-            format!(
-                "Couldn't connect to nix daemon socket: {}",
-                args.nix_daemon_sock.to_string_lossy()
-            )
-        })?;
-
-    // Split the connections up into a client-to-daemon and a daemon-to-client stream.
-    let (mut c2d, mut d2c) = {
-        let (cr, cw) = cstream.split();
-        let (dr, dw) = dstream.split();
-        let c2d = daemon_proto::Stream {
-            dir: daemon_proto::Direction::ClientToDaemon,
-            r: BufReader::new(cr),
-            w: BufWriter::new(dw),
-        };
-        let d2c = daemon_proto::Stream {
-            dir: daemon_proto::Direction::DaemonToClient,
-            r: BufReader::new(dr),
-            w: BufWriter::new(cw),
-        };
-        (c2d, d2c)
-    };
-
-    // Perform the new connection handshake.
-    let handshake = daemon_proto::handshake(&mut c2d, &mut d2c)
-        .await
-        .context("Handshake failed")?;
-    info!(
-        nix_version = handshake.nix_version,
-        client_proto = format!("{}.{}", handshake.client_proto.0, handshake.client_proto.1),
-        daemon_proto = format!("{}.{}", handshake.daemon_proto.0, handshake.daemon_proto.1),
-        "Connection Established!"
-    );
-
-    let mut state = State { handshake, db };
-
-    // Main loop!
-    loop {
-        trace!("[ main loop ]");
-
-        let dir = if c2d.r.buffer().len() > 0 {
-            trace!(
-                len = c2d.r.buffer().len(),
-                "Client-to-Daemon reader has unprocessed data"
-            );
-            Some(Direction::ClientToDaemon)
-        } else if d2c.r.buffer().len() > 0 {
-            trace!(
-                len = d2c.r.buffer().len(),
-                "Daemon-to-Client reader has unprocessed data"
-            );
-            Some(Direction::DaemonToClient)
-        } else {
-            trace!("No leftover buffers, waiting for sockets...");
-            select! {
-                biased;
-                _ = cancel.cancelled() => None,
-                _ = d2c.r.get_ref().readable() => Some(Direction::DaemonToClient),
-                _ = c2d.r.get_ref().readable() => Some(Direction::ClientToDaemon),
-            }
-        };
-
-        match dir {
-            Some(Direction::DaemonToClient) => {
-                trace!("Daemon ready; reading interjection...");
-                interjections(&mut d2c, &mut state)
-                    .await
-                    .context("Couldn't process interjections")?;
-            }
-            Some(Direction::ClientToDaemon) => {
-                trace!("Client ready; reading Op...");
-                let op = match c2d.take_op().await.context("Couldn't read Op") {
-                    Ok(op) => Ok(op),
-                    Err(err) => match err.downcast_ref::<std::io::Error>() {
-                        Some(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                            info!("Client disconnected");
-                            break;
-                        }
-                        _ => Err(err),
-                    },
-                }?;
-                match op {
-                    Op::IsValidPath => do_is_valid_path(&mut state, &mut c2d, &mut d2c).await,
-                    Op::AddToStore => do_add_to_store(&mut state, &mut c2d, &mut d2c).await,
-                    Op::BuildPaths => do_build_paths(&mut state, &mut c2d, &mut d2c).await,
-                    Op::EnsurePath => do_ensure_path(&mut state, &mut c2d, &mut d2c).await,
-                    Op::AddTempRoot => do_add_temp_root(&mut state, &mut c2d, &mut d2c).await,
-                    Op::AddIndirectRoot => {
-                        do_add_indirect_root(&mut state, &mut c2d, &mut d2c).await
-                    }
-                    Op::SetOptions => do_set_options(&mut state, &mut c2d, &mut d2c).await,
-                    Op::QueryPathInfo => do_query_path_info(&mut state, &mut c2d, &mut d2c).await,
-                    Op::QueryValidDerivers => {
-                        do_query_valid_derivers(&mut state, &mut c2d, &mut d2c).await
-                    }
-                    Op::QueryDerivationOutputMap => {
-                        do_query_derivation_output_map(&mut state, &mut c2d, &mut d2c).await
-                    }
-                    Op::AddToStoreNar => do_add_to_store_nar(&mut state, &mut c2d, &mut d2c).await,
-                    Op::QueryMissing => do_query_missing(&mut state, &mut c2d, &mut d2c).await,
-                    Op::BuildPathsWithResults => {
-                        do_build_paths_with_results(&mut state, &mut c2d, &mut d2c).await
-                    }
-
-                    // We don't want to implement obsolete Ops.
-                    Op::ObsoleteQueryPathHash
-                    | Op::ObsoleteQueryReferences
-                    | Op::ObsoleteAddTextToStore
-                    | Op::ObsoleteExportPath
-                    | Op::ObsoleteQueryDeriver
-                    | Op::ObsoleteQueryDerivationOutputs
-                    | Op::ObsoleteImportPaths
-                    | Op::ObsoleteQueryDerivationOutputNames => {
-                        Err(anyhow!("{:?} is obsolete; this should never happen!", op))
-                    }
-
-                    // These Ops exist in the Nix codebase, but don't seem to be used in 2.13+.
-                    //
-                    // If you manage to trigger one of these, please open an issue and tell us:
-                    // 1. the nix version (`nix --version`), 2. the command that caused it.
-                    Op::HasSubstitutes
-                    | Op::QueryReferrers
-                    | Op::SyncWithGC
-                    | Op::FindRoots
-                    | Op::CollectGarbage
-                    | Op::QuerySubstitutablePathInfo
-                    | Op::QueryAllValidPaths
-                    | Op::QueryFailedPaths
-                    | Op::ClearFailedPaths
-                    | Op::QueryPathFromHashPart
-                    | Op::QuerySubstitutablePathInfos
-                    | Op::QueryValidPaths
-                    | Op::QuerySubstitutablePaths
-                    | Op::OptimiseStore
-                    | Op::VerifyStore
-                    | Op::BuildDerivation
-                    | Op::AddSignatures
-                    | Op::NarFromPath
-                    | Op::RegisterDrvOutput
-                    | Op::QueryRealisation
-                    | Op::AddMultipleToStore
-                    | Op::AddBuildLog => {
-                        // If the format string is any longer, rustfmt breaks for the whole block.
-                        Err(anyhow!(
-                            "{:?} is unimplemented -- this is a bug, please open an issue! {}",
-                            op,
-                            "https://codeberg.org/gorgon/gorgon/issues",
-                        ))
-                    }
-                }
-                .with_context(|| format!("Couldn't process Op: {:?}", op))?;
-                c2d.flush()
-                    .await
-                    .context("Couldn't flush writer after op")?;
-            }
-            None => {
-                debug!("Shutdown signal received, terminating...");
-                break;
-            }
-        }
-    }
-
-    debug!("[ Connection Terminated ]");
-    Ok(())
+struct BuildState {
+    build: entity::build::Model,
+    log: Option<TempFile>,
 }
 
-/// Process a set of interjections (eg. log lines, build progress) sent from the daemon.
-#[instrument(skip_all)]
-async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()> {
-    use async_tempfile::TempFile;
-    use entity::build::{self, Phase, PhaseList};
+/// Tracking wrapper for a Progress.
+struct TrackingProgress<'db, T: Send, E, P: Progress<T = T, Error = E>, HF: FnOnce(&T) + Send>
+where
+    anyhow::Error: From<E>,
+{
+    db: &'db Arc<DatabaseConnection>,
+    prog: P,
+    result_hook: HF,
 
-    struct BuildState {
-        build: build::Model,
-        log: Option<TempFile>,
-    }
+    // Currently active builds.
+    builds: HashMap<u64, BuildState>,
+}
 
-    // In-memory cache of active builds. Note that activity IDs are monotonic u64s with
-    // the PID of the daemon in the high 32 bits; not guaranteed unique between sessions.
-    let mut builds = HashMap::<u64, BuildState>::new();
+impl<'db, T: Send, E, P: Progress<T = T, Error = E>, HF: FnOnce(&T) + Send> Progress
+    for TrackingProgress<'db, T, E, P, HF>
+where
+    anyhow::Error: From<E>,
+{
+    type T = T;
+    type Error = anyhow::Error;
 
-    loop {
-        let inter = d2c
-            .take_interjection()
-            .await
-            .context("Couldn't read interjection")?;
-
-        match inter {
-            Interjection::StderrNext => {
-                let msg = d2c.take_string().await.context("Reading Message")?;
-                trace!(msg, "Message");
+    async fn next(&mut self) -> Result<Option<Stderr>, Self::Error> {
+        let v = self.prog.next().await.map_err(Into::into)?;
+        match &v {
+            None => trace!("End of queued stderr"),
+            Some(Stderr::Next(msg)) => trace!(msg, "Message"),
+            Some(Stderr::Error(NixError { level, msg, traces })) => {
+                trace!(?level, msg, ?traces, "Exception Thrown")
             }
-            Interjection::StderrLast => {
-                trace!("End of queued stderr");
-                break;
-            }
-            Interjection::StderrError => {
-                if state.since(26) {
-                    let typ = d2c.take_string().await.context("Reading Error Type")?;
-                    if typ != "Error" {
-                        bail!("STDERR_ERROR received with unknown type: {}", typ);
-                    }
-                    let lvl = d2c.take_verbosity().await.context("Reading Error Level")?;
-                    let name = d2c.take_string().await.context("Reading Error Name")?;
-                    let msg = d2c.take_string().await.context("Reading Error Message")?;
-                    let have_pos = d2c.take_u64_le().await.context("Reading Error have_pos")?;
-                    if have_pos != 0 {
-                        bail!("STDERR_ERROR has invalid have_pos: {}", have_pos);
-                    }
-                    let num_traces = d2c
-                        .take_u64_le()
-                        .await
-                        .context("Reading Error num_traces")?;
-                    let mut traces = Vec::with_capacity(num_traces.try_into().unwrap());
-                    for i in 0..num_traces {
-                        let have_pos = d2c
-                            .take_u64_le()
-                            .await
-                            .with_context(|| format!("Reading Error traces[{}].have_pos", i))?;
-                        if have_pos != 0 {
-                            bail!("STDERR_ERROR invalid traces[{}].have_pos: {}", i, have_pos);
-                        }
-                        traces.push(
-                            d2c.take_string()
-                                .await
-                                .with_context(|| format!("Reading Error traces[{}]", i)),
-                        );
-                    }
-
-                    trace!(typ, ?lvl, name, msg, ?traces, "Exception Thrown");
-                    return Err(anyhow!("{}", msg).context("Daemon sent Error"));
-                } else {
-                    bail!("STDERR_ERROR is only implemented for protocol version >= 25");
-                }
-            }
-
-            Interjection::StderrStartActivity => {
-                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
-                let level = d2c.take_verbosity().await.context("Reading Verbosity")?;
-                let kind = d2c
-                    .take_activity_type()
-                    .await
-                    .context("Reading ActivityType")?;
-                let s = d2c.take_string().await.context("Reading string")?;
-                let fields = d2c.take_log_fields().await.context("Reading fields")?;
-                let parent_id = d2c.take_u64_le().await.context("Reading Parent ID")?;
-                match kind {
-                    ActivityType::Build => {
-                        // cur_rounds and nr_rounds aren't used anymore, and the daemon will error
-                        // unless they're both 1. (They were for running a build multiple times.)
-                        let (name, machine_name, cur_rounds, nr_rounds) = (
-                            fields.get(0).and_then(|v| v.as_string()),
-                            fields.get(1).and_then(|v| v.as_string()),
-                            fields.get(2).and_then(|v| v.as_int()),
-                            fields.get(3).and_then(|v| v.as_int()),
-                        );
-                        trace!(
-                            act_id,
-                            ?level,
-                            s,
-                            name,
-                            machine_name,
-                            cur_rounds,
-                            nr_rounds,
-                            parent_id,
-                            "Start Activity: Build"
-                        );
-
-                        // Start tracking build progress.
-                        let build = build::ActiveModel {
-                            name: Set(name.cloned().unwrap_or_default()),
-                            machine_name: Set(machine_name.cloned().unwrap_or_default()),
-                            start: Set(Utc::now()),
-                            ..Default::default()
-                        };
-                        debug!(
-                            ?build.name,
-                            ?build.machine_name, "[{}] Build Started", act_id
-                        );
-                        builds.insert(
-                            act_id,
-                            BuildState {
-                                build: build.insert(&*state.db).await.context("Saving build")?,
-                                log: None,
-                            },
-                        );
-                    }
-                    _ => trace!(
+            Some(Stderr::StartActivity(StderrStartActivity {
+                act_id,
+                level,
+                kind,
+                s,
+                fields,
+                parent_id,
+            })) => match kind {
+                StderrActivityType::Build => {
+                    // cur_rounds and nr_rounds aren't used anymore, and the daemon will error
+                    // unless they're both 1. (They were for running a build multiple times.)
+                    let (name, machine_name, cur_rounds, nr_rounds) = (
+                        fields.get(0).and_then(|v| v.as_string()),
+                        fields.get(1).and_then(|v| v.as_string()),
+                        fields.get(2).and_then(|v| v.as_int()),
+                        fields.get(3).and_then(|v| v.as_int()),
+                    );
+                    trace!(
                         act_id,
                         ?level,
-                        ?kind,
                         s,
-                        ?fields,
+                        name,
+                        machine_name,
+                        cur_rounds,
+                        nr_rounds,
                         parent_id,
-                        "Start Activity"
-                    ),
-                }
-            }
+                        "Start Activity: Build"
+                    );
 
-            Interjection::StderrStopActivity => {
-                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
-                trace!(?act_id, "Stop Activity");
+                    // Start tracking build progress.
+                    let build = entity::build::ActiveModel {
+                        name: Set(name.cloned().unwrap_or_default()),
+                        machine_name: Set(machine_name.cloned().unwrap_or_default()),
+                        start: Set(Utc::now()),
+                        ..Default::default()
+                    };
+                    debug!(
+                        ?build.name,
+                        ?build.machine_name, "[{}] Build Started", act_id
+                    );
+                    self.builds.insert(
+                        *act_id,
+                        BuildState {
+                            build: build
+                                .insert(self.db.deref())
+                                .await
+                                .context("Saving build")?,
+                            log: None,
+                        },
+                    );
+                }
+                _ => trace!(
+                    act_id,
+                    ?level,
+                    ?kind,
+                    s,
+                    ?fields,
+                    parent_id,
+                    "Start Activity"
+                ),
+            },
+            Some(Stderr::StopActivity { act_id }) => {
+                trace!(act_id, "Stop Activity");
 
                 // Is this the end of a build we're tracking?
-                if let Some(bs) = builds.remove(&act_id) {
+                if let Some(bs) = self.builds.remove(&act_id) {
                     // Set the end time.
                     let now = Utc::now();
                     let build = {
-                        let mut build_: build::ActiveModel = bs.build.into();
+                        let mut build_: entity::build::ActiveModel = bs.build.into();
                         build_.end = Set(Some(now));
                         build_.temp_log_path = Set(None);
-                        build_.update(&*state.db).await.context("Saving build")?
+                        build_
+                            .update(self.db.deref())
+                            .await
+                            .context("Saving build")?
                     };
 
                     // Log the final phase too.
-                    if let Some(Phase(last_phase, started)) = build.start_phase.0.last() {
+                    if let Some(entity::build::Phase(last_phase, started)) =
+                        build.start_phase.0.last()
+                    {
                         debug!(t=?(now-started),"[{}] -> {} finished", act_id, last_phase);
                     }
                     debug!(?build.name,?build.machine_name,t=?(now-build.start), "[{}] Build Finished", act_id);
                 }
             }
-
-            Interjection::StderrResult => {
-                let act_id = d2c.take_u64_le().await.context("Reading Activity ID")?;
-                let kind = d2c.take_result_type().await.context("Reading ResultType")?;
-                let fields = d2c.take_log_fields().await.context("Reading fields")?;
+            Some(Stderr::Result(StderrResult {
+                act_id,
+                kind,
+                fields,
+            })) => {
                 match kind {
-                    ResultType::BuildLogLine => {
+                    StderrResultType::BuildLogLine => {
                         let msg = fields
                             .get(0)
                             .and_then(|v| v.as_string())
@@ -645,7 +426,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                         trace!(act_id, msg, "Result: BuildLogLine");
 
                         // Write it to the temporary log file.
-                        if let Some(bs) = builds.get_mut(&act_id) {
+                        if let Some(bs) = self.builds.get_mut(&act_id) {
                             // If we don't have a TempFile open for this build, open one.
                             if bs.log.is_none() {
                                 let log = TempFile::new_with_name(format!(
@@ -662,13 +443,17 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                                 debug!(act_id, path = log.file_path().to_str(), "Opened log file");
 
                                 bs.build = {
-                                    let mut build_: build::ActiveModel = bs.build.clone().into();
+                                    let mut build_: entity::build::ActiveModel =
+                                        bs.build.clone().into();
                                     build_.temp_log_path = Set(Some(log.file_path().to_str().ok_or_else(|| anyhow!(
-                                        "Temp log path for build #{} ({}) contains invalid UTF-8: {}", bs.build.id,
-                                        bs.build.name,
-                                        log.file_path().to_string_lossy()))?.into(),
-                                    ));
-                                    build_.update(&*state.db).await.context("Saving build")?
+                                                 "Temp log path for build #{} ({}) contains invalid UTF-8: {}", bs.build.id,
+                                                 bs.build.name,
+                                                 log.file_path().to_string_lossy()))?.into(),
+                                             ));
+                                    build_
+                                        .update(self.db.deref())
+                                        .await
+                                        .context("Saving build")?
                                 };
                                 bs.log = Some(log);
                             };
@@ -685,36 +470,42 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                             warn!(act_id, msg, "BuildLogLine on unknown build");
                         };
                     }
-                    ResultType::SetPhase => {
+                    StderrResultType::SetPhase => {
                         let phase = fields
                             .get(0)
                             .and_then(|v| v.as_string())
                             .ok_or_else(|| anyhow!("{:?} has no 'phase'", kind))?;
                         trace!(act_id, phase, "Result: SetPhase");
 
-                        if let Some(bs) = builds.get_mut(&act_id) {
+                        if let Some(bs) = self.builds.get_mut(&act_id) {
                             let now = Utc::now();
 
                             // If we just finished a phase, log that.
-                            if let Some(Phase(phase, started)) = bs.build.start_phase.0.last() {
+                            if let Some(entity::build::Phase(phase, started)) =
+                                bs.build.start_phase.0.last()
+                            {
                                 debug!(t=?(now-started),"[{}] -> {} finished", act_id, phase);
                             }
 
                             // Push it into the state list.
                             bs.build = {
-                                let mut build_: build::ActiveModel = bs.build.clone().into();
-                                build_.start_phase = Set(PhaseList({
+                                let mut build_: entity::build::ActiveModel =
+                                    bs.build.clone().into();
+                                build_.start_phase = Set(entity::build::PhaseList({
                                     let mut list = bs.build.start_phase.0.clone();
-                                    list.push(Phase(phase.clone(), now));
+                                    list.push(entity::build::Phase(phase.clone(), now));
                                     list
                                 }));
-                                build_.update(&*state.db).await.context("Saving build")?
+                                build_
+                                    .update(self.db.deref())
+                                    .await
+                                    .context("Saving build")?
                             }
                         } else {
                             warn!(act_id, phase, "SetPhase on unknown build");
                         };
                     }
-                    ResultType::Progress => {
+                    StderrResultType::Progress => {
                         let done = fields
                             .get(0)
                             .and_then(|v| v.as_int())
@@ -733,7 +524,7 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                             .ok_or_else(|| anyhow!("{:?} has no 'failed'", kind))?;
                         trace!(act_id, done, expected, running, failed, "Result: Progress");
                     }
-                    ResultType::SetExpected => {
+                    StderrResultType::SetExpected => {
                         let state = fields
                             .get(0)
                             .and_then(|v| v.as_activity_type())
@@ -747,428 +538,354 @@ async fn interjections<'s>(d2c: &mut Stream<'s>, state: &mut State) -> Result<()
                     _ => trace!(act_id, ?kind, ?fields, "Result"),
                 }
             }
-            _ => bail!("Daemon sent unimplemented interjection: {:?}", inter),
         }
-        d2c.flush()
-            .await
-            .context("Couldn't flush writer after interjection")?;
+        Ok(v)
     }
-    d2c.flush()
+
+    async fn result(mut self) -> Result<Self::T, Self::Error> {
+        while self.next().await?.is_some() {}
+        self.prog
+            .result()
+            .await
+            .tap_ok(|v| (self.result_hook)(v))
+            .map_err(Into::into)
+    }
+}
+
+struct ProxyStore<ST: Store + Send + Sync>
+where
+    ST::Error: 'static + std::error::Error,
+{
+    store: ST,
+    db: Arc<DatabaseConnection>,
+}
+
+impl<ST: Store + Send + Sync> ProxyStore<ST>
+where
+    ST::Error: 'static + std::error::Error,
+{
+    async fn track<'db, T: Send, P: Progress<T = T, Error = ST::Error>, HF: FnOnce(&T) + Send>(
+        db: &'db Arc<DatabaseConnection>,
+        pr: Result<P, ST::Error>,
+        result_hook: HF,
+    ) -> Result<TrackingProgress<T, ST::Error, P, HF>, anyhow::Error> {
+        pr.map(|prog| TrackingProgress {
+            db,
+            prog,
+            result_hook,
+            builds: HashMap::<_, _>::new(),
+        })
+        .map_err(Into::into)
+    }
+}
+
+impl<ST: Store + Send + Sync> Store for ProxyStore<ST>
+where
+    ST::Error: 'static + std::error::Error,
+{
+    type Error = anyhow::Error;
+
+    /// Returns whether a store path is valid.
+    #[instrument(skip(self))]
+    async fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> Result<impl Progress<T = bool, Error = Self::Error>, Self::Error> {
+        debug!("-> IsValidPath");
+        Self::track(&self.db, self.store.is_valid_path(path).await, |valid| {
+            debug!(valid, "<- IsValidPath");
+        })
         .await
-        .context("Couldn't flush writer after interjections")?;
-    Ok(())
-}
+    }
 
-#[instrument(skip_all)]
-async fn do_is_valid_path<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing IsValidPath");
+    /// Adds a file to the store.
+    #[instrument(skip(self))]
+    async fn add_to_store<
+        SN: AsRef<str> + Send + Sync + Debug,
+        SC: AsRef<str> + Send + Sync + Debug,
+        Refs,
+        R,
+    >(
+        &mut self,
+        name: SN,
+        cam_str: SC,
+        refs: Refs,
+        repair: bool,
+        source: R,
+    ) -> Result<impl Progress<T = (String, PathInfo), Error = Self::Error>, Self::Error>
+    where
+        Refs: IntoIterator + Send + Debug,
+        Refs::IntoIter: ExactSizeIterator + Send,
+        Refs::Item: AsRef<str> + Send + Sync,
+        R: AsyncReadExt + Unpin + Send + Debug,
+    {
+        debug!("-> AddToStore");
+        Self::track(
+            &self.db,
+            self.store
+                .add_to_store(name, cam_str, refs, repair, source)
+                .await,
+            |(name, pi)| debug!(name, ?pi, "<- AddToStore"),
+        )
+        .await
+    }
 
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent IsValidPath");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
+    /// Returns whether QuerySubstitutablePathInfos would return anything.
+    #[instrument(skip(self))]
+    async fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> Result<impl Progress<T = bool, Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> HasSubstitute");
+        Self::track(&self.db, self.store.has_substitutes(path).await, |has| {
+            debug!(has, "<- HasSubstitute")
+        })
+        .await
+    }
 
-    interjections(d2c, state).await.context("Interjections")?;
+    /// Builds the specified paths.
+    #[instrument(skip(self))]
+    async fn build_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        mode: BuildMode,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        debug!(?paths, ?mode, "-> BuildPaths");
+        Self::track(&self.db, self.store.build_paths(paths, mode).await, |_| {}).await
+    }
 
-    let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
-    debug!(is_valid, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
+    /// Ensure the specified store path exists.
+    #[instrument(skip(self))]
+    async fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> EnsurePath");
+        Self::track(&self.db, self.store.ensure_path(path).await, |_| {}).await
+    }
 
-    Ok(())
-}
+    /// Creates a temporary GC root, which persists until the daemon restarts.
+    #[instrument(skip(self))]
+    async fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> AddTempRoot");
+        Self::track(&self.db, self.store.add_temp_root(path).await, |_| {}).await
+    }
 
-#[instrument(skip_all)]
-async fn do_add_to_store<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    if state.since(25) {
-        trace!("Processing AddToStore (v25)");
-        let name = c2d.take_string().await.context("Reading 'name'")?;
-        let cam_str = c2d.take_string().await.context("Reading 'camStr'")?;
-        let refs = c2d.take_strings().await.context("Reading 'refs'")?;
-        let repair = c2d.take_bool().await.context("Reading 'repair'")?;
-        debug!(name, cam_str, ?refs, repair, "-> Client sent AddToStore");
+    /// Creates a persistent GC root. This is what's normally meant by a GC root.
+    #[instrument(skip(self))]
+    async fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: Path,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> AddIndirectRoot");
+        Self::track(&self.db, self.store.add_indirect_root(path).await, |_| {}).await
+    }
 
-        let (mut num, mut total_len) = (0, 0);
-        loop {
-            let len = c2d
-                .copy_frame()
-                .await
-                .with_context(|| format!("Copying chunks[{}]", num))?;
-            if len == 0 {
-                trace!(num, "-> End of chunked transfer");
-                break;
+    /// Returns the (link, target) of all known GC roots.
+    #[instrument(skip(self))]
+    async fn find_roots(
+        &mut self,
+    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>, Self::Error> {
+        debug!("-> FindRoots");
+        Self::track(&self.db, self.store.find_roots().await, |roots| {
+            debug!("<- FindRoots");
+            for (link, target) in roots {
+                debug!(link, target, "  <- FindRoots.root[]");
             }
-            trace!(num, len, "-> Copied chunk");
-            total_len += len;
-            num += 1;
-        }
+        })
+        .await
+    }
+
+    /// Applies client options. This changes the behaviour of future commands.
+    #[instrument(skip(self))]
+    async fn set_options(
+        &mut self,
+        opts: ClientSettings,
+    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
         debug!(
-            len = total_len,
-            chunks = num,
-            "-> Client sent file contents"
+            opts.keep_failed,
+            opts.keep_going,
+            opts.try_fallback,
+            ?opts.verbosity,
+            opts.max_build_jobs,
+            opts.max_silent_time,
+            opts.verbose_build,
+            opts.build_cores,
+            opts.use_substitutes,
+            ?opts.overrides,
+            "-> SetOptions"
         );
-        c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-        // Process logs from the daemon.
-        interjections(d2c, state)
-            .await
-            .context("Couldn't process interjections")?;
-
-        let path = d2c.take_string().await.context("Reading 'path'")?;
-        let pathinfo = d2c.take_pathinfo(&state).await.context("Reading PathInfo");
-        debug!(path, ?pathinfo, "<- Daemon sent PathInfo");
-        d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-        Ok(())
-    } else {
-        bail!("AddToStore is only implemented for protocol version >= 25");
-    }
-}
-
-#[instrument(skip_all)]
-async fn do_build_paths<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing BuildPaths");
-
-    let paths = c2d.take_strings().await.context("Reading 'paths'")?;
-    let mode = c2d
-        .take_u64_le_if(state.since(15))
-        .await
-        .context("Reading 'mode'")?;
-    debug!(?paths, ?mode, "-> Client sent BuildPaths");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state)
-        .await
-        .context("Monitoring build (interjections)")?;
-
-    let is_valid = d2c.take_bool().await.context("Reading 'is_valid'")?;
-    debug!(is_valid, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_ensure_path<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing EnsurePath");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent EnsurePath");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let status = d2c.take_bool().await.context("Reading 'status'")?;
-    debug!(status, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_add_temp_root<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing AddTempRoot");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent AddTempRoot");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let status = d2c.take_bool().await.context("Reading 'status'")?;
-    debug!(status, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_add_indirect_root<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing AddIndirectRoot");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent AddIndirectRoot");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let status = d2c.take_bool().await.context("Reading 'status'")?;
-    debug!(status, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_set_options<'s>(
-    _state: &State,
-    c2d: &mut Stream<'s>,
-    _d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing SetOptions");
-
-    let keep_failed = c2d.take_u64_le().await.context("keepFailed")?;
-    let keep_going = c2d.take_u64_le().await.context("keepGoing")?;
-    let try_fallback = c2d.take_u64_le().await.context("tryFallback")?;
-    let verbosity = c2d.take_verbosity().await.context("verbosity")?;
-    let max_build_jobs = c2d.take_u64_le().await.context("maxBuildJobs")?;
-    let max_silent_time = c2d.take_u64_le().await.context("maxSilentTime")?;
-    c2d.take_u64_le()
-        .await
-        .tap_ok(|v| {
-            if *v != 1 {
-                warn!(v, "Client sent obsolete option: useBuildHook")
-            }
-        })
-        .context("(obsolete) useBuildHook")?;
-    let verbose_build = c2d.take_verbosity().await.context("verboseBuild")?;
-    c2d.take_u64_le()
-        .await
-        .tap_ok(|v| {
-            if *v != 0 {
-                warn!(v, "Client sent obsolete option: logType")
-            }
-        })
-        .context("(obsolete) logType")?;
-    c2d.take_u64_le()
-        .await
-        .tap_ok(|v| {
-            if *v != 0 {
-                warn!(v, "Client sent obsolete option: printBuildTrace")
-            }
-        })
-        .context("(obsolete) printBuildTrace")?;
-    let build_cores = c2d.take_u64_le().await.context("buildCores")?;
-    let use_substitutes = c2d.take_u64_le().await.context("useSubstitutes")?;
-    let overrides = c2d.take_string_pairs().await.context("overrides")?;
-
-    debug!(
-        keepFailed = keep_failed,
-        keepGoing = keep_going,
-        tryFallback = try_fallback,
-        ?verbosity,
-        maxBuildJobs = max_build_jobs,
-        maxSilentTime = max_silent_time,
-        verboseBuild = ?verbose_build,
-        buildCores = build_cores,
-        useSubstitutes = use_substitutes,
-        ?overrides,
-        "SetOptions"
-    );
-
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_query_path_info<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing QueryPathInfo");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent QueryPathInfo");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let is_valid = d2c
-        .take_bool_if(state.since(17))
-        .await
-        .context("Reading 'is_valid'")?
-        .unwrap_or(true);
-    let pathinfo = d2c
-        .take_pathinfo_if(&state, is_valid)
-        .await
-        .context("Reading 'pathinfo'")?;
-    debug!(?is_valid, ?pathinfo, "<- Daemon replied");
-
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_query_valid_derivers<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing QueryValidDerivers");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent QueryValidDerivers");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let derivers = d2c.take_strings().await.context("Reading 'derivers'")?;
-    debug!(?derivers, "<- Daemon replied");
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_query_derivation_output_map<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing QueryDerivationOutputMap");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    debug!(path, "-> Client sent QueryDerivationOutputMap");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    d2c.take_string_pairs()
-        .await
-        .tap_ok(|pis| {
-            for (out, path) in pis.iter() {
-                debug!(out, path, "<- Daemon sent PathInfo");
-            }
-        })
-        .context("Couldn't read StorePaths")?;
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_add_to_store_nar<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing AddToStoreNar");
-
-    let path = c2d.take_string().await.context("Reading 'path'")?;
-    let pinfo = c2d.take_pathinfo(&state).await.context("Reading 'pinfo'")?;
-    let repair = c2d.take_bool().await.context("Reading 'repair'")?;
-    let no_check_sigs = c2d.take_bool().await.context("Reading 'no_check_sigs'")?;
-    debug!(
-        path,
-        ?pinfo,
-        repair,
-        no_check_sigs,
-        "-> Client sent AddToStoreNar"
-    );
-
-    if state.since(23) {
-        let (mut num, mut total_len) = (0, 0);
-        loop {
-            let len = c2d
-                .copy_frame()
-                .await
-                .with_context(|| format!("Copying chunks[{}]", num))?;
-            if len == 0 {
-                trace!(num, "-> End of chunked transfer");
-                break;
-            }
-            trace!(num, len, "-> Copied chunk");
-            total_len += len;
-            num += 1;
-        }
-        debug!(
-            len = total_len,
-            chunks = num,
-            "-> Client sent file contents"
-        );
-        c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-        interjections(d2c, state).await.context("Interjections")?;
-    } else {
-        bail!("AddToStoreNar is only implemented for protocol version >= 23");
+        Self::track(&self.db, self.store.set_options(opts).await, |_| {}).await
     }
 
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_query_missing<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    trace!("Processing QueryMissing");
-
-    let drv_paths = c2d.take_strings().await.context("Reading drv_paths")?;
-    debug!(?drv_paths, "-> Client sent QueryMissing");
-    c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-    interjections(d2c, state).await.context("Interjections")?;
-
-    let will_build = d2c.take_strings().await.context("Reading will_build")?;
-    let will_subst = d2c.take_strings().await.context("Reading will_subst")?;
-    let unknown = d2c.take_strings().await.context("Reading unknown")?;
-
-    let download_size = d2c.take_u64_le().await.context("Reading download_size")?;
-    let nar_size = d2c.take_u64_le().await.context("Reading nar_size")?;
-    debug!(
-        ?will_build,
-        ?will_subst,
-        ?unknown,
-        download_size,
-        nar_size,
-        "<- Daemon replied"
-    );
-    d2c.flush().await.context("Flushing Daemon-to-Client")?;
-
-    Ok(())
-}
-
-#[instrument(skip_all)]
-async fn do_build_paths_with_results<'s>(
-    state: &mut State,
-    c2d: &mut Stream<'s>,
-    d2c: &mut Stream<'s>,
-) -> Result<()> {
-    if state.since(25) {
-        trace!("Processing BuildPathsWithResults (v34)");
-
-        let paths = c2d.take_strings().await.context("Reading 'paths'")?;
-        let build_mode = c2d.take_u64_le().await.context("Reading 'build_mode'")?;
-        debug!(?paths, build_mode, "-> Client sent BuildPathsWithResults");
-        c2d.flush().await.context("Flushing Client-to-Daemon")?;
-
-        interjections(d2c, state).await.context("Interjections")?;
-
-        let results = d2c
-            .take_keyed_build_results()
-            .await
-            .context("Reading 'results'")?;
-        debug!(?results, "<- Daemon replied");
-        d2c.flush().await.context("Flushing Daemon-to-Client")?;
-    } else {
-        bail!("AddToStore is only implemented for protocol version >= 25");
+    /// Returns a PathInfo struct for the given path.
+    #[instrument(skip(self))]
+    async fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: S,
+    ) -> Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> QueryPathInfo");
+        Self::track(&self.db, self.store.query_pathinfo(path).await, |pi| {
+            debug!(?pi, "<- QueryPathInfo")
+        })
+        .await
     }
 
-    Ok(())
+    /// Returns which of the passed paths are valid.
+    #[instrument(skip(self))]
+    async fn query_valid_paths<Paths>(
+        &mut self,
+        paths: Paths,
+        use_substituters: bool,
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        debug!(?paths, use_substituters, "-> QueryValidPaths");
+        Self::track(
+            &self.db,
+            self.store.query_valid_paths(paths, use_substituters).await,
+            |valids| {
+                debug!("<- QueryValidPaths");
+                for valid in valids {
+                    debug!(valid, "  <- QueryValidPaths.valids[]");
+                }
+            },
+        )
+        .await
+    }
+
+    /// Returns paths which can be substituted.
+    #[instrument(skip(self))]
+    async fn query_substitutable_paths<Paths>(
+        &mut self,
+        paths: Paths,
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    where
+        Paths: IntoIterator + Send + Debug,
+        Paths::IntoIter: ExactSizeIterator + Send,
+        Paths::Item: AsRef<str> + Send + Sync,
+    {
+        debug!(?paths, "-> QuerySubstitutablePaths");
+        Self::track(
+            &self.db,
+            self.store.query_substitutable_paths(paths).await,
+            |subs| {
+                debug!("<- QuerySubstitutablePaths");
+                for sub in subs {
+                    debug!(sub, "  <- QuerySubstitutablePaths.subs[]");
+                }
+            },
+        )
+        .await
+    }
+
+    /// Returns a list of valid derivers for a path.
+    /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
+    #[instrument(skip(self))]
+    async fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: S,
+    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> QueryValidDerivers");
+        Self::track(
+            &self.db,
+            self.store.query_valid_derivers(path).await,
+            |drvs| {
+                debug!("<- QueryValidDerivers");
+                for drv in drvs {
+                    debug!(drv, "  <- QueryValidDerivers.drvs[]");
+                }
+            },
+        )
+        .await
+    }
+
+    /// Takes a list of paths and queries which would be built, substituted or unknown,
+    /// along with an estimate of the cumulative download and NAR sizes.
+    #[instrument(skip(self))]
+    async fn query_missing<Ps>(
+        &mut self,
+        paths: Ps,
+    ) -> Result<impl Progress<T = QueryMissing, Error = Self::Error>, Self::Error>
+    where
+        Ps: IntoIterator + Send + Debug,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync,
+    {
+        debug!(?paths, "-> QueryMissing");
+        Self::track(&self.db, self.store.query_missing(paths).await, |missing| {
+            debug!(?missing, "<- QueryMissing");
+        })
+        .await
+    }
+
+    /// Returns a map of (output, store path) for the given derivation.
+    #[instrument(skip(self))]
+    async fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
+        &mut self,
+        path: P,
+    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>, Self::Error> {
+        debug!(?path, "-> QueryDerivationOutputMap");
+        Self::track(
+            &self.db,
+            self.store.query_derivation_output_map(path).await,
+            |outputs| {
+                debug!("<- QueryDerivationOutputMap");
+                for (name, path) in outputs {
+                    debug!(name, path, "  <- QueryDerivationOutputMap.outputs[]");
+                }
+            },
+        )
+        .await
+    }
+
+    #[instrument(skip(self))]
+    async fn build_paths_with_results<Ps>(
+        &mut self,
+        paths: Ps,
+        mode: BuildMode,
+    ) -> Result<impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>, Self::Error>
+    where
+        Ps: IntoIterator + Send + Debug,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync,
+    {
+        debug!(?paths, ?mode, "-> BuildPathsWithResults");
+        Self::track(
+            &self.db,
+            self.store.build_paths_with_results(paths, mode).await,
+            |results| {
+                debug!("<- BuildPathsWithResults");
+                for (path, result) in results {
+                    debug!(
+                        path,
+                        ?result.status,
+                        result.error_msg,
+                        result.times_built,
+                        result.is_non_deterministic,
+                        ?result.start_time,
+                        ?result.stop_time,
+                         "  <- BuildPathsWithResults.results[]");
+                    for (name, path) in &result.built_outputs {
+                        debug!(
+                            name,
+                            path, "    <- BuildPathsWithResults.results[].outputs[]"
+                        );
+                    }
+                }
+            },
+        )
+        .await
+    }
 }
