@@ -47,7 +47,7 @@ pub enum Op {
     SyncWithGC = 13,
     FindRoots = 14,
     SetOptions = 19,
-    CollectGarbage = 20,
+    CollectGarbage = 20, // TODO: Can't be safely cargo tested on host daemon+store.
     QuerySubstitutablePathInfo = 21,
     QueryAllValidPaths = 23,
     QueryFailedPaths = 24,
@@ -58,8 +58,8 @@ pub enum Op {
     QueryValidPaths = 31,
     QuerySubstitutablePaths = 32,
     QueryValidDerivers = 33,
-    OptimiseStore = 34,
-    VerifyStore = 35,
+    OptimiseStore = 34, // TODO: Can't be safely cargo tested on host daemon+store.
+    VerifyStore = 35,   // TODO: Can't be safely cargo tested on host daemon+store.
     BuildDerivation = 36,
     AddSignatures = 37,
     NarFromPath = 38,
