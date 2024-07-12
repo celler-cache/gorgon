@@ -55,7 +55,7 @@ pkgs.testers.nixosTest ({ lib, ... }: {
         machine.wait_for_unit("nix-supervisor")
 
         # Check the current nix version.
-        machine.succeed("nix --version");
+        print(machine.succeed("nix --version"));
 
         # Regular, old-fashioned CLI.
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-build '<nixpkgs>' -A hello >&2")
