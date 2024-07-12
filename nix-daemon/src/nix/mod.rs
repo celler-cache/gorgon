@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+//! Interfaces to nix-daemon (or compatible) Stores.
+
 pub mod wire;
 
 use crate::{
@@ -57,6 +59,7 @@ impl Proto {
     }
 }
 
+/// Internal Progress implementation used by DaemonStore.
 pub struct DaemonProgress<'s, C, T: Send, F, FF>
 where
     C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
@@ -90,8 +93,6 @@ where
     type T = T;
     type Error = Error;
 
-    /// Returns the next Stderr message, or None after all have been consumed.
-    /// This behaves like a fused iterator, and keeps returning None after that.
     async fn next(&mut self) -> Result<Option<Stderr>> {
         if self.fuse {
             Ok(None)
@@ -107,14 +108,12 @@ where
         }
     }
 
-    /// Discards any remaining Stderr messages and proceeds.
     async fn result(mut self) -> Result<Self::T> {
         while let Some(_) = self.next().await? {}
         (self.then)(self.store).await
     }
 }
 
-/// Builder for a DaemonStore.
 #[derive(Debug, Default)]
 pub struct DaemonStoreBuilder {
     // This will do things in the future.
@@ -126,6 +125,17 @@ impl DaemonStoreBuilder {
     /// It's up to the caller that the connection is in a state to begin a nix handshake, eg.
     /// it behaves like a fresh connection to the daemon socket - if this is a connection through
     /// a proxy, any proxy handshakes should already have taken place, etc.
+    ///
+    /// ```no_run
+    /// use tokio::net::UnixStream;
+    /// use nix_daemon::nix::DaemonStore;
+    ///
+    /// # async {
+    /// let conn = UnixStream::connect("/nix/var/nix/daemon-socket/socket").await?;
+    /// let store = DaemonStore::builder().init(conn).await?;
+    /// # Ok::<_, nix_daemon::Error>(())
+    /// # };
+    /// ```
     pub async fn init<C: AsyncReadExt + AsyncWriteExt + Unpin>(
         self,
         conn: C,
@@ -140,6 +150,17 @@ impl DaemonStoreBuilder {
     }
 
     /// Connects to a Nix daemon via a unix socket. The path is usually `/nix/var/nix/daemon-socket/socket`.
+    ///
+    /// ```no_run
+    /// use nix_daemon::{Store, Progress, nix::DaemonStore};
+    ///
+    /// # async {
+    /// let store = DaemonStore::builder()
+    ///     .connect_unix("/nix/var/nix/daemon-socket/socket")
+    ///     .await?;
+    /// # Ok::<_, nix_daemon::Error>(())
+    /// # };
+    /// ```
     pub async fn connect_unix<P: AsRef<std::path::Path>>(
         self,
         path: P,
@@ -148,15 +169,30 @@ impl DaemonStoreBuilder {
     }
 }
 
-/// Store backed by a nix-daemon.
+/// Store backed by a `nix-daemon` (or compatible store).
+///
+/// ```no_run
+/// use nix_daemon::{Store, Progress, nix::DaemonStore};
+///
+/// # async {
+/// let mut store = DaemonStore::builder()
+///     .connect_unix("/nix/var/nix/daemon-socket/socket")
+///     .await?;
+///
+/// let is_valid_path = store.is_valid_path("/nix/store/...").await?.result().await?;
+/// # Ok::<_, nix_daemon::Error>(())
+/// # };
+/// ```
 #[derive(Debug)]
 pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
     conn: C,
     buffer: [u8; 1024],
+    /// Negotiated protocol version.
     pub proto: Proto,
 }
 
 impl DaemonStore<UnixStream> {
+    /// Returns a Builder.
     pub fn builder() -> DaemonStoreBuilder {
         DaemonStoreBuilder::default()
     }
@@ -224,9 +260,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin> DaemonStore<C> {
 impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     type Error = Error;
 
-    // FIXME: The daemon expects /nix/store/foo, not /nix/store/foo/bin/bar.
-    // In the nix codebase, libstore chops the latter into the former before making the
-    // call, but I'm unsure of how to do it here.
     #[instrument(skip(self))]
     async fn is_valid_path<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
@@ -243,7 +276,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }))
     }
 
-    /// Returns whether QuerySubstitutablePathInfos would return anything.
     #[instrument(skip(self))]
     async fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
@@ -260,7 +292,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }))
     }
 
-    /// Adds a file to the store.
     #[instrument(skip(self, source))]
     async fn add_to_store<
         SN: AsRef<str> + Send + Sync + Debug,
@@ -455,7 +486,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }))
     }
 
-    /// Returns which of the passed paths are valid.
     async fn query_valid_paths<Paths>(
         &mut self,
         paths: Paths,
@@ -492,9 +522,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         }
     }
 
-    /// Returns paths which can be substituted.
-    ///
-    /// Trigger with: $ nix-env --query -s
     #[instrument(skip(self))]
     async fn query_substitutable_paths<Paths>(
         &mut self,
@@ -653,7 +680,6 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 }
 
-/// Builder for a DaemonProtocolAdapter.
 #[derive(Debug)]
 pub struct DaemonProtocolAdapterBuilder<'s, S: Store> {
     pub store: &'s mut S,
@@ -688,6 +714,35 @@ impl<'s, S: Store> DaemonProtocolAdapterBuilder<'s, S> {
     }
 }
 
+/// Handles an incoming connection using the `nix-daemon` protocol, and forwards calls to
+/// a Store implementation.
+///
+/// ```no_run
+/// use tokio::net::UnixListener;
+/// use nix_daemon::nix::{DaemonStore, DaemonProtocolAdapter};
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), nix_daemon::Error> {
+///     // Accept a connection.
+///     let listener = UnixListener::bind("/tmp/nix-proxy.sock")?;
+///     let (conn, _addr) = listener.accept().await?;
+///
+///     // Connect to the real store.
+///     let mut store = DaemonStore::builder()
+///         .connect_unix("/nix/var/nix/daemon-socket/socket")
+///         .await?;
+///
+///     // Proxy the connection to it.
+///     let (cr, cw) = conn.into_split();
+///     let mut adapter = DaemonProtocolAdapter::builder(&mut store)
+///         .adopt(cr, cw)
+///         .await?;
+///     Ok(adapter.run().await?)
+/// }
+/// ```
+///
+/// See [nix-supervisor](https://codeberg.org/gorgon/gorgon/src/branch/main/nix-supervisor) for
+/// a more advanced example of how to use this (with a custom Store implementation).
 pub struct DaemonProtocolAdapter<'s, S: Store, R, W>
 where
     R: AsyncReadExt + Unpin + Send + Debug,
@@ -695,7 +750,8 @@ where
 {
     r: R,
     w: W,
-    pub store: &'s mut S,
+    store: &'s mut S,
+    /// Negotiated protocol version.
     pub proto: Proto,
 }
 
@@ -783,6 +839,7 @@ where
         Ok(Self { r, w, store, proto })
     }
 
+    /// Runs the connection until the client disconnects. TODO: Cancellation.
     pub async fn run(&mut self) -> Result<(), S::Error> {
         loop {
             match wire::read_op(&mut self.r).await {

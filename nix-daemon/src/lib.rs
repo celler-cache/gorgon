@@ -2,6 +2,15 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+//! This library exposes an interface for directly talking to a [Nix](https://nixos.org/)
+//! daemon.
+//!
+//! The main trait is `Store`, which is implemented by `nix::DaemonStore`, but deliberately
+//! written to be able to support transports other than the CppNix daemon protocol.
+//!
+//! You can also implement `Store` yourself and use `nix::DaemonProtocolAdapter` to expose it
+//! to `nix-daemon` protocol speaking clients.
+
 pub mod nix;
 
 use chrono::{DateTime, Utc};
@@ -42,7 +51,7 @@ pub enum Error {
     IO(#[from] std::io::Error),
 }
 
-/// A thrown exception from the nix-daemon side.
+/// A thrown exception from the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NixError {
     pub level: Verbosity,
@@ -60,9 +69,7 @@ impl std::fmt::Display for NixError {
     }
 }
 
-/// Real-time logging data returned from an in-progress operation.
-///
-/// See the Progress trait.
+/// Real-time logging data returned from a `Progress`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stderr {
     /// A plain line of stderr output.
@@ -77,7 +84,7 @@ pub enum Stderr {
     Result(StderrResult),
 }
 
-/// Type of an StderrActivity.
+/// Type of an `StderrActivity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrActivityType {
@@ -106,7 +113,7 @@ impl From<TryFromPrimitiveError<StderrActivityType>> for Error {
 /// TODO: Users should not have to fish data out of the .kind-specific .fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrStartActivity {
-    /// ID of the activity. The same act_id is passed in StderrStopActivity and StderrResult.
+    /// Activity ID. The same act_id is passed in `StderrStopActivity` and `StderrResult`.
     pub act_id: u64,
     /// Log level of this activity.
     pub level: Verbosity,
@@ -121,7 +128,7 @@ pub struct StderrStartActivity {
     pub parent_id: u64,
 }
 
-/// Type of a StderrResult.
+/// Type of a `StderrResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrResultType {
@@ -140,12 +147,12 @@ impl From<TryFromPrimitiveError<StderrResultType>> for Error {
     }
 }
 
-/// Notification that a result of some kind (see StderrResultType) has been produced.
+/// Notification that a result of some kind (see `StderrResultType`) has been produced.
 ///
 /// TODO: Users should not have to fish data out of the .kind-specific .fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrResult {
-    /// ID of the activity. The same act_id is passed in StderrStartActivity and StderrStopActivity.
+    /// Activity ID. The same act_id is passed in `StderrStartActivity` and `StderrStopActivity`.
     pub act_id: u64,
     /// Type of the activity.
     pub kind: StderrResultType,
@@ -154,7 +161,7 @@ pub struct StderrResult {
     pub fields: Vec<StderrField>,
 }
 
-/// A raw Field used in StderrStartActivity and StderrResult.
+/// A raw Field used in `StderrStartActivity` and `StderrResult`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StderrField {
     Int(u64),
@@ -184,7 +191,7 @@ impl StderrField {
     }
 }
 
-/// Verbosity of a Stderr.
+/// Verbosity of a `Stderr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Verbosity {
@@ -203,7 +210,7 @@ impl From<TryFromPrimitiveError<Verbosity>> for Error {
     }
 }
 
-/// BuildMode passed to Store.build_paths() and Store.build_paths_with_results().
+/// BuildMode passed to `Store.build_paths()` and `Store.build_paths_with_results()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum BuildMode {
@@ -217,7 +224,7 @@ impl From<TryFromPrimitiveError<BuildMode>> for Error {
     }
 }
 
-/// Status code for a BuildResult, returned from Store.build_paths_with_results().
+/// Status code for a `BuildResult`, returned from `Store.build_paths_with_results()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum BuildResultStatus {
@@ -246,7 +253,7 @@ impl From<TryFromPrimitiveError<BuildResultStatus>> for Error {
     }
 }
 
-/// Status code for a BuildResult, returned from Store.build_paths_with_results().
+/// Status code for a BuildResult, returned from `Store.build_paths_with_results()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildResult {
     /// Status code, see BuildResultStatus.
@@ -262,7 +269,7 @@ pub struct BuildResult {
     pub built_outputs: HashMap<String, String>,
 }
 
-/// Client settings passed to Store.set_options().
+/// Client settings passed to `Store.set_options()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub keep_failed: bool,
@@ -309,25 +316,41 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
-/// An in-progress operation, which may produces a series of Stderr status updates before finishing.
+/// An in-progress operation, which may produces a series of `Stderr`s before returning.
 ///
 /// All functions on the Store trait return these wrappers. If you just want the final result, not
 /// play-by-play updates on eg. log output or paths built:
 ///
 /// ```no_run
+/// use nix_daemon::{Store, Progress, nix::DaemonStore};
+/// # async {
+/// # let mut store = DaemonStore::builder()
+/// #     .connect_unix("/nix/var/nix/daemon-socket/socket")
+/// #     .await?;
+/// #
 /// let is_valid_path = store.is_valid_path("/nix/store/...").await?.result().await?;
+/// # Ok::<_, nix_daemon::Error>(())
+/// # };
 /// ```
 ///
 /// Otherwise, if you are interested in (some of) the progress updates:
 ///
 /// ```no_run
-/// let prog = store.is_valid_path("/nix/store/...").await?;
-/// while let Some(stderr) = prog.next().await {
+/// use nix_daemon::{Store, Progress, nix::DaemonStore};
+/// # async {
+/// # let mut store = DaemonStore::builder()
+/// #     .connect_unix("/nix/var/nix/daemon-socket/socket")
+/// #     .await?;
+/// #
+/// let mut prog = store.is_valid_path("/nix/store/...").await?;
+/// while let Some(stderr) = prog.next().await? {
 ///     match stderr {
-///         // ...
+///         _ => todo!(),
 ///     }
 /// }
 /// let is_valid_path = prog.result().await?;
+/// # Ok::<_, nix_daemon::Error>(())
+/// # };
 /// ```
 pub trait Progress: Send {
     type T: Send;
@@ -342,7 +365,7 @@ pub trait Progress: Send {
     fn result(self) -> impl Future<Output = Result<Self::T, Self::Error>> + Send;
 }
 
-/// Helper methods for Progress.
+/// Helper methods for `Progress`.
 pub trait ProgressExt: Progress {
     /// Calls `f()` for each message returned from `self.next()`, then `self.result()`.
     // FIXME: This is a bad name and conflicts with the tap crate.
@@ -375,7 +398,9 @@ impl<P: Progress> ProgressExt for P {
     }
 }
 
-/// Interface to a Nix store.
+/// Generic interface to a Nix store.
+///
+/// See `nix::DaemonStore` for an implementation that talks to a CppNix (compatible) daemon.
 pub trait Store {
     type Error: From<Error> + Send + Sync;
 
@@ -536,7 +561,7 @@ pub trait Store {
         Ps::Item: AsRef<str> + Send + Sync;
 }
 
-/// Return value for Store.query_missing().
+/// Return value for `Store.query_missing()`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Missing {
     /// Paths that will be built.

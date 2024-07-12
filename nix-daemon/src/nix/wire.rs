@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+//! Low-level helpers for the nix-daemon wire format.
+
 use crate::{
     nix::Proto, BuildMode, BuildResult, BuildResultStatus, ClientSettings, Error, NixError,
     PathInfo, Result, ResultExt, Stderr, StderrField, StderrResult, StderrStartActivity, Verbosity,
@@ -73,13 +75,13 @@ pub enum Op {
     BuildPathsWithResults = 46,
 
     /// Obsolete since Nix 2.4, use AddToStore.
-    /// https://github.com/NixOS/nix/commit/c602ebfb34de3626fa0b9110face6ea4b171ac0f
+    /// <https://github.com/NixOS/nix/commit/c602ebfb34de3626fa0b9110face6ea4b171ac0f>
     AddTextToStore = 8,
     /// Obsolete since Nix 2.4, use QueryDerivationOutputMap.
-    /// https://github.com/NixOS/nix/commit/d38f860c3ef001a456d4d447f89219de5e3c830c
+    /// <https://github.com/NixOS/nix/commit/d38f860c3ef001a456d4d447f89219de5e3c830c>
     QueryDerivationOutputs = 22,
     /// Obsolete since Nix 2.4, get it from any derivation struct.
-    /// https://github.com/NixOS/nix/commit/045b07200c77bf1fe19c0a986aafb531e7e1ba54
+    /// <https://github.com/NixOS/nix/commit/045b07200c77bf1fe19c0a986aafb531e7e1ba54>
     QueryDerivationOutputNames = 28,
 }
 impl From<TryFromPrimitiveError<Op>> for Error {
@@ -88,6 +90,10 @@ impl From<TryFromPrimitiveError<Op>> for Error {
     }
 }
 
+/// Reader compatible with CppNix' FramedSource/FramedSink protocol.
+///
+/// Each "frame" is a u64 length, followed by that number of bytes.
+/// The stream is terminated by a frame of length 0.
 #[derive(Debug)]
 pub struct FramedReader<'r, R: AsyncReadExt + Unpin + Debug> {
     r: &'r mut R,
