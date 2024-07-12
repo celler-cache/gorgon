@@ -23,22 +23,26 @@ impl<T, E: Into<Error>> ResultExt<T, E> for Result<T, E> {
     }
 }
 
+/// Error enum for the library.
 #[derive(Debug, Error)]
 pub enum Error {
     /// This error was encountered while reading/writing a specific field.
     #[error("`{0}`: {1}")]
     Field(&'static str, #[source] Box<Error>),
+    /// An invalid value of some sort was encountered.
     #[error("invalid value: {0}")]
     Invalid(String),
 
-    /// Nix protocol error.
+    /// Error returned from the nix daemon.
     #[error("{0}")]
     NixError(NixError),
 
+    /// IO error.
     #[error(transparent)]
     IO(#[from] std::io::Error),
 }
 
+/// A thrown exception from the nix-daemon side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NixError {
     pub level: Verbosity,
@@ -56,6 +60,9 @@ impl std::fmt::Display for NixError {
     }
 }
 
+/// Real-time logging data returned from an in-progress operation.
+///
+/// See the Progress trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stderr {
     /// A plain line of stderr output.
@@ -70,6 +77,7 @@ pub enum Stderr {
     Result(StderrResult),
 }
 
+/// Type of an StderrActivity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrActivityType {
@@ -93,17 +101,27 @@ impl From<TryFromPrimitiveError<StderrActivityType>> for Error {
     }
 }
 
-// TODO: Decode fields.
+/// Notification that an Activity (such as a build) has started.
+///
+/// TODO: Users should not have to fish data out of the .kind-specific .fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrStartActivity {
+    /// ID of the activity. The same act_id is passed in StderrStopActivity and StderrResult.
     pub act_id: u64,
+    /// Log level of this activity.
     pub level: Verbosity,
+    /// Type of the activity.
     pub kind: StderrActivityType,
+    /// Log message.
     pub s: String,
+    /// Additional fields. The meaning of these depend on the value of .kind.
+    /// TODO: This will be replaced with something more user-friendly in the future.
     pub fields: Vec<StderrField>,
+    /// Parent activity, or 0 if this is the top-level one
     pub parent_id: u64,
 }
 
+/// Type of a StderrResult.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum StderrResultType {
@@ -122,14 +140,21 @@ impl From<TryFromPrimitiveError<StderrResultType>> for Error {
     }
 }
 
-// TODO: Decode fields.
+/// Notification that a result of some kind (see StderrResultType) has been produced.
+///
+/// TODO: Users should not have to fish data out of the .kind-specific .fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StderrResult {
+    /// ID of the activity. The same act_id is passed in StderrStartActivity and StderrStopActivity.
     pub act_id: u64,
+    /// Type of the activity.
     pub kind: StderrResultType,
+    /// Additional fields. The meaning of these depend on the value of .kind.
+    /// TODO: This will be replaced with something more user-friendly in the future.
     pub fields: Vec<StderrField>,
 }
 
+/// A raw Field used in StderrStartActivity and StderrResult.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StderrField {
     Int(u64),
@@ -137,6 +162,7 @@ pub enum StderrField {
 }
 
 impl StderrField {
+    /// If this is a Self::Int, return the value, else None.
     pub fn as_int(&self) -> Option<&u64> {
         if let Self::Int(v) = self {
             Some(v)
@@ -145,6 +171,7 @@ impl StderrField {
         }
     }
 
+    /// If this is a Self::String, return the value, else None.
     pub fn as_string(&self) -> Option<&String> {
         if let Self::String(v) = self {
             Some(v)
@@ -154,6 +181,7 @@ impl StderrField {
     }
 }
 
+/// Verbosity of a Stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum Verbosity {
@@ -172,6 +200,7 @@ impl From<TryFromPrimitiveError<Verbosity>> for Error {
     }
 }
 
+/// BuildMode passed to Store.build_paths() and Store.build_paths_with_results().
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum BuildMode {
@@ -185,6 +214,7 @@ impl From<TryFromPrimitiveError<BuildMode>> for Error {
     }
 }
 
+/// Status code for a BuildResult, returned from Store.build_paths_with_results().
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum BuildResultStatus {
@@ -196,7 +226,8 @@ pub enum BuildResultStatus {
     OutputRejected = 5,
     /// "possibly transient", the CppNix source helpfully points out.
     TransientFailure = 6,
-    /// No longer used, apparently - TODO: Figure out since when.
+    /// No longer used, according to a comment in CppNix 2.19.3.
+    /// TODO: Figure out since when.
     CachedFailure = 7,
     TimedOut = 8,
     MiscFailure = 9,
@@ -212,18 +243,23 @@ impl From<TryFromPrimitiveError<BuildResultStatus>> for Error {
     }
 }
 
+/// Status code for a BuildResult, returned from Store.build_paths_with_results().
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildResult {
+    /// Status code, see BuildResultStatus.
     pub status: BuildResultStatus,
+    /// Verbatim error message, or "" if none.
     pub error_msg: String,
-    pub times_built: u64,
-    pub is_non_deterministic: bool,
-    pub start_time: DateTime<Utc>,
-    pub stop_time: DateTime<Utc>,
-    /// Map of (name, path).
+    /// How many times this derivation was built. Only present on Proto 1.29+.
+    pub times_built: u64, // FIXME: Make Option<>.
+    pub is_non_deterministic: bool, // FIXME: Make Option<>.
+    pub start_time: DateTime<Utc>,  // FIXME: Make Option<>.
+    pub stop_time: DateTime<Utc>,   // FIXME: Make Option<>.
+    /// Map of (name, path). Only present on Proto 1.28+.
     pub built_outputs: HashMap<String, String>,
 }
 
+/// Client settings passed to Store.set_options().
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub keep_failed: bool,
@@ -238,15 +274,23 @@ pub struct ClientSettings {
     pub overrides: HashMap<String, String>,
 }
 
-/// Data about a Nix store path.
+/// PathInfo, like `nix path-info` would return.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PathInfo {
-    /// Derivation that produced this path.
+    /// The first derivation that produced this path.
+    ///
+    /// Note that if a second derivation produces the same output, eg. because an input
+    /// changed, but not in a way which affects the contents of the output, this will
+    /// still point to the first derivation, which may not be in your store (anymore).
+    ///
+    /// If you want to know which derivations actually in your store did/can produce
+    /// a path, use Store.query_valid_derivers() instead.
     pub deriver: Option<String>,
-    /// Paths referenced by this path.
+
+    /// Other paths referenced by this path.
     pub references: Vec<String>,
 
-    /// NAR hash (in the form: [algo]-[hash]).
+    /// NAR hash, in the form: "(algo)-(hash)".
     pub nar_hash: String,
     /// NAR size.
     pub nar_size: u64,
@@ -262,7 +306,26 @@ pub struct PathInfo {
     pub registration_time: DateTime<Utc>,
 }
 
-/// An in-progress operation, which produces a series of status updates before continuing.
+/// An in-progress operation, which may produces a series of Stderr status updates before finishing.
+///
+/// All functions on the Store trait return these wrappers. If you just want the final result, not
+/// play-by-play updates on eg. log output or paths built:
+///
+/// ```no_run
+/// let is_valid_path = store.is_valid_path("/nix/store/...").await?.result().await?;
+/// ```
+///
+/// Otherwise, if you are interested in (some of) the progress updates:
+///
+/// ```no_run
+/// let prog = store.is_valid_path("/nix/store/...").await?;
+/// while let Some(stderr) = prog.next().await {
+///     match stderr {
+///         // ...
+///     }
+/// }
+/// let is_valid_path = prog.result().await?;
+/// ```
 pub trait Progress: Send {
     type T: Send;
     type Error: From<Error> + Send + Sync;
@@ -279,16 +342,17 @@ pub trait Progress: Send {
 /// Helper methods for Progress.
 pub trait ProgressExt: Progress {
     /// Calls `f()` for each message returned from `self.next()`, then `self.result()`.
+    // FIXME: This is a bad name and conflicts with the tap crate.
     fn tap<F: Fn(Stderr) + Send>(
         self,
         f: F,
     ) -> impl Future<Output = Result<Self::T, Self::Error>> + Send;
 
-    /// Returns all messages from `self.next()` and `self.result()`.
+    /// Returns a tuple of (stderr, self.result()), where stderr is a `Vec<Stderr>` of all
+    /// Stderr returned by self.next().
     fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T, Self::Error>)> + Send;
 }
 impl<P: Progress> ProgressExt for P {
-    // TODO: This name is bad.
     async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T, Self::Error> {
         while let Some(stderr) = self.next().await? {
             f(stderr)
@@ -454,6 +518,7 @@ pub trait Store {
         >,
     > + Send;
 
+    /// Like build_paths(), but returns a BuildResult for each entry in paths.
     fn build_paths_with_results<Ps>(
         &mut self,
         paths: Ps,
@@ -470,6 +535,7 @@ pub trait Store {
         Ps::Item: AsRef<str> + Send + Sync;
 }
 
+// FIXME: This should be called Missing.
 #[derive(Debug, PartialEq, Eq)]
 pub struct QueryMissing {
     pub will_build: Vec<String>,
