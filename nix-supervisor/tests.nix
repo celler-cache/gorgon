@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT-0
 # SPDX-FileCopyrightText: 2023 Alyssa Ross <hi@alyssa.is>
+# SPDX-FileCopyrightText: 2024 embr <git@liclac.eu>
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , nix-supervisor ? import ./. { inherit pkgs; }
@@ -7,11 +8,12 @@
 }:
 
 let
-  # supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
-  #   (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.18");
-
-  # FIXME: Handshakes are currently broken with Nix 2.20.
-  supportedNixVersions = { inherit (pkgs.nixVersions) nix_2_18 nix_2_19; };
+  # Version support:
+  # - Nix 2.23: nix-build sends Op(0) for some reason??
+  supportedNixVersions = with pkgs.lib;
+    (flip filterAttrs pkgs.nixVersions (attr: pkg: hasPrefix "nix_" attr
+      && versionAtLeast pkg.version "2.18" && versionOlder pkg.version "2.23")) //
+    (flip filterAttrs pkgs.lixVersions (attr: pkg: hasPrefix "lix_" attr));
 in
 
 pkgs.testers.nixosTest ({ lib, ... }: {
