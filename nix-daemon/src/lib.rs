@@ -185,6 +185,45 @@ impl From<TryFromPrimitiveError<BuildMode>> for Error {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u64)]
+pub enum BuildResultStatus {
+    Built = 0,
+    Substituted = 1,
+    AlreadyValid = 2,
+    PermanentFailure = 3,
+    InputRejected = 4,
+    OutputRejected = 5,
+    /// "possibly transient", the CppNix source helpfully points out.
+    TransientFailure = 6,
+    /// No longer used, apparently - TODO: Figure out since when.
+    CachedFailure = 7,
+    TimedOut = 8,
+    MiscFailure = 9,
+    DependencyFailed = 10,
+    LogLimitExceeded = 11,
+    NotDeterministic = 12,
+    ResolvesToAlreadyValid = 13,
+    NoSubstituters = 14,
+}
+impl From<TryFromPrimitiveError<BuildResultStatus>> for Error {
+    fn from(value: TryFromPrimitiveError<BuildResultStatus>) -> Self {
+        Self::Invalid(format!("BuildResultStatus({:x})", value.number))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildResult {
+    pub status: BuildResultStatus,
+    pub error_msg: String,
+    pub times_built: u64,
+    pub is_non_deterministic: bool,
+    pub start_time: DateTime<Utc>,
+    pub stop_time: DateTime<Utc>,
+    /// Map of (name, path).
+    pub built_outputs: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub keep_failed: bool,
@@ -414,6 +453,21 @@ pub trait Store {
             Self::Error,
         >,
     > + Send;
+
+    fn build_paths_with_results<Ps>(
+        &mut self,
+        paths: Ps,
+        mode: BuildMode,
+    ) -> impl Future<
+        Output = Result<
+            impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>,
+            Self::Error,
+        >,
+    > + Send
+    where
+        Ps: IntoIterator + Send + Debug,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync;
 }
 
 #[derive(Debug, PartialEq, Eq)]

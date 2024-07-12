@@ -610,6 +610,47 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             Ok(outputs)
         }))
     }
+
+    #[instrument(skip(self))]
+    async fn build_paths_with_results<Ps>(
+        &mut self,
+        paths: Ps,
+        mode: BuildMode,
+    ) -> Result<
+        impl Progress<T = HashMap<String, crate::BuildResult>, Error = Self::Error>,
+        Self::Error,
+    >
+    where
+        Ps: IntoIterator + Send + Debug,
+        Ps::IntoIter: ExactSizeIterator + Send,
+        Ps::Item: AsRef<str> + Send + Sync,
+    {
+        wire::write_op(&mut self.conn, wire::Op::BuildPathsWithResults)
+            .await
+            .with_field("BuildPathsWithResults.<op>")?;
+        wire::write_strings(&mut self.conn, paths)
+            .await
+            .with_field("BuildPathsWithResults.paths")?;
+        wire::write_build_mode(&mut self.conn, mode)
+            .await
+            .with_field("BuildPathsWithResults.build_mode")?;
+        Ok(DaemonProgress::new(self, |s| async move {
+            let count = wire::read_u64(&mut s.conn)
+                .await
+                .with_field("BuildPathsWithResults.results.<count>")?;
+            let mut results = HashMap::with_capacity(count as usize);
+            for _ in 0..count {
+                let path = wire::read_string(&mut s.conn)
+                    .await
+                    .with_field("BuildPathsWithResults.results[].path")?;
+                let result = wire::read_build_result(&mut s.conn, s.proto)
+                    .await
+                    .with_field("BuildPathsWithResults.results[].result")?;
+                results.insert(path, result);
+            }
+            Ok(results)
+        }))
+    }
 }
 
 /// Builder for a DaemonProtocolAdapter.
@@ -1001,6 +1042,33 @@ where
                         wire::write_string(&mut self.w, path)
                             .await
                             .with_field("QueryDerivationOutputMap.outputs[].path")?;
+                    }
+                }
+                Ok(wire::Op::BuildPathsWithResults) => {
+                    let paths = wire::read_strings(&mut self.r)
+                        .collect::<Result<Vec<_>>>()
+                        .await
+                        .with_field("BuildPathsWithResults.paths")?;
+                    let mode = wire::read_build_mode(&mut self.r)
+                        .await
+                        .with_field("BuildPathsWithResults.build_mode")?;
+
+                    let results = forward_stderr(
+                        &mut self.w,
+                        self.store.build_paths_with_results(paths, mode).await?,
+                    )
+                    .await?;
+
+                    wire::write_u64(&mut self.w, results.len() as u64)
+                        .await
+                        .with_field("BuildPathsWithResults.results.<count>")?;
+                    for (path, result) in results {
+                        wire::write_string(&mut self.w, path)
+                            .await
+                            .with_field("BuildPathsWithResults.results[].path")?;
+                        wire::write_build_result(&mut self.w, &result, self.proto)
+                            .await
+                            .with_field("BuildPathsWithResults.results[].result")?;
                     }
                 }
                 Ok(v) => todo!("{:#?}", v),

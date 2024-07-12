@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{
-    nix::Proto, BuildMode, ClientSettings, Error, NixError, PathInfo, Result, ResultExt, Stderr,
-    StderrField, StderrResult, StderrStartActivity, Verbosity,
+    nix::Proto, BuildMode, BuildResult, BuildResultStatus, ClientSettings, Error, NixError,
+    PathInfo, Result, ResultExt, Stderr, StderrField, StderrResult, StderrStartActivity, Verbosity,
 };
 use async_stream::try_stream;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use futures::{future::OptionFuture, Future};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::collections::HashMap;
@@ -178,6 +178,28 @@ pub async fn write_bool<W: AsyncWriteExt + Unpin>(w: &mut W, v: bool) -> std::io
     Ok(write_u64(w, if v { 1 } else { 0 }.tap(|v| trace!(v, "->"))).await?)
 }
 
+/// Read a DateTime (CppNix: time_t) from the stream, encoded as a unix timestamp.
+#[instrument(skip(r), level = "trace")]
+pub async fn read_datetime<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<DateTime<Utc>> {
+    read_u64(r).await.map_err(Into::into).and_then(|ts| {
+        DateTime::from_timestamp(ts as i64, 0)
+            .ok_or_else(|| Error::Invalid(ts.to_string()))
+            .tap_ok(|dt| trace!(?dt, "<-"))
+    })
+}
+/// Write a DateTime (CppNix: time_t) from the stream, encoded as a unix timestamp.
+#[instrument(skip(w), level = "trace")]
+pub async fn write_datetime<W: AsyncWriteExt + Unpin>(w: &mut W, dt: DateTime<Utc>) -> Result<()> {
+    Ok(write_u64(
+        w,
+        dt.timestamp()
+            .tap(|dt| trace!(?dt, "->"))
+            .try_into()
+            .map_err(|err| Error::Invalid(format!("DateTime({}): {}", dt.to_string(), err)))?,
+    )
+    .await?)
+}
+
 /// Read a protocol version from the stream.
 #[instrument(skip(r), level = "trace")]
 pub async fn read_proto<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Proto> {
@@ -224,6 +246,22 @@ pub async fn read_build_mode<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Build
 pub async fn write_build_mode<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     v: BuildMode,
+) -> std::io::Result<()> {
+    write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
+}
+
+/// Read a build result status from the stream.
+#[instrument(skip(r), level = "trace")]
+pub async fn read_build_result_status<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> Result<BuildResultStatus> {
+    Ok(read_u64(r).await?.try_into().tap_ok(|v| trace!(?v, "<-"))?)
+}
+/// Write a build result status to the stream.
+#[instrument(skip(w, v), level = "trace")]
+pub async fn write_build_result_status<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    v: BuildResultStatus,
 ) -> std::io::Result<()> {
     write_u64(w, v.tap(|v| trace!(?v, "->")).into()).await
 }
@@ -366,6 +404,98 @@ pub async fn write_error<W: AsyncWriteExt + Unpin>(w: &mut W, v: NixError) -> Re
         write_string(w, trace)
             .await
             .with_field("Error.traces[].hint")?;
+    }
+
+    Ok(())
+}
+
+#[instrument(skip(r), level = "trace")]
+pub async fn read_build_result<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+    proto: Proto,
+) -> Result<BuildResult> {
+    let status = read_build_result_status(r)
+        .await
+        .with_field("BuildResult.status")?;
+    let error_msg = read_string(r).await.with_field("BuildResult.error_msg")?;
+
+    let mut br = BuildResult {
+        status,
+        error_msg,
+        times_built: 0,
+        is_non_deterministic: false,
+        start_time: DateTime::default(),
+        stop_time: DateTime::default(),
+        built_outputs: HashMap::default(),
+    };
+
+    if proto >= Proto(1, 29) {
+        br.times_built = read_u64(r).await.with_field("BuildResult.times_built")?;
+        br.is_non_deterministic = read_bool(r)
+            .await
+            .with_field("BuildResult.is_non_deterministic")?;
+        br.start_time = read_datetime(r)
+            .await
+            .with_field("BuildResult.start_time")?;
+        br.stop_time = read_datetime(r).await.with_field("BuildResult.stop_time")?;
+    }
+    if proto >= Proto(1, 28) {
+        let count = read_u64(r)
+            .await
+            .with_field("BuildResult.built_outputs.<count>")? as usize;
+        for _ in 0..count {
+            let name = read_string(r)
+                .await
+                .with_field("BuildResult.built_outputs[].name")?;
+            let path = read_string(r)
+                .await
+                .with_field("BuildResult.built_outputs[].path")?;
+            br.built_outputs.insert(name, path);
+        }
+    }
+
+    Ok(br)
+}
+
+#[instrument(skip(w), level = "trace")]
+pub async fn write_build_result<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    result: &BuildResult,
+    proto: Proto,
+) -> Result<()> {
+    write_build_result_status(w, result.status)
+        .await
+        .with_field("BuildResult.status")?;
+    write_string(w, &result.error_msg)
+        .await
+        .with_field("BuildResult.error_msg")?;
+
+    if proto >= Proto(1, 29) {
+        write_u64(w, result.times_built)
+            .await
+            .with_field("BuildResult.times_built")?;
+        write_bool(w, result.is_non_deterministic)
+            .await
+            .with_field("BuildResult.is_non_deterministic")?;
+        write_datetime(w, result.start_time)
+            .await
+            .with_field("BuildResult.start_time")?;
+        write_datetime(w, result.stop_time)
+            .await
+            .with_field("BuildResult.stop_time")?;
+    }
+    if proto >= Proto(1, 28) {
+        write_u64(w, result.built_outputs.len() as u64)
+            .await
+            .with_field("BuildResult.built_outputs.<count>")?;
+        for (name, path) in &result.built_outputs {
+            write_string(w, name)
+                .await
+                .with_field("BuildResult.built_outputs[].name")?;
+            write_string(w, path)
+                .await
+                .with_field("BuildResult.built_outputs[].path")?;
+        }
     }
 
     Ok(())
@@ -688,12 +818,9 @@ pub async fn read_pathinfo<R: AsyncReadExt + Unpin>(r: &mut R, proto: Proto) -> 
         .collect::<Result<Vec<_>>>()
         .await
         .with_field("PathInfo.deriver")?;
-    let registration_time = read_u64(r)
+    let registration_time = read_datetime(r)
         .await
-        .with_field("PathInfo.registration_time")
-        .and_then(|ts| {
-            DateTime::from_timestamp(ts as i64, 0).ok_or_else(|| Error::Invalid(ts.to_string()))
-        })?;
+        .with_field("PathInfo.registration_time")?;
     let nar_size = read_u64(r).await.with_field("PathInfo.nar_size")?;
 
     let ultimate = OptionFuture::from(proto.since(16).then(|| read_bool(r)))

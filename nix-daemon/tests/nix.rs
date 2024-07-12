@@ -395,6 +395,26 @@ async fn test_build() {
         .await
         .expect("BuildPaths Progress");
 
+    // Check that BuildPathsWithResults decodes properly.
+    let build_results = store
+        .build_paths_with_results(&[&drv_output][..], BuildMode::Normal)
+        .await
+        .expect("BuildPathsWithResults failed")
+        .result()
+        .await
+        .expect("BuildPathsWithResults Progress");
+    assert_eq!(
+        HashMap::from([(
+            drv_output.clone(),
+            nix_daemon::BuildResult {
+                status: nix_daemon::BuildResultStatus::AlreadyValid,
+                error_msg: String::new(),
+                ..build_results[&drv_output].clone()
+            }
+        )]),
+        build_results
+    );
+
     // Check the output.
     let nix_store_query = std::process::Command::new("nix-store")
         .arg("--query")
