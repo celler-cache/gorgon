@@ -313,7 +313,7 @@ async fn test_query_missing_valid() {
         .expect("Progress");
     assert_eq!(
         missing,
-        nix_daemon::QueryMissing {
+        nix_daemon::Missing {
             will_build: Vec::new(),
             will_substitute: Vec::new(),
             unknown: Vec::new(),
@@ -376,7 +376,7 @@ async fn test_build() {
         .await
         .expect("QueryMissing Progress");
     assert_eq!(
-        nix_daemon::QueryMissing {
+        nix_daemon::Missing {
             will_build: vec![drv_path.to_string()],
             will_substitute: vec![],
             unknown: vec![],

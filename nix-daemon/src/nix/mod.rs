@@ -541,7 +541,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     async fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> Result<impl Progress<T = crate::QueryMissing, Error = Self::Error>>
+    ) -> Result<impl Progress<T = crate::Missing, Error = Self::Error>>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -572,7 +572,7 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             let nar_size = wire::read_u64(&mut s.conn)
                 .await
                 .with_field("QueryMissing.nar_size")?;
-            Ok(crate::QueryMissing {
+            Ok(crate::Missing {
                 will_build,
                 will_substitute,
                 unknown,
@@ -986,7 +986,7 @@ where
                         .await
                         .with_field("QueryMissing.paths")?;
 
-                    let crate::QueryMissing {
+                    let crate::Missing {
                         will_build,
                         will_substitute,
                         unknown,

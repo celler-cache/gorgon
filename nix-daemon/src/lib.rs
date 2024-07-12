@@ -502,9 +502,7 @@ pub trait Store {
     fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> impl Future<
-        Output = Result<impl Progress<T = QueryMissing, Error = Self::Error>, Self::Error>,
-    > + Send
+    ) -> impl Future<Output = Result<impl Progress<T = Missing, Error = Self::Error>, Self::Error>> + Send
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -538,12 +536,17 @@ pub trait Store {
         Ps::Item: AsRef<str> + Send + Sync;
 }
 
-// FIXME: This should be called Missing.
+/// Return value for Store.query_missing().
 #[derive(Debug, PartialEq, Eq)]
-pub struct QueryMissing {
+pub struct Missing {
+    /// Paths that will be built.
     pub will_build: Vec<String>,
+    /// Paths that will be substituted.
     pub will_substitute: Vec<String>,
+    /// Paths we don't know what will happen to.
     pub unknown: Vec<String>,
+    /// Despite the name, the extracted size of all substituted paths.
     pub download_size: u64,
+    /// Total size of all NARs to download from a substituter.
     pub nar_size: u64,
 }

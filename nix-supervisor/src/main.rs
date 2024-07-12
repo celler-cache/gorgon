@@ -12,7 +12,7 @@ use chrono::prelude::*;
 use clap::Parser;
 use nix_daemon::{
     nix::{DaemonProtocolAdapter, DaemonStore},
-    BuildMode, BuildResult, ClientSettings, NixError, PathInfo, Progress, QueryMissing, Stderr,
+    BuildMode, BuildResult, ClientSettings, Missing, NixError, PathInfo, Progress, Stderr,
     StderrActivityType, StderrResult, StderrResultType, StderrStartActivity, Store,
 };
 use sea_orm::{prelude::*, Database, Set};
@@ -817,7 +817,7 @@ where
     async fn query_missing<Ps>(
         &mut self,
         paths: Ps,
-    ) -> Result<impl Progress<T = QueryMissing, Error = Self::Error>, Self::Error>
+    ) -> Result<impl Progress<T = Missing, Error = Self::Error>, Self::Error>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
