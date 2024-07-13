@@ -3,6 +3,11 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 //! Interfaces to nix-daemon (or compatible) Stores.
+//!
+//! This module currently implements support for Protocol 1.35, and Nix 2.15+.
+//!
+//! Support for older versions will be added in the future - in particular, Protocol 1.21
+//! used by Nix 2.3.
 
 pub mod wire;
 
@@ -59,7 +64,7 @@ impl Proto {
     }
 }
 
-/// Internal Progress implementation used by DaemonStore.
+/// Internal Progress implementation used by [`DaemonStore`].
 pub struct DaemonProgress<'s, C, T: Send, F, FF>
 where
     C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
@@ -120,7 +125,7 @@ pub struct DaemonStoreBuilder {
 }
 
 impl DaemonStoreBuilder {
-    /// Initializes a DaemonStore by adopting a connection.
+    /// Initializes a [`DaemonStore`] by adopting a connection.
     ///
     /// It's up to the caller that the connection is in a state to begin a nix handshake, eg.
     /// it behaves like a fresh connection to the daemon socket - if this is a connection through
@@ -149,7 +154,8 @@ impl DaemonStoreBuilder {
         Ok(store)
     }
 
-    /// Connects to a Nix daemon via a unix socket. The path is usually `/nix/var/nix/daemon-socket/socket`.
+    /// Connects to a Nix daemon via a unix socket.
+    /// The path is usually `/nix/var/nix/daemon-socket/socket`.
     ///
     /// ```no_run
     /// use nix_daemon::{Store, Progress, nix::DaemonStore};
@@ -169,7 +175,7 @@ impl DaemonStoreBuilder {
     }
 }
 
-/// Store backed by a `nix-daemon` (or compatible store).
+/// Store backed by a `nix-daemon` (or compatible store). Implements [`crate::Store`].
 ///
 /// ```no_run
 /// use nix_daemon::{Store, Progress, nix::DaemonStore};
@@ -696,7 +702,7 @@ impl<'s, S: Store> DaemonProtocolAdapterBuilder<'s, S> {
         }
     }
 
-    /// Initializes a DaemonProtocolAdapter by adopting a connection.
+    /// Initializes a [`DaemonProtocolAdapter`] by adopting a connection.
     ///
     /// It's up to the caller that the connection is in a state to begin a nix handshake, eg.
     /// it behaves like a fresh connection to the daemon socket - if this is a connection through
@@ -714,8 +720,8 @@ impl<'s, S: Store> DaemonProtocolAdapterBuilder<'s, S> {
     }
 }
 
-/// Handles an incoming connection using the `nix-daemon` protocol, and forwards calls to
-/// a Store implementation.
+/// Handles an incoming `nix-daemon` protocol connection, and forwards calls to a
+/// [`crate::Store`].
 ///
 /// ```no_run
 /// use tokio::net::UnixListener;
