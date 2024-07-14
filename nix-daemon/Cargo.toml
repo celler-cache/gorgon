@@ -10,6 +10,7 @@ license = "EUPL-1.2"
 authors = ["embr <git@liclac.eu>"]
 description = "A library for talking directly to the Nix Daemon"
 repository = "https://codeberg.org/gorgon/gorgon/src/branch/main/nix-daemon"
+documentation = "https://docs.rs/nix-daemon/"
 keywords = ["nix"]
 categories = ["api-bindings"]
 
