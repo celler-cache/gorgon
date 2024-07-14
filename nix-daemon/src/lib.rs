@@ -380,8 +380,7 @@ pub trait Progress: Send {
 /// Helper methods for [`Progress`].
 pub trait ProgressExt: Progress {
     /// Calls `f()` for each message returned from [`Progress::next()`], then [`Progress::result()`].
-    // FIXME: This is a bad name and conflicts with the tap crate.
-    fn tap<F: Fn(Stderr) + Send>(
+    fn inspect_each<F: Fn(Stderr) + Send>(
         self,
         f: F,
     ) -> impl Future<Output = Result<Self::T, Self::Error>> + Send;
@@ -391,7 +390,7 @@ pub trait ProgressExt: Progress {
     fn split(self) -> impl Future<Output = (Vec<Stderr>, Result<Self::T, Self::Error>)> + Send;
 }
 impl<P: Progress> ProgressExt for P {
-    async fn tap<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T, Self::Error> {
+    async fn inspect_each<F: Fn(Stderr)>(mut self, f: F) -> Result<Self::T, Self::Error> {
         while let Some(stderr) = self.next().await? {
             f(stderr)
         }
