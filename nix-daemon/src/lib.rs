@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+//! nix-daemon
+//! ==========
+//!
 //! This library exposes an interface for directly talking to a [Nix](https://nixos.org/)
 //! daemon.
 //!
@@ -78,7 +81,7 @@ impl std::fmt::Display for NixError {
     }
 }
 
-/// Real-time logging data returned from a `Progress`.
+/// Real-time logging data returned from a [`Progress`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stderr {
     /// A plain line of stderr output.
@@ -170,7 +173,7 @@ pub struct StderrResult {
     pub fields: Vec<StderrField>,
 }
 
-/// A raw Field used in [`StderrStartActivity`] and [`StderrResult`].
+/// A raw field used in [`StderrStartActivity`] and [`StderrResult`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StderrField {
     Int(u64),
@@ -219,7 +222,7 @@ impl From<TryFromPrimitiveError<Verbosity>> for Error {
     }
 }
 
-/// Build Mode passed to [`Store::build_paths()`] and [`Store::build_paths_with_results()`].
+/// Passed to [`Store::build_paths()`] and [`Store::build_paths_with_results()`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum BuildMode {
@@ -278,7 +281,7 @@ pub struct BuildResult {
     pub built_outputs: HashMap<String, String>,
 }
 
-/// Client settings passed to [`Store::set_options()`].
+/// Passed to [`Store::set_options()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub keep_failed: bool,
@@ -302,8 +305,8 @@ pub struct PathInfo {
     /// changed, but not in a way which affects the contents of the output, this will
     /// still point to the first derivation, which may not be in your store (anymore).
     ///
-    /// If you want to know which derivations actually in your store did/can produce
-    /// a path, use Store.query_valid_derivers() instead.
+    /// If you want to know which derivations actually in your store can produce a path,
+    /// use [`Store::query_valid_derivers()`] instead.
     pub deriver: Option<String>,
 
     /// Other paths referenced by this path.
@@ -419,7 +422,7 @@ pub trait Store {
         path: P,
     ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
 
-    /// Returns whether QuerySubstitutablePathInfos would return anything.
+    /// Returns whether `Self::query_substitutable_paths()` would return anything.
     fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
@@ -464,7 +467,7 @@ pub trait Store {
         path: Path,
     ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
-    /// Creates a temporary GC root, which persists until the daemon restarts.
+    /// Creates a temporary GC root, which persists until the client disconnects.
     fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
@@ -476,7 +479,7 @@ pub trait Store {
         path: Path,
     ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
-    /// Returns the (link, target) of all known GC roots.
+    /// Returns the `(link, target)` of all known GC roots.
     fn find_roots(
         &mut self,
     ) -> impl Future<
@@ -492,7 +495,7 @@ pub trait Store {
         opts: ClientSettings,
     ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
 
-    /// Returns a PathInfo struct for the given path.
+    /// Returns a [`PathInfo`] struct for the given path.
     fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
@@ -524,7 +527,7 @@ pub trait Store {
         Paths::Item: AsRef<str> + Send + Sync;
 
     /// Returns a list of valid derivers for a path.
-    /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
+    /// This is sort of like [`PathInfo::deriver`], but it doesn't lie to you.
     fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
@@ -542,7 +545,7 @@ pub trait Store {
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync;
 
-    /// Returns a map of (output, store path) for the given derivation.
+    /// Returns a map of `(output, store path)` for the given derivation.
     fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
@@ -553,7 +556,7 @@ pub trait Store {
         >,
     > + Send;
 
-    /// Like build_paths(), but returns a BuildResult for each entry in paths.
+    /// Like `Self::build_paths()`, but returns a [`BuildResult`] for each entry in `paths`.
     fn build_paths_with_results<Ps>(
         &mut self,
         paths: Ps,

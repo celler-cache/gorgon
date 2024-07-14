@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 //! Interfaces to nix-daemon (or compatible) Stores.
+//! ------------------------------------------------
 //!
 //! This module currently implements support for Protocol 1.35, and Nix 2.15+.
 //!
@@ -64,7 +65,7 @@ impl Proto {
     }
 }
 
-/// Internal Progress implementation used by [`DaemonStore`].
+/// Internal [`crate::Progress`] implementation used by [`DaemonStore`].
 pub struct DaemonProgress<'s, C, T: Send, F, FF>
 where
     C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
