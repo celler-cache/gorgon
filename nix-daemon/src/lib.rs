@@ -284,16 +284,100 @@ pub struct BuildResult {
 /// Passed to [`Store::set_options()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
+    /// Whether to keep temporary directories of failed builds.
+    ///
+    /// Default: `false`
     pub keep_failed: bool,
+
+    /// Whether to keep building derivations when another build fails.
+    ///
+    /// Default: `false`
     pub keep_going: bool,
+
+    /// Whether to fall back to building from source if a binary substitution fails.
+    ///
+    /// Default: `false`
     pub try_fallback: bool,
+
+    /// Verbosity.
+    ///
+    /// Default: [`Verbosity::Error`].
     pub verbosity: Verbosity,
+
+    /// Number of derivations Nix will attempt to build in parallel.
+    ///
+    /// 0 = No local builds will be performed (except `preferLocalBuild` derivations),
+    ///     only remote builds and substitutions.
+    ///
+    /// This is different from [`ClientSettings::build_cores`], which affects how many
+    /// cores are used by a single build. In `nix.conf`, this can also have the magic
+    /// value "auto", which uses the number of threads available on the machine, but we
+    /// can only set it to whole numbers using [`Store::set_options`].
+    ///
+    /// Default: `1`
     pub max_build_jobs: u64,
+
+    /// Number of seconds a build is allowed to produce no stdout or stderr output.
+    ///
+    /// Default: `0`
     pub max_silent_time: u64,
+
+    /// Whether to show build log output in real time.
     pub verbose_build: bool,
+    /// How many cores will be used for an individual build. Sets the `NIX_BUILD_CORES`
+    /// environment variable for builders, which is passed to eg. `make -j`.
+    ///
+    /// 0 = Use all available cores on the builder machine.
+    ///
+    /// This is different from [`ClientSettings::max_build_jobs`], which controls ho
+    /// many derivations Nix will attempt to build in parallel.
+    ///
+    /// NOTE: On the daemon, this defaults to the number of threads that were available
+    /// when it started, which we of course have no way of knowing, since we don't even
+    /// know if we're running on the same machine. Thus, we default to 0 instead, which
+    /// in most cases will do the same thing.
+    ///
+    /// If you know you're on the daemon machine, you can get the available threads with:
+    ///
+    /// ```
+    /// use nix_daemon::ClientSettings;
+    ///
+    /// ClientSettings {
+    ///     build_cores: std::thread::available_parallelism().unwrap().get() as u64,
+    ///     ..Default::default()
+    /// };
+    /// ```
+    ///
+    /// Default: `0`
     pub build_cores: u64,
+
+    /// Whether to use binary substitutes if available.
+    ///
+    /// Default: `true`
     pub use_substitutes: bool,
+
+    /// Undocumented. Some additional settings can be set using this field.
+    ///
+    /// Default: [`HashMap::default()`].
     pub overrides: HashMap<String, String>,
+}
+
+impl Default for ClientSettings {
+    fn default() -> Self {
+        // Defaults taken from CppNix: src/libstore/globals.hh
+        Self {
+            keep_failed: false,
+            keep_going: false,
+            try_fallback: false,
+            verbosity: Verbosity::Error,
+            max_build_jobs: 1,
+            max_silent_time: 0,
+            verbose_build: true,
+            build_cores: 0,
+            use_substitutes: true,
+            overrides: HashMap::default(),
+        }
+    }
 }
 
 /// PathInfo, like `nix path-info` would return.

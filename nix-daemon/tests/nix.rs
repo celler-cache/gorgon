@@ -114,6 +114,14 @@ async fn test_query_valid_paths_false() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
+    store
+        .set_options(ClientSettings {
+            use_substitutes: false, // Disable substituters.
+            ..Default::default()
+        })
+        .result()
+        .await
+        .expect("SetOptions failed");
     let r = store
         .query_valid_paths(&[INVALID_STORE_PATH], true)
         .result()
@@ -287,6 +295,16 @@ async fn test_build() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
+
+    // Disable substituters, else this test makes a network request.
+    store
+        .set_options(ClientSettings {
+            use_substitutes: false,
+            ..Default::default()
+        })
+        .result()
+        .await
+        .expect("SetOptions failed");
 
     // Random string our built derivation should output. This test expects to
     // actually build something, so it needs a derivation with a known output,
