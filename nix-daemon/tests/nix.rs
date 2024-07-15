@@ -79,8 +79,6 @@ async fn test_set_options() {
             use_substitutes: false,
             overrides: HashMap::new(),
         })
-        .await
-        .expect("SetOptions failed")
         .result()
         .await
         .expect("SetOptions Result failed");
@@ -93,12 +91,7 @@ async fn test_is_valid_path_false() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store
-        .is_valid_path(INVALID_STORE_PATH)
-        .await
-        .expect("IsValidPath failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.is_valid_path(INVALID_STORE_PATH).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(false, r.unwrap());
 }
@@ -109,12 +102,7 @@ async fn test_is_valid_path_true() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store
-        .is_valid_path(find_nix_in_store())
-        .await
-        .expect("IsValidPath failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.is_valid_path(find_nix_in_store()).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(true, r.unwrap());
 }
@@ -128,8 +116,6 @@ async fn test_query_valid_paths_false() {
         .expect("Couldn't connect to daemon");
     let r = store
         .query_valid_paths(&[INVALID_STORE_PATH], true)
-        .await
-        .expect("QueryValidPaths failed")
         .result()
         .await;
     assert_eq!(Vec::<String>::new(), r.unwrap());
@@ -142,12 +128,7 @@ async fn test_query_valid_paths_true() {
         .await
         .expect("Couldn't connect to daemon");
     let nix_path = find_nix_in_store();
-    let r = store
-        .query_valid_paths(&[&nix_path], true)
-        .await
-        .expect("QueryValidPaths failed")
-        .result()
-        .await;
+    let r = store.query_valid_paths(&[&nix_path], true).result().await;
     assert_eq!(vec![nix_path], r.unwrap());
 }
 
@@ -158,12 +139,7 @@ async fn test_has_substitutes() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store
-        .has_substitutes(find_nix_in_store())
-        .await
-        .expect("HasSubstitutes failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.has_substitutes(find_nix_in_store()).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(true, r.unwrap());
 }
@@ -176,12 +152,7 @@ async fn test_query_substitutable_paths() {
         .await
         .expect("Couldn't connect to daemon");
     let nix_path = find_nix_in_store();
-    let (stderrs, r) = store
-        .query_substitutable_paths(&[&nix_path])
-        .await
-        .expect("QuerySubstitutablePaths failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.query_substitutable_paths(&[&nix_path]).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(vec![nix_path], r.unwrap());
 }
@@ -193,12 +164,7 @@ async fn test_query_pathinfo_none() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store
-        .query_pathinfo(INVALID_STORE_PATH)
-        .await
-        .expect("QueryPathInfo failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.query_pathinfo(INVALID_STORE_PATH).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(None, r.unwrap());
 }
@@ -209,12 +175,7 @@ async fn test_query_pathinfo_some() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store
-        .query_pathinfo(create_known_test_file())
-        .await
-        .expect("QueryPathInfo failed")
-        .split()
-        .await;
+    let (stderrs, r) = store.query_pathinfo(create_known_test_file()).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
 
     // We can't check the timestamp, so we have to compare the other fields one-by-one.
@@ -266,8 +227,6 @@ async fn test_add_to_store() {
                 ])
                 .build(),
         )
-        .await
-        .expect("IsValidPath failed")
         .split()
         .await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
@@ -306,8 +265,6 @@ async fn test_query_missing_valid() {
         .expect("Couldn't connect to daemon");
     let missing = store
         .query_missing(&[create_known_test_file()][..])
-        .await
-        .expect("QueryMissing failed")
         .result()
         .await
         .expect("Progress");
@@ -370,11 +327,9 @@ async fn test_build() {
     // Double check that it's not already built.
     let missing = store
         .query_missing(&[&drv_output][..])
-        .await
-        .expect("QueryMissing failed")
         .result()
         .await
-        .expect("QueryMissing Progress");
+        .expect("QueryMissing failed");
     assert_eq!(
         nix_daemon::Missing {
             will_build: vec![drv_path.to_string()],
@@ -389,17 +344,13 @@ async fn test_build() {
     // Build it!
     store
         .build_paths(&[&drv_output][..], BuildMode::Normal)
-        .await
-        .expect("BuildPaths failed")
         .result()
         .await
-        .expect("BuildPaths Progress");
+        .expect("BuildPaths failed");
 
     // Check that BuildPathsWithResults decodes properly.
     let build_results = store
         .build_paths_with_results(&[&drv_output][..], BuildMode::Normal)
-        .await
-        .expect("BuildPathsWithResults failed")
         .result()
         .await
         .expect("BuildPathsWithResults Progress");
@@ -431,11 +382,9 @@ async fn test_build() {
     // Add a temporary root.
     store
         .add_temp_root(&drv_path)
-        .await
-        .expect("AddTempRoot failed")
         .result()
         .await
-        .expect("AddTempRoot Progress");
+        .expect("AddTempRoot failed");
 
     // Add an indirect root, check that it's registered properly.
     let root_path = std::env::temp_dir().join("test_build_result");
@@ -448,29 +397,19 @@ async fn test_build() {
 
     store
         .add_indirect_root(&root_path_str)
-        .await
-        .expect("AddIndirectRoot failed")
         .result()
         .await
-        .expect("AddIndirectRoot Progress");
-    let roots = store
-        .find_roots()
-        .await
-        .expect("FindRoots failed")
-        .result()
-        .await
-        .expect("FindRoots Progress");
+        .expect("AddIndirectRoot failed");
+    let roots = store.find_roots().result().await.expect("FindRoots failed");
     assert_eq!(roots[root_path_str], out_path);
 
     // Delete the indirect root, watch it get deregistered.
     std::fs::remove_file(&root_path).expect("Couldn't remove root");
     let roots2 = store
         .find_roots()
-        .await
-        .expect("FindRoots 2 failed")
         .result()
         .await
-        .expect("FindRoots 2 Progress");
+        .expect("FindRoots 2 failed");
     assert_eq!(
         false,
         roots2.contains_key(root_path_str),
@@ -480,21 +419,17 @@ async fn test_build() {
     // Try QueryValidDerivers.
     let valid_derivers = store
         .query_valid_derivers(&out_path)
-        .await
-        .expect("QueryValidDerivers failed")
         .result()
         .await
-        .expect("QueryValidDerivers Progress");
+        .expect("QueryValidDerivers failed");
     assert_eq!(vec![drv_path], valid_derivers);
 
     // Try QueryDerivationOutputMap.
     let outputs = store
         .query_derivation_output_map(&drv_path)
-        .await
-        .expect("QueryDerivationOutputMap failed")
         .result()
         .await
-        .expect("QueryDerivationOutputMap Progress");
+        .expect("QueryDerivationOutputMap failed");
     assert_eq!(
         HashMap::from([("out".to_string(), out_path.to_string())]),
         outputs

@@ -564,18 +564,17 @@ impl<ST: Store + Send + Sync> ProxyStore<ST>
 where
     ST::Error: 'static + std::error::Error,
 {
-    async fn track<'db, T: Send, P: Progress<T = T, Error = ST::Error>, HF: FnOnce(&T) + Send>(
+    fn track<'db, T: Send, P: Progress<T = T, Error = ST::Error>, HF: FnOnce(&T) + Send>(
         db: &'db Arc<DatabaseConnection>,
-        pr: Result<P, ST::Error>,
+        prog: P,
         result_hook: HF,
-    ) -> Result<TrackingProgress<T, ST::Error, P, HF>, anyhow::Error> {
-        pr.map(|prog| TrackingProgress {
+    ) -> TrackingProgress<T, ST::Error, P, HF> {
+        TrackingProgress {
             db,
             prog,
             result_hook,
             builds: HashMap::<_, _>::new(),
-        })
-        .map_err(Into::into)
+        }
     }
 }
 
@@ -587,20 +586,19 @@ where
 
     /// Returns whether a store path is valid.
     #[instrument(skip(self))]
-    async fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
+    fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> Result<impl Progress<T = bool, Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = bool, Error = Self::Error> {
         debug!("-> IsValidPath");
-        Self::track(&self.db, self.store.is_valid_path(path).await, |valid| {
+        Self::track(&self.db, self.store.is_valid_path(path), |valid| {
             debug!(valid, "<- IsValidPath");
         })
-        .await
     }
 
     /// Adds a file to the store.
     #[instrument(skip(self))]
-    async fn add_to_store<
+    fn add_to_store<
         SN: AsRef<str> + Send + Sync + Debug,
         SC: AsRef<str> + Send + Sync + Debug,
         Refs,
@@ -612,7 +610,7 @@ where
         refs: Refs,
         repair: bool,
         source: R,
-    ) -> Result<impl Progress<T = (String, PathInfo), Error = Self::Error>, Self::Error>
+    ) -> impl Progress<T = (String, PathInfo), Error = Self::Error>
     where
         Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
@@ -622,94 +620,84 @@ where
         debug!("-> AddToStore");
         Self::track(
             &self.db,
-            self.store
-                .add_to_store(name, cam_str, refs, repair, source)
-                .await,
+            self.store.add_to_store(name, cam_str, refs, repair, source),
             |(name, pi)| debug!(name, ?pi, "<- AddToStore"),
         )
-        .await
     }
 
     /// Returns whether QuerySubstitutablePathInfos would return anything.
     #[instrument(skip(self))]
-    async fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
+    fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> Result<impl Progress<T = bool, Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = bool, Error = Self::Error> {
         debug!(?path, "-> HasSubstitute");
-        Self::track(&self.db, self.store.has_substitutes(path).await, |has| {
+        Self::track(&self.db, self.store.has_substitutes(path), |has| {
             debug!(has, "<- HasSubstitute")
         })
-        .await
     }
 
     /// Builds the specified paths.
     #[instrument(skip(self))]
-    async fn build_paths<Paths>(
+    fn build_paths<Paths>(
         &mut self,
         paths: Paths,
         mode: BuildMode,
-    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error>
+    ) -> impl Progress<T = (), Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
         Paths::Item: AsRef<str> + Send + Sync,
     {
         debug!(?paths, ?mode, "-> BuildPaths");
-        Self::track(&self.db, self.store.build_paths(paths, mode).await, |_| {}).await
+        Self::track(&self.db, self.store.build_paths(paths, mode), |_| {})
     }
 
     /// Ensure the specified store path exists.
     #[instrument(skip(self))]
-    async fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
+    fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = (), Error = Self::Error> {
         debug!(?path, "-> EnsurePath");
-        Self::track(&self.db, self.store.ensure_path(path).await, |_| {}).await
+        Self::track(&self.db, self.store.ensure_path(path), |_| {})
     }
 
     /// Creates a temporary GC root, which persists until the daemon restarts.
     #[instrument(skip(self))]
-    async fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
+    fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = (), Error = Self::Error> {
         debug!(?path, "-> AddTempRoot");
-        Self::track(&self.db, self.store.add_temp_root(path).await, |_| {}).await
+        Self::track(&self.db, self.store.add_temp_root(path), |_| {})
     }
 
     /// Creates a persistent GC root. This is what's normally meant by a GC root.
     #[instrument(skip(self))]
-    async fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
+    fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = (), Error = Self::Error> {
         debug!(?path, "-> AddIndirectRoot");
-        Self::track(&self.db, self.store.add_indirect_root(path).await, |_| {}).await
+        Self::track(&self.db, self.store.add_indirect_root(path), |_| {})
     }
 
     /// Returns the (link, target) of all known GC roots.
     #[instrument(skip(self))]
-    async fn find_roots(
-        &mut self,
-    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>, Self::Error> {
+    fn find_roots(&mut self) -> impl Progress<T = HashMap<String, String>, Error = Self::Error> {
         debug!("-> FindRoots");
-        Self::track(&self.db, self.store.find_roots().await, |roots| {
+        Self::track(&self.db, self.store.find_roots(), |roots| {
             debug!("<- FindRoots");
             for (link, target) in roots {
                 debug!(link, target, "  <- FindRoots.root[]");
             }
         })
-        .await
     }
 
     /// Applies client options. This changes the behaviour of future commands.
     #[instrument(skip(self))]
-    async fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> Result<impl Progress<T = (), Error = Self::Error>, Self::Error> {
+    fn set_options(&mut self, opts: ClientSettings) -> impl Progress<T = (), Error = Self::Error> {
         debug!(
             opts.keep_failed,
             opts.keep_going,
@@ -723,29 +711,28 @@ where
             ?opts.overrides,
             "-> SetOptions"
         );
-        Self::track(&self.db, self.store.set_options(opts).await, |_| {}).await
+        Self::track(&self.db, self.store.set_options(opts), |_| {})
     }
 
     /// Returns a PathInfo struct for the given path.
     #[instrument(skip(self))]
-    async fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
+    fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = Option<PathInfo>, Error = Self::Error> {
         debug!(?path, "-> QueryPathInfo");
-        Self::track(&self.db, self.store.query_pathinfo(path).await, |pi| {
+        Self::track(&self.db, self.store.query_pathinfo(path), |pi| {
             debug!(?pi, "<- QueryPathInfo")
         })
-        .await
     }
 
     /// Returns which of the passed paths are valid.
     #[instrument(skip(self))]
-    async fn query_valid_paths<Paths>(
+    fn query_valid_paths<Paths>(
         &mut self,
         paths: Paths,
         use_substituters: bool,
-    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -754,7 +741,7 @@ where
         debug!(?paths, use_substituters, "-> QueryValidPaths");
         Self::track(
             &self.db,
-            self.store.query_valid_paths(paths, use_substituters).await,
+            self.store.query_valid_paths(paths, use_substituters),
             |valids| {
                 debug!("<- QueryValidPaths");
                 for valid in valids {
@@ -762,15 +749,14 @@ where
                 }
             },
         )
-        .await
     }
 
     /// Returns paths which can be substituted.
     #[instrument(skip(self))]
-    async fn query_substitutable_paths<Paths>(
+    fn query_substitutable_paths<Paths>(
         &mut self,
         paths: Paths,
-    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -779,7 +765,7 @@ where
         debug!(?paths, "-> QuerySubstitutablePaths");
         Self::track(
             &self.db,
-            self.store.query_substitutable_paths(paths).await,
+            self.store.query_substitutable_paths(paths),
             |subs| {
                 debug!("<- QuerySubstitutablePaths");
                 for sub in subs {
@@ -787,59 +773,49 @@ where
                 }
             },
         )
-        .await
     }
 
     /// Returns a list of valid derivers for a path.
     /// This is sort of like PathInfo.deriver, but it doesn't lie to you.
     #[instrument(skip(self))]
-    async fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
+    fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error> {
         debug!(?path, "-> QueryValidDerivers");
-        Self::track(
-            &self.db,
-            self.store.query_valid_derivers(path).await,
-            |drvs| {
-                debug!("<- QueryValidDerivers");
-                for drv in drvs {
-                    debug!(drv, "  <- QueryValidDerivers.drvs[]");
-                }
-            },
-        )
-        .await
+        Self::track(&self.db, self.store.query_valid_derivers(path), |drvs| {
+            debug!("<- QueryValidDerivers");
+            for drv in drvs {
+                debug!(drv, "  <- QueryValidDerivers.drvs[]");
+            }
+        })
     }
 
     /// Takes a list of paths and queries which would be built, substituted or unknown,
     /// along with an estimate of the cumulative download and NAR sizes.
     #[instrument(skip(self))]
-    async fn query_missing<Ps>(
-        &mut self,
-        paths: Ps,
-    ) -> Result<impl Progress<T = Missing, Error = Self::Error>, Self::Error>
+    fn query_missing<Ps>(&mut self, paths: Ps) -> impl Progress<T = Missing, Error = Self::Error>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync,
     {
         debug!(?paths, "-> QueryMissing");
-        Self::track(&self.db, self.store.query_missing(paths).await, |missing| {
+        Self::track(&self.db, self.store.query_missing(paths), |missing| {
             debug!(?missing, "<- QueryMissing");
         })
-        .await
     }
 
     /// Returns a map of (output, store path) for the given derivation.
     #[instrument(skip(self))]
-    async fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
+    fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> Result<impl Progress<T = HashMap<String, String>, Error = Self::Error>, Self::Error> {
+    ) -> impl Progress<T = HashMap<String, String>, Error = Self::Error> {
         debug!(?path, "-> QueryDerivationOutputMap");
         Self::track(
             &self.db,
-            self.store.query_derivation_output_map(path).await,
+            self.store.query_derivation_output_map(path),
             |outputs| {
                 debug!("<- QueryDerivationOutputMap");
                 for (name, path) in outputs {
@@ -847,15 +823,14 @@ where
                 }
             },
         )
-        .await
     }
 
     #[instrument(skip(self))]
-    async fn build_paths_with_results<Ps>(
+    fn build_paths_with_results<Ps>(
         &mut self,
         paths: Ps,
         mode: BuildMode,
-    ) -> Result<impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>, Self::Error>
+    ) -> impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -864,7 +839,7 @@ where
         debug!(?paths, ?mode, "-> BuildPathsWithResults");
         Self::track(
             &self.db,
-            self.store.build_paths_with_results(paths, mode).await,
+            self.store.build_paths_with_results(paths, mode),
             |results| {
                 debug!("<- BuildPathsWithResults");
                 for (path, result) in results {
@@ -886,6 +861,5 @@ where
                 }
             },
         )
-        .await
     }
 }

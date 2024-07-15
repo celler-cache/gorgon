@@ -389,11 +389,7 @@ async fn get_derivation_info(
     let derivers = if in_path_str.ends_with(".drv") {
         vec![in_path_str.to_string()]
     } else {
-        store
-            .query_valid_derivers(in_path_str)
-            .await?
-            .result()
-            .await?
+        store.query_valid_derivers(in_path_str).result().await?
     };
 
     // Cache for seen derivations, build statuses and path validity.
@@ -524,7 +520,7 @@ where
     if let Some(valid) = paths_valid.get(path) {
         Ok(*valid)
     } else {
-        let valid = store.is_valid_path(path).await?.result().await?;
+        let valid = store.is_valid_path(path).result().await?;
         paths_valid.insert(path.to_string(), valid);
         Ok(valid)
     }
@@ -581,7 +577,6 @@ async fn get_derivation_log(
     } else {
         store
             .query_valid_derivers(in_path_str)
-            .await?
             .result()
             .await?
             .drain(..)

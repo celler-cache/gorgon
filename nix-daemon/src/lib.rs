@@ -340,7 +340,7 @@ pub struct PathInfo {
 /// #     .connect_unix("/nix/var/nix/daemon-socket/socket")
 /// #     .await?;
 /// #
-/// let is_valid_path = store.is_valid_path("/nix/store/...").await?.result().await?;
+/// let is_valid_path = store.is_valid_path("/nix/store/...").result().await?;
 /// # Ok::<_, nix_daemon::Error>(())
 /// # };
 /// ```
@@ -354,7 +354,7 @@ pub struct PathInfo {
 /// #     .connect_unix("/nix/var/nix/daemon-socket/socket")
 /// #     .await?;
 /// #
-/// let mut prog = store.is_valid_path("/nix/store/...").await?;
+/// let mut prog = store.is_valid_path("/nix/store/...");
 /// while let Some(stderr) = prog.next().await? {
 ///     match stderr {
 ///         _ => todo!(),
@@ -419,13 +419,13 @@ pub trait Store {
     fn is_valid_path<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
+    ) -> impl Progress<T = bool, Error = Self::Error>;
 
     /// Returns whether `Self::query_substitutable_paths()` would return anything.
     fn has_substitutes<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<Output = Result<impl Progress<T = bool, Error = Self::Error>, Self::Error>> + Send;
+    ) -> impl Progress<T = bool, Error = Self::Error>;
 
     /// Adds a file to the store.
     fn add_to_store<
@@ -440,9 +440,7 @@ pub trait Store {
         refs: Refs,
         repair: bool,
         source: R,
-    ) -> impl Future<
-        Output = Result<impl Progress<T = (String, PathInfo), Error = Self::Error>, Self::Error>,
-    > + Send
+    ) -> impl Progress<T = (String, PathInfo), Error = Self::Error>
     where
         Refs: IntoIterator + Send + Debug,
         Refs::IntoIter: ExactSizeIterator + Send,
@@ -454,7 +452,7 @@ pub trait Store {
         &mut self,
         paths: Paths,
         mode: BuildMode,
-    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send
+    ) -> impl Progress<T = (), Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -464,51 +462,38 @@ pub trait Store {
     fn ensure_path<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
+    ) -> impl Progress<T = (), Error = Self::Error>;
 
     /// Creates a temporary GC root, which persists until the client disconnects.
     fn add_temp_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
+    ) -> impl Progress<T = (), Error = Self::Error>;
 
     /// Creates a persistent GC root. This is what's normally meant by a GC root.
     fn add_indirect_root<Path: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: Path,
-    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
+    ) -> impl Progress<T = (), Error = Self::Error>;
 
     /// Returns the `(link, target)` of all known GC roots.
-    fn find_roots(
-        &mut self,
-    ) -> impl Future<
-        Output = Result<
-            impl Progress<T = HashMap<String, String>, Error = Self::Error>,
-            Self::Error,
-        >,
-    > + Send;
+    fn find_roots(&mut self) -> impl Progress<T = HashMap<String, String>, Error = Self::Error>;
 
     /// Applies client options. This changes the behaviour of future commands.
-    fn set_options(
-        &mut self,
-        opts: ClientSettings,
-    ) -> impl Future<Output = Result<impl Progress<T = (), Error = Self::Error>, Self::Error>> + Send;
+    fn set_options(&mut self, opts: ClientSettings) -> impl Progress<T = (), Error = Self::Error>;
 
     /// Returns a [`PathInfo`] struct for the given path.
     fn query_pathinfo<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<
-        Output = Result<impl Progress<T = Option<PathInfo>, Error = Self::Error>, Self::Error>,
-    > + Send;
+    ) -> impl Progress<T = Option<PathInfo>, Error = Self::Error>;
 
     /// Returns which of the passed paths are valid.
     fn query_valid_paths<Paths>(
         &mut self,
         paths: Paths,
         use_substituters: bool,
-    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
-           + Send
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -518,8 +503,7 @@ pub trait Store {
     fn query_substitutable_paths<Paths>(
         &mut self,
         paths: Paths,
-    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
-           + Send
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error>
     where
         Paths: IntoIterator + Send + Debug,
         Paths::IntoIter: ExactSizeIterator + Send,
@@ -530,15 +514,11 @@ pub trait Store {
     fn query_valid_derivers<S: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: S,
-    ) -> impl Future<Output = Result<impl Progress<T = Vec<String>, Error = Self::Error>, Self::Error>>
-           + Send;
+    ) -> impl Progress<T = Vec<String>, Error = Self::Error>;
 
     /// Takes a list of paths and queries which would be built, substituted or unknown,
     /// along with an estimate of the cumulative download and NAR sizes.
-    fn query_missing<Ps>(
-        &mut self,
-        paths: Ps,
-    ) -> impl Future<Output = Result<impl Progress<T = Missing, Error = Self::Error>, Self::Error>> + Send
+    fn query_missing<Ps>(&mut self, paths: Ps) -> impl Progress<T = Missing, Error = Self::Error>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
@@ -548,24 +528,14 @@ pub trait Store {
     fn query_derivation_output_map<P: AsRef<str> + Send + Sync + Debug>(
         &mut self,
         path: P,
-    ) -> impl Future<
-        Output = Result<
-            impl Progress<T = HashMap<String, String>, Error = Self::Error>,
-            Self::Error,
-        >,
-    > + Send;
+    ) -> impl Progress<T = HashMap<String, String>, Error = Self::Error>;
 
     /// Like `Self::build_paths()`, but returns a [`BuildResult`] for each entry in `paths`.
     fn build_paths_with_results<Ps>(
         &mut self,
         paths: Ps,
         mode: BuildMode,
-    ) -> impl Future<
-        Output = Result<
-            impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>,
-            Self::Error,
-        >,
-    > + Send
+    ) -> impl Progress<T = HashMap<String, BuildResult>, Error = Self::Error>
     where
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
