@@ -49,7 +49,7 @@ let mut adapter = DaemonProtocolAdapter::builder(&mut store)
     .await?;
 ```
 
-See [nix-supervisor](../nix-supervisor/) for a more complex example.
+See [nix-supervisor](https://codeberg.org/gorgon/gorgon/src/branch/main/nix-supervisor) for a more complex example.
 
 Limitations
 -----------
