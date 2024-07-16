@@ -1,11 +1,13 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 <!-- SPDX-FileCopyrightText: 2024 embr <git@liclac.eu> -->
 
-# nix-daemon
+nix-daemon
+==========
 
 A library for talking directly to the [Nix](https://nixos.org) Daemon.
 
-## Client Usage
+Client Usage
+------------
 
 To connect to a local `nix-daemon`, use a `nix::DaemonStore` (which implements the
 `Store` trait):
@@ -19,7 +21,8 @@ let mut store = DaemonStore::builder()
 let is_valid_path = store.is_valid_path("/nix/store/...").result().await?;
 ```
 
-## Server Usage
+Server Usage
+------------
 
 If you'd rather write your own `nix-daemon` compatible store, and expose it to existing
 tools like `nix-build`, you can implement the `Store` trait yourself and use
@@ -45,6 +48,14 @@ let mut adapter = DaemonProtocolAdapter::builder(&mut store)
     .adopt(cr, cw)
     .await?;
 ```
+
+See [nix-supervisor](../nix-supervisor/) for a more complex example.
+
+Limitations
+-----------
+
+- Not all opcodes are implemented (yet). Part of this is because in order to test them, we need to find somewhere they're actually used.
+- Only Nix 2.15+ and Lix is supported at the moment, but support for 2.3 is high on the todo list. (And fairly easy to add.)
 
 Contributing
 ------------
