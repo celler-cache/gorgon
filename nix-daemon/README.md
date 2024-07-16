@@ -5,6 +5,47 @@
 
 A library for talking directly to the [Nix](https://nixos.org) Daemon.
 
+## Client Usage
+
+To connect to a local `nix-daemon`, use a `nix::DaemonStore` (which implements the
+`Store` trait):
+
+```rust
+use nix_daemon::{Store, Progress, nix::DaemonStore};
+
+let mut store = DaemonStore::builder()
+    .connect_unix("/nix/var/nix/daemon-socket/socket")
+    .await?;
+let is_valid_path = store.is_valid_path("/nix/store/...").result().await?;
+```
+
+## Server Usage
+
+If you'd rather write your own `nix-daemon` compatible store, and expose it to existing
+tools like `nix-build`, you can implement the `Store` trait yourself and use
+`nix::DaemonProtocolAdapter`:
+
+```rust
+use tokio::net::UnixListener;
+use nix_daemon::nix::{DaemonStore, DaemonProtocolAdapter};
+
+// Accept a connection.
+let listener = UnixListener::bind("/tmp/mystore.sock")?;
+let (conn, _addr) = listener.accept().await?;
+
+// This will just use `DaemonStore` to proxy to the normal daemon, but you can
+// pass your own `Store` implementation here instead.
+let mut store = DaemonStore::builder()
+    .connect_unix("/nix/var/nix/daemon-socket/socket")
+    .await?;
+
+// Run the adapter!
+let (cr, cw) = conn.into_split();
+let mut adapter = DaemonProtocolAdapter::builder(&mut store)
+    .adopt(cr, cw)
+    .await?;
+```
+
 Contributing
 ------------
 
