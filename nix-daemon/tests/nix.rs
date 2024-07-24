@@ -20,21 +20,27 @@ const INVALID_STORE_PATH: &'static str =
 fn find_nix_in_store() -> String {
     for dir in std::env::var("PATH").unwrap().split(":") {
         let path = std::path::Path::new(dir).join("nix");
-        if path.try_exists().unwrap() {
-            return path
-                // /run/current-system/sw/bin/nix
-                .canonicalize()
-                .unwrap()
-                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin/nix
-                .parent()
-                .unwrap()
-                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin
-                .parent()
-                .unwrap()
-                // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1
-                .to_str()
-                .expect("invalid path")
-                .to_owned();
+        match path.try_exists() {
+            Ok(true) => {
+                return path
+                    // /run/current-system/sw/bin/nix
+                    .canonicalize()
+                    .unwrap()
+                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin/nix
+                    .parent()
+                    .unwrap()
+                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin
+                    .parent()
+                    .unwrap()
+                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1
+                    .to_str()
+                    .expect("invalid path")
+                    .to_owned();
+            }
+            Ok(false) => {}
+            Err(err @ std::io::Error { .. })
+                if err.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(err) => panic!("try_exists() failed: {}", err),
         }
     }
     panic!("No `nix` command in $PATH");
