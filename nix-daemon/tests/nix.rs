@@ -153,9 +153,11 @@ async fn test_has_substitutes() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store.has_substitutes(find_nix_in_store()).split().await;
-    assert_eq!(Vec::<Stderr>::new(), stderrs);
-    assert_eq!(true, r.unwrap());
+    assert!(store
+        .has_substitutes(find_nix_in_store())
+        .result()
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

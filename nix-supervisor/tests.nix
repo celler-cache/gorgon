@@ -3,7 +3,9 @@
 # SPDX-FileCopyrightText: 2024 embr <git@liclac.eu>
 
 { pkgs ? import ../nix/nixpkgs.default.nix
+, lib ? pkgs.lib
 , nix-supervisor ? import ./. { inherit pkgs; }
+, cargo ? pkgs.cargo
 , hello ? pkgs.hello
 }:
 
@@ -14,6 +16,26 @@ let
     (flip filterAttrs pkgs.nixVersions (attr: pkg: hasPrefix "nix_" attr
       && versionAtLeast pkg.version "2.18" && versionOlder pkg.version "2.23")) //
     (flip filterAttrs pkgs.lixVersions (attr: pkg: hasPrefix "lix_" attr));
+
+  # Build nix-daemon's `nix` integration tests as a standalone binary.
+  # We want to run these tests against all supported Nix/Lix versions.
+  # This should maybe be moved to `nix-daemon/tests.nix`.
+  nix-daemon-nix-integration =
+    pkgs.rustPlatform.buildRustPackage {
+      name = "nix-daemon-nix-integration";
+      inherit (nix-supervisor) src buildInputs nativeBuildInputs;
+      cargoDepsName = "nix-supervisor";
+      cargoLock.lockFile = ../Cargo.lock;
+
+      cargoBuildFlags = [ "-p=nix-daemon" "--test=nix" ];
+      dontCargoCheck = true;
+      installPhase = ''
+        mkdir -p $out/bin
+        bin=$(find target/*/release/deps/ -type f -executable | grep -E 'nix-[0-9a-z]+$')
+        echo "found test runner binary: $bin"
+        cp $bin $out/bin/nix-integration
+      '';
+    };
 in
 
 pkgs.testers.nixosTest ({ lib, ... }: {
@@ -42,6 +64,9 @@ pkgs.testers.nixosTest ({ lib, ... }: {
       isNormalUser = true;
     };
 
+    # Offline binary cache used for some nix-daemon tests.
+    nix.settings.substituters = lib.mkForce [ "file:///tmp/subst" ];
+
     specialisation = lib.mapAttrs (attr: pkg: {
       configuration.nix.package = pkg;
     }) supportedNixVersions;
@@ -58,6 +83,11 @@ pkgs.testers.nixosTest ({ lib, ... }: {
 
         # Check the current nix version.
         print(machine.succeed("nix --version"));
+
+        # Copy nix to the substitute store. Needed for some nix-daemon tests.
+        machine.succeed("nix --extra-experimental-features nix-command copy -v --to file:///tmp/subst $(type -p nix)")
+        # Run cargo integration tests, with and without the supervisor in the middle.
+        machine.succeed("sudo -u testuser env -C $(sudo -u testuser mktemp -d) ${nix-daemon-nix-integration}/bin/nix-integration")
 
         # Regular, old-fashioned CLI.
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-build '<nixpkgs>' -A hello >&2")
