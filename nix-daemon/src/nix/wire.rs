@@ -897,6 +897,7 @@ pub async fn write_pathinfo<W: AsyncWriteExt + Unpin>(
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+    use std::time::Duration;
     use tokio_stream::StreamExt;
     use tokio_test::io::Builder;
 
@@ -1484,6 +1485,25 @@ mod tests {
         let mut mock = Builder::new()
             .read(&2u64.to_le_bytes())
             .read(&[1, 2])
+            .read(&4u64.to_le_bytes())
+            .read(&[3, 4, 5, 6])
+            .read(&0u64.to_le_bytes())
+            .build();
+        let mut buf = Vec::new();
+        let len = FramedReader::new(&mut mock)
+            .read_to_end(&mut buf)
+            .await
+            .unwrap();
+        assert_eq!(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], &buf[..]);
+        assert_eq!(6, len);
+    }
+
+    #[tokio::test]
+    async fn test_framedreader_2f_wait() {
+        let mut mock = Builder::new()
+            .read(&2u64.to_le_bytes())
+            .read(&[1, 2])
+            .wait(Duration::from_millis(100))
             .read(&4u64.to_le_bytes())
             .read(&[3, 4, 5, 6])
             .read(&0u64.to_le_bytes())
