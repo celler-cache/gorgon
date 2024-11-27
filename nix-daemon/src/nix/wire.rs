@@ -9,11 +9,13 @@ use crate::{
     PathInfo, Result, ResultExt, Stderr, StderrField, StderrResult, StderrStartActivity, Verbosity,
 };
 use async_stream::try_stream;
+use bytes::BufMut;
 use chrono::{DateTime, Utc};
-use futures::{future::OptionFuture, Future};
+use futures::future::OptionFuture;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::task::Poll;
 use tap::{Tap, TapFallible};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio_stream::{Stream, StreamExt};
@@ -96,36 +98,52 @@ impl From<TryFromPrimitiveError<Op>> for Error {
 /// The stream is terminated by a frame of length 0.
 #[derive(Debug)]
 pub struct FramedReader<'r, R: AsyncReadExt + Unpin + Debug> {
-    r: &'r mut R,
-    frame_len: usize,
+    r: std::pin::Pin<&'r mut R>,
+    header: [u8; 8],
+    header_read: u8,
+    done: bool,
 }
-
 impl<'r, R: AsyncReadExt + Unpin + Debug> FramedReader<'r, R> {
     pub fn new(r: &'r mut R) -> Self {
-        Self { r, frame_len: 0 }
+        Self {
+            r: std::pin::Pin::new(r),
+            header: 0u64.to_le_bytes(),
+            header_read: 0,
+            done: false,
+        }
     }
 
-    pub async fn read_chunked(&mut self, buf: &mut ReadBuf<'_>) -> std::io::Result<()> {
-        if self.frame_len == 0 {
-            self.frame_len = read_u64(self.r)
-                .await?
-                .try_into()
-                .expect("u64 chunk length doesn't fit into usize");
-            trace!(self.frame_len, "read frame header");
+    fn remaining(&self) -> u64 {
+        u64::from_le_bytes(self.header)
+    }
+
+    fn consume(&mut self, n: u64) {
+        self.header = (self.remaining() - n).to_le_bytes();
+    }
+
+    fn read_header(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        while self.header_read < 8 {
+            let mut stkbuf = self.header;
+            let mut buf = ReadBuf::new(&mut stkbuf[self.header_read as usize..]);
+            self.header_read += match self.r.as_mut().poll_read(cx, &mut buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+                Poll::Ready(Ok(())) => {
+                    let n = buf.filled().len();
+                    self.header = stkbuf;
+                    if n == 0 {
+                        return Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()));
+                    }
+                    n as u8
+                }
+            };
         }
-        if self.frame_len > 0 {
-            let chunk_len = self
-                .r
-                .read(buf.initialize_unfilled_to(std::cmp::min(self.frame_len, buf.remaining())))
-                .await?;
-            buf.advance(chunk_len);
-            self.frame_len = self
-                .frame_len
-                .checked_sub(chunk_len)
-                .expect("read more than chunk_len, somehow");
-            trace!(chunk_len, remaining = self.frame_len, "read frame chunk");
-        }
-        Ok(())
+        self.header_read = 0;
+        self.done = self.remaining() == 0;
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -134,10 +152,35 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let read = self.read_chunked(buf);
-        tokio::pin!(read);
-        read.as_mut().as_mut().poll(cx)
+    ) -> Poll<std::io::Result<()>> {
+        while !self.done && self.remaining() == 0 {
+            match self.as_mut().read_header(cx) {
+                Poll::Ready(Ok(())) => {}
+                ret @ _ => return ret,
+            };
+        }
+
+        if self.done {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut b2 = buf.take(self.remaining().try_into().unwrap_or(usize::MAX));
+        match self.r.as_mut().poll_read(cx, &mut b2) {
+            Poll::Ready(Ok(())) => {}
+            ret @ _ => return ret,
+        }
+
+        let len = b2.filled().len();
+        if len == 0 {
+            return Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()));
+        }
+
+        self.consume(len as u64);
+        unsafe {
+            // Safety: We filled in these bytes with b2 above
+            buf.advance_mut(len)
+        }
+        Poll::Ready(Ok(()))
     }
 }
 

@@ -1455,13 +1455,21 @@ where
                         let repair = wire::read_bool(&mut self.r)
                             .await
                             .with_field("AddToStore.repair")?;
-                        let source = wire::FramedReader::new(&mut self.r);
+                        let mut source = wire::FramedReader::new(&mut self.r);
 
                         let (name, pi) = forward_stderr(
                             &mut self.w,
-                            self.store.add_to_store(name, cam_str, refs, repair, source),
+                            self.store
+                                .add_to_store(name, cam_str, refs, repair, &mut source),
                         )
                         .await?;
+
+                        // Ensure source is drained to avoid stream desynchronization
+                        let mut sink = tokio::io::sink();
+                        tokio::io::copy(&mut source, &mut sink)
+                            .await
+                            .map_err(|e| Error::IO(e))?;
+
                         wire::write_string(&mut self.w, name)
                             .await
                             .with_field("AddToStore.name")?;
