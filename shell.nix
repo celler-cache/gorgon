@@ -18,5 +18,8 @@ pkgs.mkShell {
 
     # test dependencies
     hello
-  ];
+  ] ++ (lib.optionals stdenv.isDarwin [
+    iconv
+    darwin.apple_sdk.frameworks.SystemConfiguration
+  ]);
 }
