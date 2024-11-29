@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2023 embr <git@liclac.eu>
+// SPDX-FileCopyrightText: 2024 Erin Shepherd <erin.shepherd@e43.eu>
 //
 // SPDX-License-Identifier: EUPL-1.2
 
@@ -9,7 +10,6 @@ use crate::{
     PathInfo, Result, ResultExt, Stderr, StderrField, StderrResult, StderrStartActivity, Verbosity,
 };
 use async_stream::try_stream;
-use bytes::BufMut;
 use chrono::{DateTime, Utc};
 use futures::future::OptionFuture;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
@@ -164,21 +164,18 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
             return Poll::Ready(Ok(()));
         }
 
-        let mut b2 = buf.take(self.remaining().try_into().unwrap_or(usize::MAX));
-        match self.r.as_mut().poll_read(cx, &mut b2) {
+        let len_before = buf.filled().len();
+        let remaining = self.remaining();
+        let r = self.r.as_mut().take(remaining);
+        match std::pin::pin!(r).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {}
             ret @ _ => return ret,
         }
 
-        let len = b2.filled().len();
-        if len == 0 {
+        let read = buf.filled().len() - len_before;
+        self.consume(read as u64);
+        if read == 0 {
             return Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()));
-        }
-
-        self.consume(len as u64);
-        unsafe {
-            // Safety: We filled in these bytes with b2 above
-            buf.advance_mut(len)
         }
         Poll::Ready(Ok(()))
     }
