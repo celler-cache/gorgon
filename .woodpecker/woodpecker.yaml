@@ -8,6 +8,11 @@ steps:
   commands:
   - nix-shell --run 'reuse lint'
 
+- name: commitlint
+  image: bash
+  commands:
+  - nix-shell --run 'commitlint --from=initial'
+
 - name: no-refs
   image: bash
   commands:
