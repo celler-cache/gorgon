@@ -817,10 +817,9 @@ pub async fn write_client_settings<W: AsyncWriteExt + Unpin>(
         .with_field("ClientSettings.__obsolete_use_build_hook")?;
     write_verbosity(
         w,
-        if cs.verbose_build {
-            Verbosity::Error
-        } else {
-            Verbosity::Vomit
+        match cs.verbose_build {
+            true => Verbosity::Vomit,
+            false => Verbosity::Error,
         },
     )
     .await
