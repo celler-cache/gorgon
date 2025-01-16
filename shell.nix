@@ -14,5 +14,9 @@ pkgs.mkShell {
     # repo tools
     reuse # check license compliance
     commitlint # check commit messages
+    woodpecker-cli
+
+    # test dependencies
+    hello
   ];
 }

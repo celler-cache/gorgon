@@ -4,90 +4,62 @@
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
-, nix-supervisor ? import ./. { inherit pkgs; }
+, nix-supervisor ? pkgs.callPackage ./. {}
+, nix-daemon-tests ? pkgs.callPackage ../nix-daemon/tests.nix {}
+, nixPackages ? pkgs.callPackage ../nix/nix-packages.nix {}
 , cargo ? pkgs.cargo
 , hello ? pkgs.hello
 }:
 
 let
-  # Version support:
-  # - Nix 2.23: nix-build sends Op(0) for some reason??
-  supportedNixVersions = with pkgs.lib;
-    (flip filterAttrs pkgs.nixVersions (attr: pkg: hasPrefix "nix_" attr
-      && versionAtLeast pkg.version "2.18" && versionOlder pkg.version "2.23")) //
-    (flip filterAttrs pkgs.lixVersions (attr: pkg: hasPrefix "lix_" attr));
+  inherit (nix-daemon-tests) test-nix;
 
-  # Build nix-daemon's `nix` integration tests as a standalone binary.
-  # We want to run these tests against all supported Nix/Lix versions.
-  # This should maybe be moved to `nix-daemon/tests.nix`.
-  nix-daemon-nix-integration =
-    pkgs.rustPlatform.buildRustPackage {
-      name = "nix-daemon-nix-integration";
-      inherit (nix-supervisor) src buildInputs nativeBuildInputs;
-      cargoDepsName = "nix-supervisor";
-      cargoLock.lockFile = ../Cargo.lock;
+  mkNixTest = attr: nix: pkgs.testers.nixosTest ({ lib, ... }: {
+    name = "nix-supervisor-test-${attr}";
 
-      cargoBuildFlags = [ "-p=nix-daemon" "--test=nix" ];
-      dontCargoCheck = true;
-      installPhase = ''
-        mkdir -p $out/bin
-        bin=$(find target/*/release/deps/ -type f -executable | grep -E 'nix-[0-9a-z]+$')
-        echo "found test runner binary: $bin"
-        cp $bin $out/bin/nix-integration
-      '';
-    };
-in
+    nodes.machine = { modulesPath, ... }: {
+      imports = [
+        "${modulesPath}/installer/cd-dvd/channel.nix"
+      ];
 
-pkgs.testers.nixosTest ({ lib, ... }: {
-  name = "nix-supervisor-test";
+      environment.systemPackages = [ hello ];
+      system.extraDependencies = [ hello.drvPath ];
 
-  nodes.machine = { modulesPath, ... }: {
-    imports = [
-      "${modulesPath}/installer/cd-dvd/channel.nix"
-    ];
-
-    system.extraDependencies = [
-      hello hello.drvPath
-    ];
-
-    systemd.services.nix-supervisor = {
-      after = [ "network.target" "nix-daemon.service" ];
-      serviceConfig = {
-        ExecStart = ''${nix-supervisor}/bin/nix-supervisor \
-          --sock=/tmp/nix-supervisor.sock'';
-        UMask = "0000";
+      systemd.services.nix-supervisor = {
+        after = [ "network.target" "nix-daemon.service" ];
+        serviceConfig = {
+          ExecStart = ''${nix-supervisor}/bin/nix-supervisor \
+            --sock=/tmp/nix-supervisor.sock'';
+          UMask = "0000";
+        };
+        wantedBy = [ "multi-user.target" ];
       };
-      wantedBy = [ "multi-user.target" ];
+
+      users.users.testuser = {
+        isNormalUser = true;
+      };
+
+      nix.package = nix;
+      nix.settings = {
+        substituters = lib.mkForce [ "file:///tmp/subst" ];
+        trusted-substituters = [ "testuser" ];
+        trusted-users = [ "testuser" ];
+      };
     };
 
-    users.users.testuser = {
-      isNormalUser = true;
-    };
-
-    # Offline binary cache used for some nix-daemon tests.
-    nix.settings.substituters = lib.mkForce [ "file:///tmp/subst" ];
-
-    specialisation = lib.mapAttrs (attr: pkg: {
-      configuration.nix.package = pkg;
-    }) supportedNixVersions;
-  };
-
-  testScript = { nodes, ... }: let
-    specialisations = "${nodes.machine.system.build.toplevel}/specialisation";
-  in ''
-    from os import listdir
-
-    for specialisation in listdir('${specialisations}'):
-        machine.succeed(f'${specialisations}/{specialisation}/bin/switch-to-configuration test')
+    testScript = { nodes, ... }: ''
         machine.wait_for_unit("nix-supervisor")
 
         # Check the current nix version.
-        print(machine.succeed("nix --version"));
+        print(machine.succeed('nix --version'))
+        print(machine.succeed('cat /etc/nix/nix.conf'))
 
-        # Copy nix to the substitute store. Needed for some nix-daemon tests.
-        machine.succeed("nix --extra-experimental-features nix-command copy -v --to file:///tmp/subst $(type -p nix)")
-        # Run cargo integration tests, with and without the supervisor in the middle.
-        machine.succeed("sudo -u testuser env -C $(sudo -u testuser mktemp -d) ${nix-daemon-nix-integration}/bin/nix-integration")
+        # Set up a substitute store containing nix, for the nix-daemon substitution tests.
+        print(machine.succeed('nix --extra-experimental-features nix-command copy -v --to file:///tmp/subst ${hello} ${hello.drvPath}'))
+        print(machine.succeed('echo "WantMassQuery: 1" >> /tmp/subst/nix-cache-info'))
+
+        # Run the nix-daemon integration tests through nix-supervisor.
+        print(machine.succeed('sudo -u testuser env -C $(sudo -u testuser mktemp -d) NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock ${test-nix}/bin/nix-integration'))
 
         # Regular, old-fashioned CLI.
         machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix-build '<nixpkgs>' -A hello >&2")
@@ -111,5 +83,7 @@ pkgs.testers.nixosTest ({ lib, ... }: {
         # For some reason, these hang forever when ran in test cases.
         # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' why-depends -f '<nixpkgs>' hello hello >&2")
         # machine.succeed("sudo -u testuser env NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock nix --extra-experimental-features 'nix-command' develop -f '<nixpkgs>' hello -c hello >&2")
-  '';
-})
+    '';
+  });
+in
+lib.mapAttrs mkNixTest nixPackages

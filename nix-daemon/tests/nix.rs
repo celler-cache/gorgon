@@ -5,7 +5,8 @@
 mod utils;
 
 use nix_daemon::{
-    nix::DaemonStore, BuildMode, ClientSettings, Progress, ProgressExt, Stderr, Store, Verbosity,
+    nix::DaemonStore, BuildMode, ClientSettings, Error, NixError, Progress, ProgressExt, Stderr,
+    Store, Verbosity,
 };
 use std::io::Write;
 use std::{collections::HashMap, process::Stdio};
@@ -16,23 +17,23 @@ use utils::init_logging;
 const INVALID_STORE_PATH: &'static str =
     "/nix/store/ffffffffffffffffffffffffffffffff-invalid-1.0.0";
 
-// Find the store path for the system's `nix` command.
-fn find_nix_in_store() -> String {
+// Find the store path for the "hello" command.
+fn find_hello_in_store() -> String {
     for dir in std::env::var("PATH").unwrap().split(":") {
-        let path = std::path::Path::new(dir).join("nix");
+        let path = std::path::Path::new(dir).join("hello");
         match path.try_exists() {
             Ok(true) => {
                 return path
-                    // /run/current-system/sw/bin/nix
+                    // /run/current-system/sw/bin/hello
                     .canonicalize()
                     .unwrap()
-                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin/nix
+                    // /nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1/bin/hello
                     .parent()
                     .unwrap()
-                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1/bin
+                    // /nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1/bin
                     .parent()
                     .unwrap()
-                    // /nix/store/ffffffffffffffffffffffffffffffff-nix-2.18.1
+                    // /nix/store/ffffffffffffffffffffffffffffffff-hello-2.12.1
                     .to_str()
                     .expect("invalid path")
                     .to_owned();
@@ -43,7 +44,7 @@ fn find_nix_in_store() -> String {
             Err(err) => panic!("try_exists() failed: {}", err),
         }
     }
-    panic!("No `nix` command in $PATH");
+    panic!("No `hello` command in $PATH");
 }
 
 // Instantiates a derivation that creates a known derivation in the store.
@@ -108,7 +109,7 @@ async fn test_is_valid_path_true() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let (stderrs, r) = store.is_valid_path(find_nix_in_store()).split().await;
+    let (stderrs, r) = store.is_valid_path(find_hello_in_store()).split().await;
     assert_eq!(Vec::<Stderr>::new(), stderrs);
     assert_eq!(true, r.unwrap());
 }
@@ -141,7 +142,7 @@ async fn test_query_valid_paths_true() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let nix_path = find_nix_in_store();
+    let nix_path = find_hello_in_store();
     let r = store.query_valid_paths(&[&nix_path], true).result().await;
     assert_eq!(vec![nix_path], r.unwrap());
 }
@@ -153,11 +154,20 @@ async fn test_has_substitutes() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    assert!(store
-        .has_substitutes(find_nix_in_store())
+    store
+        .set_options(ClientSettings {
+            use_substitutes: true,
+            ..Default::default()
+        })
         .result()
         .await
-        .unwrap());
+        .expect("SetOptions failed");
+    match store.has_substitutes(find_hello_in_store()).result().await {
+        Ok(has_subs) => assert!(has_subs),
+        Err(Error::NixError(NixError { msg, .. }))
+            if msg.starts_with("HasSubstitutes is not supported in Lix.") => {}
+        Err(err) => panic!("{err}"),
+    };
 }
 
 #[tokio::test]
@@ -167,10 +177,28 @@ async fn test_query_substitutable_paths() {
         .connect_unix("/nix/var/nix/daemon-socket/socket")
         .await
         .expect("Couldn't connect to daemon");
-    let nix_path = find_nix_in_store();
-    let (stderrs, r) = store.query_substitutable_paths(&[&nix_path]).split().await;
-    assert_eq!(Vec::<Stderr>::new(), stderrs);
-    assert_eq!(vec![nix_path], r.unwrap());
+    store
+        .set_options(ClientSettings {
+            use_substitutes: true,
+            ..Default::default()
+        })
+        .result()
+        .await
+        .expect("SetOptions failed");
+
+    let bad_paths = store
+        .query_valid_paths(&[INVALID_STORE_PATH], true)
+        .result()
+        .await;
+    assert_eq!(Vec::<String>::new(), bad_paths.unwrap());
+
+    let nix_path = find_hello_in_store();
+    let sub_paths = store
+        .query_substitutable_paths(&[&nix_path])
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(vec![nix_path], sub_paths);
 }
 
 #[tokio::test]

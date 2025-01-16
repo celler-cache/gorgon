@@ -2,57 +2,43 @@
 # SPDX-FileCopyrightText: 2023 Alyssa Ross <hi@alyssa.is>
 
 { pkgs ? import ../nix/nixpkgs.default.nix
-, nix-web ? import ./. { inherit pkgs; }
+, lib ? pkgs.lib
+, nix-web ? pkgs.callPackage ./. {}
+, nixPackages ? pkgs.callPackage ../nix/nix-packages.nix {}
 }:
 
 let
-  supportedNixVersions = with pkgs.lib; flip filterAttrs pkgs.nixVersions
-    (attr: pkg: hasPrefix "nix_" attr && versionAtLeast pkg.version "2.18");
-
   testDrv = derivation {
     name = "test";
     builder = "/bin/sh";
     args = [ "-c" ": > $out" ];
     inherit (pkgs.stdenv.hostPlatform) system;
   };
-in
 
-pkgs.testers.nixosTest ({ lib, ... }: {
-  name = "nix-web-test";
+  mkNixTest = attr: nix: pkgs.testers.nixosTest ({ lib, ... }: {
+    name = "nix-web-test-${attr}";
 
-  nodes.machine = {
-    system.extraDependencies = [
-      testDrv.drvPath
-    ];
+    nodes.machine = {
+      system.extraDependencies = [
+        testDrv.drvPath
+      ];
 
-    systemd.sockets.nix-web = {
-      wantedBy = [ "sockets.target" ];
-      socketConfig.ListenStream = "[::1]:1234";
+      systemd.sockets.nix-web = {
+        wantedBy = [ "sockets.target" ];
+        socketConfig.ListenStream = "[::1]:1234";
+      };
+
+      systemd.packages = [ nix-web ];
+      systemd.services.nix-web.path = [ nix ];
+
+      nix.package = nix;
     };
 
-    systemd.packages = [
-      (nix-web.overrideAttrs ({ ... }: {
-        NIX_WEB_BUILD_NIX_CLI_PATH = "nix";
-      }))
-    ];
-
-    specialisation = lib.mapAttrs (attr: pkg: {
-      configuration = {
-        nix.package = pkg;
-        systemd.services.nix-web.path = [ pkg ];
-      };
-    }) supportedNixVersions;
-  };
-
-  testScript = { nodes, ... }: let
-    specialisations = "${nodes.machine.system.build.toplevel}/specialisation";
-  in ''
-    from os import listdir
-
-    for specialisation in listdir('${specialisations}'):
-        machine.succeed(f'${specialisations}/{specialisation}/bin/switch-to-configuration test')
+    testScript = { nodes, ... }: ''
         machine.wait_for_unit("sockets.target")
         machine.succeed("curl --fail-with-body http://localhost:1234/ >&2")
         machine.succeed("curl --fail-with-body http://localhost:1234${testDrv.drvPath} >&2")
-  '';
-})
+    '';
+  });
+in
+lib.mapAttrs mkNixTest nixPackages
