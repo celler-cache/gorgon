@@ -23,7 +23,7 @@ nix --extra-experimental-features 'nix-command flakes' run 'git+https://codeberg
     (import ((builtins.fetchTarball {
       url = "https://codeberg.org/gorgon/gorgon/archive/<commit>.tar.gz";
       sha256 = ...;
-    }) + "/nix-web") {})
+    }) + "/nix-supervisor") {})
   ];
 
   systemd.sockets.nix-supervisor = {
@@ -46,7 +46,7 @@ Or clone this repository and use the overlay:
 { pkgs, ... }:
 
 {
-  systemd.packages = with pkgs; [ nix-web ];
+  systemd.packages = with pkgs; [ nix-supervisor ];
 
   systemd.sockets.nix-supervisor = {
     socketConfig.ListenStream = [
