@@ -10,6 +10,8 @@
 with lib;
 
 cleanSourceWith {
-  filter = path: type: (type == "regular" -> !hasSuffix ".nix" path);
+  filter = path: type: (type == "regular" -> (
+    (!hasSuffix ".nix" path) && (!hasPrefix ".woodpecker/" path)
+  ));
   src = cleanSource src;
 }
