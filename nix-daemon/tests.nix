@@ -27,6 +27,17 @@ let
         echo "found test runner binary: $bin"
         cp $bin $out/bin/nix-integration
       '';
+
+      # Binary cache used for the substitution tests.
+      passthru.binary-cache =
+        (pkgs.mkBinaryCache {
+          name = "test-binary-cache";
+          rootPaths = with pkgs; [ hello ];
+        }).overrideAttrs ({ buildCommand, ... }: {
+          buildCommand = buildCommand + ''
+            echo 'WantMassQuery: 1' >> $out/nix-cache-info
+          '';
+        });
     };
 
   # Generate a nix integration test for the given nix package.
@@ -47,7 +58,7 @@ let
 
       nix.package = nix;
       nix.settings = {
-        substituters = lib.mkForce [ "file:///tmp/subst" ];
+        substituters = lib.mkForce [ "file://${test-nix.binary-cache}" ];
         trusted-substituters = [ "testuser" ];
         trusted-users = [ "testuser" ];
       };
@@ -55,10 +66,6 @@ let
     testScript = { nodes, ... }: ''
       print(machine.succeed('nix --version'))
       print(machine.succeed('cat /etc/nix/nix.conf'))
-
-      # Set up a substitute store containing nix, for the substitution tests.
-      print(machine.succeed('nix --extra-experimental-features nix-command copy -v --to file:///tmp/subst ${hello} ${hello.drvPath}'))
-      print(machine.succeed('echo "WantMassQuery: 1" >> /tmp/subst/nix-cache-info'))
 
       # Run the nix integration tests!
       print(machine.succeed('sudo -u testuser env -C $(sudo -u testuser mktemp -d) ${test-nix}/bin/nix-integration'))

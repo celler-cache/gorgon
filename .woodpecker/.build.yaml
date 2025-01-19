@@ -22,7 +22,7 @@ steps:
   image: bash
   commands:
   - test -n "$CI_HACK_WORK_DIR" && cd $CI_HACK_WORK_DIR; true
-  - nix-build --no-out-link nix-daemon/tests.nix -A test-nix
+  - nix-build --no-out-link nix-daemon/tests.nix -A test-nix -A test-nix.binary-cache
 
 when:
 - event: [ push, pull_request, pull_request_closed, tag, release, manual, cron ]

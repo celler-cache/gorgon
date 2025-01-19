@@ -41,7 +41,7 @@ let
 
       nix.package = nix;
       nix.settings = {
-        substituters = lib.mkForce [ "file:///tmp/subst" ];
+        substituters = lib.mkForce [ "file://${test-nix.binary-cache}" ];
         trusted-substituters = [ "testuser" ];
         trusted-users = [ "testuser" ];
       };
@@ -53,10 +53,6 @@ let
         # Check the current nix version.
         print(machine.succeed('nix --version'))
         print(machine.succeed('cat /etc/nix/nix.conf'))
-
-        # Set up a substitute store containing nix, for the nix-daemon substitution tests.
-        print(machine.succeed('nix --extra-experimental-features nix-command copy -v --to file:///tmp/subst ${hello} ${hello.drvPath}'))
-        print(machine.succeed('echo "WantMassQuery: 1" >> /tmp/subst/nix-cache-info'))
 
         # Run the nix-daemon integration tests through nix-supervisor.
         print(machine.succeed('sudo -u testuser env -C $(sudo -u testuser mktemp -d) NIX_DAEMON_SOCKET_PATH=/tmp/nix-supervisor.sock ${test-nix}/bin/nix-integration'))
