@@ -175,7 +175,7 @@ impl DaemonStoreBuilder {
     ) -> Result<DaemonStore<C>> {
         let mut store = DaemonStore {
             conn,
-            buffer: [0u8; 1024],
+            buffer: [0u8; 32 * 1024],
             proto: Proto(0, 0),
         };
         store.handshake().await?;
@@ -220,7 +220,7 @@ impl DaemonStoreBuilder {
 #[derive(Debug)]
 pub struct DaemonStore<C: AsyncReadExt + AsyncWriteExt + Unpin> {
     conn: C,
-    buffer: [u8; 1024],
+    buffer: [u8; 32 * 1024],
     /// Negotiated protocol version.
     pub proto: Proto,
 }
