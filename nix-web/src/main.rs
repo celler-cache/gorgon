@@ -134,7 +134,7 @@ fn init_logging(args: &Args) {
             1 => tracing_subscriber::filter::LevelFilter::DEBUG,
             2.. => tracing_subscriber::filter::LevelFilter::TRACE,
         })
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 }
 
