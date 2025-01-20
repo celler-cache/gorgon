@@ -148,6 +148,7 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> FramedReader<'r, R> {
 }
 
 impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
+    #[instrument(name = "FramedReader", skip_all)]
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -155,18 +156,20 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
     ) -> Poll<std::io::Result<()>> {
         while !self.done && self.remaining() == 0 {
             match self.as_mut().read_header(cx) {
-                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Ok(())) => trace!(len = self.remaining(), "Read header"),
                 ret @ _ => return ret,
             };
         }
 
         if self.done {
+            trace!("Done");
             return Poll::Ready(Ok(()));
         }
 
         let len_before = buf.filled().len();
         let remaining = self.remaining();
         let r = self.r.as_mut().take(remaining);
+        trace!(len_before, remaining, "Reading...");
         match std::pin::pin!(r).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {}
             ret @ _ => return ret,
@@ -174,6 +177,7 @@ impl<'r, R: AsyncReadExt + Unpin + Debug> AsyncRead for FramedReader<'r, R> {
 
         let read = buf.filled().len() - len_before;
         self.consume(read as u64);
+        trace!(len_before, remaining, read, "Read");
         if read == 0 {
             return Poll::Ready(Err(std::io::ErrorKind::UnexpectedEof.into()));
         }
