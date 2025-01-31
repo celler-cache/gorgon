@@ -9,4 +9,5 @@ members = [
     "nix-web",
     "nix-supervisor",
     "nix-daemon",
+    "gorgond",
 ]

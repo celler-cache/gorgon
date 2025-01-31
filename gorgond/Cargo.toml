@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgond"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+
+[dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+diesel = { version = "2.2.7", features = ["chrono", "uuid", "postgres_backend"] }
+diesel-async = { version = "0.5.2", features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel_migrations = "2.2.0"
+thiserror = "2.0.11"
+tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros", "parking_lot"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }

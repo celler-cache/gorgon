@@ -7,9 +7,14 @@ pkgs.mkShell {
   buildInputs = with pkgs; [
     # build dependencies
     stdenv # C/C++ compiler and deps for crates with bindings
+    pkg-config
+    openssl
 
-    # sea-orm-cli
-    pkg-config openssl
+    # script dependencies
+    fish
+
+    # database tooling
+    diesel-cli
 
     # repo tools
     reuse # check license compliance

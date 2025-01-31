@@ -1,0 +1,12 @@
+#!/usr/bin/env fish
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+# Move to the /gorgond directory, so diesel will find ./diesel.toml and ./migrations.
+cd (dirname (status dirname))
+
+# Unless $DATABASE_URL has been manually set, use $GORGOND_DATABASE_URL from .envrc.
+set -q DATABASE_URL; or set -x DATABASE_URL $GORGOND_DATABASE_URL
+
+exec diesel $argv
