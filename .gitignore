@@ -5,6 +5,7 @@
 
 .direnv
 /target
+/tmp
 result
 result-*
 
