@@ -13,6 +13,8 @@ use diesel_async::{
 use std::{cmp::min, error::Error as StdError};
 use tracing::{debug, debug_span, info, instrument};
 
+pub mod http;
+
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// Increase log level.
@@ -24,11 +26,13 @@ struct Args {
     quiet: u8,
 
     /// Database URL.
-    #[arg(long, short, env = "GORGOND_DATABASE_URL")]
-    database_url: String,
+    #[arg(long, short = 'D', env = "GORGOND_DATABASE_URL")]
+    db_url: String,
+
+    #[arg(long, short = 'H', default_value = "127.0.0.1:9999")]
+    http_addr: String,
 }
 
-#[instrument(skip_all)]
 fn init_logging(args: &Args) {
     use tracing::Level;
     use tracing_subscriber::prelude::*;
@@ -51,8 +55,8 @@ fn init_logging(args: &Args) {
         .init();
 }
 
-#[instrument(skip_all)]
-async fn run_migrations<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Result<()> {
+#[instrument(name = "migrate", level = "DEBUG", skip_all)]
+async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Result<()> {
     use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
     use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
@@ -66,6 +70,7 @@ async fn run_migrations<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> 
 
     // Bridge the async connection back into a sync one for diesel-migrations.
     tokio::task::block_in_place(move || -> Result<(), MigrationError> {
+        debug!("Running migrations...");
         let mut conn = AsyncConnectionWrapper::<C>::from(conn);
         match conn.pending_migrations(MIGRATIONS)? {
             pending if pending.is_empty() => debug!("▶️ Migrations already up to date"),
@@ -86,11 +91,12 @@ async fn run_migrations<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> 
     Ok(())
 }
 
-#[instrument(skip_all, fields(args.database_url))]
+#[instrument(name = "db", level = "DEBUG", skip_all)]
 async fn init_db(args: &Args) -> Result<Pool<AsyncPgConnection>> {
-    let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&args.database_url);
+    debug!(db_url = args.db_url, "Connecting to database...");
+    let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&args.db_url);
     let pool = Pool::builder(cfg).build()?;
-    run_migrations(pool.get().await?).await?;
+    db_migrate(pool.get().await?).await?;
     Ok(pool)
 }
 
@@ -98,7 +104,5 @@ async fn init_db(args: &Args) -> Result<Pool<AsyncPgConnection>> {
 async fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args);
-    init_db(&args).await?;
-
-    Ok(())
+    http::run(&args, init_db(&args).await?).await
 }
