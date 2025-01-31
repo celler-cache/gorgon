@@ -4,14 +4,16 @@
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
-, nix-supervisor ? pkgs.callPackage ./. {}
+, nix-supervisor ? pkgs.callPackage ./. { buildType = "debug"; }
 , nix-daemon-tests ? pkgs.callPackage ../nix-daemon/tests.nix {}
-, nixPackages ? pkgs.callPackage ../nix/nix-packages.nix {}
 , cargo ? pkgs.cargo
 , hello ? pkgs.hello
 }:
 
 let
+  isPackage = lib.types.package.check;
+  nixPackages = lib.filterAttrs (_: isPackage) (pkgs.callPackage ../nix/nix-packages.nix {});
+
   inherit (nix-daemon-tests) test-nix;
 
   mkNixTest = attr: nix: pkgs.testers.nixosTest ({ lib, ... }: {

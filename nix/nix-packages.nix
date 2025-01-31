@@ -14,5 +14,5 @@ let
   isNixSupported = attr: _: lib.versionAtLeast (toVersion (lib.removePrefix "nix_" attr)) "2.24";
   isLixSupported = attr: _: lib.versionAtLeast (toVersion (lib.removePrefix "lix_" attr)) "2.90";
 in
-(lib.filterAttrs isNixSupported nixVersions) //
-(lib.filterAttrs isLixSupported lixVersions)
+lib.filterAttrs isNixSupported nixVersions //
+lib.filterAttrs isLixSupported lixVersions

@@ -4,17 +4,20 @@
 
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
-, nix-supervisor ? pkgs.callPackage ../nix-supervisor {}
-, nixPackages ? pkgs.callPackage ../nix/nix-packages.nix {}
+, nix-supervisor ? pkgs.callPackage ../nix-supervisor { buildType = "debug"; }
 , cargo ? pkgs.cargo
 , hello ? pkgs.hello
 }:
 
 let
+  isPackage = lib.types.package.check;
+  nixPackages = lib.filterAttrs (_: isPackage) (pkgs.callPackage ../nix/nix-packages.nix {});
+
   # Build the nix integration tests into a standalone binary.
   test-nix =
     pkgs.rustPlatform.buildRustPackage {
       name = "test-nix";
+      buildType = "debug";
       inherit (nix-supervisor) src buildInputs nativeBuildInputs;
       cargoDepsName = "nix-supervisor";
       cargoLock.lockFile = ../Cargo.lock;

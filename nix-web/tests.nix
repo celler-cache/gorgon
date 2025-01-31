@@ -4,10 +4,12 @@
 { pkgs ? import ../nix/nixpkgs.default.nix
 , lib ? pkgs.lib
 , nix-web ? pkgs.callPackage ./. {}
-, nixPackages ? pkgs.callPackage ../nix/nix-packages.nix {}
 }:
 
 let
+  isPackage = lib.types.package.check;
+  nixPackages = lib.filterAttrs (_: isPackage) (pkgs.callPackage ../nix/nix-packages.nix {});
+
   testDrv = derivation {
     name = "test";
     builder = "/bin/sh";

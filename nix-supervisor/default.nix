@@ -7,6 +7,7 @@
 , pkg-config ? pkgs.pkg-config
 , openssl ? pkgs.openssl
 , srcOverride ? import ../nix/src.nix { inherit lib; }
+, buildType ? "release"
 }:
 let
   cargoPackageFlags = [ "-p" "nix-supervisor" ];
@@ -14,6 +15,7 @@ in
 pkgs.rustPlatform.buildRustPackage {
   pname = "nix-supervisor";
   inherit ((lib.importTOML ./Cargo.toml).package) version;
+  inherit buildType;
 
   src = srcOverride;
   cargoLock.lockFile = ../Cargo.lock;
