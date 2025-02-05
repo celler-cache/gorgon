@@ -9,4 +9,5 @@ cd (dirname (status dirname))
 # Unless $DATABASE_URL has been manually set, use $GORGOND_DATABASE_URL from .envrc.
 set -q DATABASE_URL; or set -x DATABASE_URL $GORGOND_DATABASE_URL
 
-exec diesel $argv
+set -q DIESEL; or set -x DIESEL (command -s diesel)
+exec $DIESEL $argv

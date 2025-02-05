@@ -13,9 +13,6 @@ pkgs.mkShell {
     # script dependencies
     fish
 
-    # database tooling
-    diesel-cli
-
     # repo tools
     reuse # check license compliance
     commitlint # check commit messages
@@ -27,4 +24,6 @@ pkgs.mkShell {
     iconv
     darwin.apple_sdk.frameworks.SystemConfiguration
   ]);
+
+  DIESEL = "${pkgs.diesel-cli}/bin/diesel";
 }
