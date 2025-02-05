@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use anyhow::Result;
-use axum::{Json, Router, routing::get};
-use diesel_async::{AsyncPgConnection, pooled_connection::deadpool::Pool};
+use crate::Result;
+use axum::{routing::get, Json, Router};
+use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use tokio::net::TcpListener;
 use tracing::{debug, info, instrument};
 
@@ -20,6 +20,6 @@ pub async fn run(args: &Args, pool: Pool<AsyncPgConnection>) -> Result<()> {
     Ok(axum::serve(listener, app).await?)
 }
 
-pub async fn root() -> Json<gorgond::RootResponse> {
-    Json(gorgond::RootResponse {})
+pub async fn root() -> Json<gorgond_client::RootResponse> {
+    Json(gorgond_client::RootResponse {})
 }

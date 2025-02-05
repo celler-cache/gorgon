@@ -2,12 +2,13 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use miette::Diagnostic;
 use reqwest::{IntoUrl, Url};
 use serde::{Deserialize, Serialize};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Diagnostic)]
 pub enum Error {
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
@@ -26,7 +27,11 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new<U: IntoUrl>(client: reqwest::Client, base_url: U) -> Result<Self> {
+    pub fn new<U: IntoUrl>(base_url: U) -> Result<Self> {
+        Self::new_with(reqwest::Client::new(), base_url)
+    }
+
+    pub fn new_with<U: IntoUrl>(client: reqwest::Client, base_url: U) -> Result<Self> {
         Ok(Self {
             client,
             base_url: base_url.into_url()?,

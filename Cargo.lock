@@ -1172,22 +1172,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "gorgonctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "colored_json",
+ "gorgond-client",
+ "miette",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.11",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "gorgond"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "axum 0.8.1",
  "clap",
- "colored_json",
  "diesel",
  "diesel-async",
  "diesel_migrations",
- "reqwest 0.12.12",
+ "gorgond-client",
+ "miette",
  "serde",
  "thiserror 2.0.11",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gorgond-client"
+version = "0.1.0"
+dependencies = [
+ "miette",
+ "reqwest 0.12.12",
+ "serde",
+ "thiserror 2.0.11",
+ "tokio",
+ "tracing",
  "url",
 ]
 
@@ -1848,6 +1876,29 @@ name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
+
+[[package]]
+name = "miette"
+version = "7.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a955165f87b37fd1862df2a59547ac542c77ef6d17c666f619d1ad22dd89484"
+dependencies = [
+ "cfg-if",
+ "miette-derive",
+ "thiserror 1.0.61",
+ "unicode-width",
+]
+
+[[package]]
+name = "miette-derive"
+version = "7.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf45bf44ab49be92fd1227a3be6fc6f617f1a337c06af54981048574d8783147"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
 
 [[package]]
 name = "migrations_internals"
@@ -4086,6 +4137,12 @@ name = "unicode-segmentation"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4c87d22b6e3f4a18d4d40ef354e97c90fcb14dd91d7dc0aa9d8a1172ebf7202"
+
+[[package]]
+name = "unicode-width"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "unicode_categories"
