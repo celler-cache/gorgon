@@ -22,11 +22,11 @@ pub enum Error {
     #[error(transparent)]
     IO(#[from] std::io::Error),
 
-    #[error(transparent)]
+    #[error("Database connection pool error")]
     Deadpool(#[from] diesel_async::pooled_connection::deadpool::PoolError),
-    #[error(transparent)]
+    #[error("Failed to build database connection pool")]
     DeadpoolBuild(#[from] diesel_async::pooled_connection::deadpool::BuildError),
-    #[error(transparent)]
+    #[error("Migrations failed")]
     MigrationError(Box<dyn StdError + Send + Sync>),
 }
 
@@ -109,9 +109,25 @@ fn init_logging(args: &Args) {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> miette::Result<()> {
-    let args = Args::parse();
+async fn run(args: Args) -> Result<()> {
     init_logging(&args);
-    Ok(http::run(&args, init_db(&args).await?).await?)
+    http::run(&args, init_db(&args).await?).await
+}
+
+#[tokio::main]
+async fn main() {
+    miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                .context_lines(6)
+                .build(),
+        )
+    }))
+    .expect("Couldn't install miette hook");
+
+    if let Err(err) = run(Args::parse()).await.map_err(miette::Report::from) {
+        eprintln!("\n{err:?}");
+        std::process::exit(1);
+    }
 }

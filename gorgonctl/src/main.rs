@@ -2,7 +2,12 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+// Clippy really doesn't like gorgond_client::Error, and puts a warning on *everything*
+// returning Error if it's not silenced like this.
+#![allow(clippy::result_large_err)]
+
 use clap::{Parser, Subcommand};
+use derive_more::Unwrap;
 use gorgond_client::Client;
 use miette::{Diagnostic, NamedSource};
 use std::{fmt::Debug, io::Write};
@@ -10,7 +15,7 @@ use tracing::instrument;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-#[derive(Debug, thiserror::Error, Diagnostic)]
+#[derive(Debug, thiserror::Error, Diagnostic, Unwrap)]
 pub enum Error {
     #[error(transparent)]
     IO(#[from] std::io::Error),
@@ -101,9 +106,26 @@ fn init_logging(args: &Args) {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> miette::Result<()> {
-    let args = Args::parse();
+async fn run(args: Args) -> Result<()> {
     init_logging(&args);
-    Ok(args.command.run(&args).await?)
+    args.command.run(&args).await?;
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                .context_lines(6)
+                .build(),
+        )
+    }))
+    .expect("Couldn't install miette hook");
+
+    if let Err(err) = run(Args::parse()).await.map_err(miette::Report::from) {
+        eprintln!("\n{err:?}");
+        std::process::exit(1);
+    }
 }
