@@ -9,7 +9,7 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-axum = "0.8.1"
+axum = { version = "0.8.1", features = ["macros"] }
 axum-extra = { version = "0.10.0", features = ["erased-json"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 derive_more = { version = "2.0.1", features = ["full"] }

@@ -26,7 +26,7 @@ impl BuildsClient<'_> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Build<'a> {
     pub id: Uuid,
-    pub builder: Cow<'a, str>,
+    pub kind: Cow<'a, str>,
     pub source: Url,
 }
 

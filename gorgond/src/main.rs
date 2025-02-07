@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+// Clippy doesn't like gorgond_client::Error.
+#![allow(clippy::result_large_err)]
+
 use clap::Parser;
 use diesel::pg::Pg;
 use diesel_async::{
@@ -103,6 +106,7 @@ fn init_logging(args: &Args) {
             tracing_subscriber::filter::Targets::new()
                 // tokio_postgres TRACEs every connection poll event, that's just tmi.
                 .with_target("tokio_postgres::connection", min(level, Level::DEBUG))
+                .with_target("axum::rejections", Level::TRACE)
                 .with_default(level),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgon-build"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+
+[dependencies]
+clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+derive_more = { version = "2.0.1", features = ["full"] }
+gorgond-client = { path = "../gorgond-client" }
+miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
+reqwest = { version = "0.12.12", features = ["json"] }
+strum = { version = "0.26.3", features = ["derive"] }
+syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
+thiserror = "2.0.11"
+tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "macros", "parking_lot"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }

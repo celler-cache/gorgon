@@ -7,14 +7,15 @@
 #![allow(clippy::result_large_err)]
 
 use derive_more::{Constructor, Unwrap};
-use miette::{Diagnostic, NamedSource, SourceOffset, SourceSpan};
-use reqwest::{IntoUrl, Method, StatusCode, Url};
+use miette::{Diagnostic, MietteDiagnostic, NamedSource, SourceOffset, SourceSpan};
+use reqwest::{header, IntoUrl, Method, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::future::Future;
 use strum::{AsRefStr, IntoStaticStr};
 
+pub use url::Url;
 pub use uuid::Uuid;
 
 pub mod builds;
@@ -92,6 +93,7 @@ pub trait Request: Serialize + Debug {
                     .client
                     .request(method.clone(), url.clone())
                     .body(body_r?)
+                    .header(header::CONTENT_TYPE, "application/json")
                     .build()?;
                 let rsp = client.client.execute(req).await?;
                 let status = rsp.status();
@@ -129,16 +131,72 @@ pub trait Request: Serialize + Debug {
 /// Wraps an ApiError in RFC 9457 ("Problem Details for HTTP APIs") format:
 /// https://www.rfc-editor.org/rfc/rfc9457.html
 #[derive(Debug, thiserror::Error, Diagnostic, Serialize, Deserialize)]
-#[diagnostic(forward(error))]
+#[diagnostic(forward(kind))]
 #[error("{detail}")]
 pub struct ApiError {
     pub status: u16,
     pub title: Cow<'static, str>,
     pub detail: String,
     #[serde(flatten)]
-    pub error: ApiErrorKind,
+    pub kind: ApiErrorKind,
+    #[source]
+    #[diagnostic(transparent)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<MietteDiagnostic>,
 }
 impl ApiError {
+    pub fn new<D: Diagnostic>(kind: ApiErrorKind, source: D) -> Self {
+        Self::new_with(kind, Some(source))
+    }
+    pub fn new_err<E: Display>(kind: ApiErrorKind, source: E) -> Self {
+        Self::new(kind, miette::MietteDiagnostic::new(source.to_string()))
+    }
+    pub fn new_with<D: Diagnostic>(kind: ApiErrorKind, source: Option<D>) -> Self {
+        // Use the error message from the source error if given, else the error kind.
+        let detail = source
+            .as_ref()
+            .map(|src| src.to_string())
+            .unwrap_or_else(|| kind.to_string());
+
+        // If we have a source, turn it into something serialisable
+        let source = source
+            .as_ref()
+            .map(|src| MietteDiagnostic {
+                message: src.to_string(),
+                code: src.code().map(|v| v.to_string()),
+                severity: src.severity(),
+                help: src.help().map(|v| v.to_string()),
+                url: src.url().map(|v| v.to_string()),
+                labels: src.labels().map(|v| v.collect()),
+            })
+            // But skip it if there's no new information in it.
+            .filter(|src| {
+                src.message != detail
+                    || src.code.is_some()
+                    || src.severity.is_some()
+                    || src.help.is_some()
+                    || src.url.is_some()
+                    || src.labels.is_some()
+            });
+
+        Self {
+            status: kind.status().as_u16(),
+            title: Cow::Borrowed((&kind).into()),
+            detail,
+            kind,
+            source,
+        }
+    }
+
+    pub fn with_status(mut self, status: impl Into<u16>) -> Self {
+        self.status = status.into();
+        self
+    }
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = detail.into();
+        self
+    }
+
     pub fn status_reason(&self) -> &str {
         StatusCode::from_u16(self.status)
             .ok()
@@ -147,18 +205,8 @@ impl ApiError {
     }
 }
 impl From<ApiErrorKind> for ApiError {
-    fn from(err: ApiErrorKind) -> Self {
-        Self {
-            status: err.status().as_u16(),
-            title: Cow::Borrowed((&err).into()),
-            detail: err.to_string(),
-            error: err,
-        }
-    }
-}
-impl From<ApiError> for ApiErrorKind {
-    fn from(err: ApiError) -> Self {
-        err.error
+    fn from(kind: ApiErrorKind) -> Self {
+        Self::new_with::<std::convert::Infallible>(kind, None)
     }
 }
 
@@ -170,6 +218,18 @@ pub enum ApiErrorKind {
     #[serde(rename = "tag:NoSuchRoute")]
     NoSuchRoute { route: String },
 
+    #[error("Method not allowed: {method} {route}")]
+    #[serde(rename = "tag:MethodNotAllowed")]
+    MethodNotAllowed { method: String, route: String },
+
+    #[error("Request rejected")]
+    #[serde(rename = "tag:RequestRejected")]
+    RequestRejected,
+
+    #[error("Bad URL in data: {url}")]
+    #[serde(rename = "tag:BadDataUrl")]
+    BadDataUrl { url: String },
+
     #[error("unknown error type: {0}")]
     #[serde(untagged)]
     Unknown(String),
@@ -179,16 +239,8 @@ impl ApiErrorKind {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
-            Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
-    }
-}
-
-#[cfg(feature = "axum")]
-impl axum::response::IntoResponse for ApiErrorKind {
-    fn into_response(self) -> axum::response::Response {
-        use axum_extra::response::ErasedJson;
-        (self.status(), ErasedJson::pretty(ApiError::from(self))).into_response()
     }
 }
 
