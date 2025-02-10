@@ -95,15 +95,20 @@ pub async fn root() -> ApiJson<RootResponse> {
 
 pub async fn builds_allocate(
     ApiJson(_req): ApiJson<builds::BuildAllocateRequest<'static>>,
-) -> Result<ErasedJson> {
-    let rsp = builds::BuildAllocateResponse {
+) -> Result<ApiJson<builds::BuildAllocateResponse<'static>>> {
+    Ok(ApiJson(builds::BuildAllocateResponse {
         build: builds::Build {
             id: Uuid::now_v7(),
+            name: "test-hello".into(),
             kind: "nix".into(),
-            source: parse_url("git://codeberg.org/gorgon/test-hello")?,
+            source: builds::Source {
+                name: "test-hello".into(),
+                kind: "git".into(),
+                rev: Some("2277b468e054b8b450915b374abeeafda151daaa".into()),
+                url: parse_url("https://codeberg.org/gorgon/test-hello")?,
+            },
         },
-    };
-    Ok(ErasedJson::pretty(rsp))
+    }))
 }
 
 fn parse_url<S: AsRef<str> + ToString>(s: S) -> Result<Url, ApiError> {

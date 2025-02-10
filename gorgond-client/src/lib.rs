@@ -23,6 +23,7 @@ pub mod builds;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error, Diagnostic, Unwrap)]
+#[allow(clippy::large_enum_variant)]
 pub enum Error {
     #[error("Invalid Base URL")]
     BaseUrl(#[source] reqwest::Error),
