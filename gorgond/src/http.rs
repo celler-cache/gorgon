@@ -99,13 +99,13 @@ pub async fn builds_allocate(
     Ok(ApiJson(builds::BuildAllocateResponse {
         build: builds::Build {
             id: Uuid::now_v7(),
-            name: "test-hello".into(),
+            name: "test-timestamp".into(),
             kind: "nix".into(),
             source: builds::Source {
                 name: "test-hello".into(),
                 kind: "git".into(),
-                rev: Some("2277b468e054b8b450915b374abeeafda151daaa".into()),
-                url: parse_url("https://codeberg.org/gorgon/test-hello")?,
+                rev: Some("73d6baaddf2a8972e4a24c1867a89874efee8a24".into()),
+                url: parse_url("https://codeberg.org/gorgon/test-timestamp")?,
             },
         },
     }))

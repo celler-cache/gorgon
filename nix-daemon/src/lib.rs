@@ -27,8 +27,10 @@ pub mod nix;
 
 use chrono::{DateTime, Utc};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::{collections::HashMap, future::Future};
+use strum::{AsRefStr, IntoStaticStr};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 
@@ -97,7 +99,19 @@ pub enum Stderr {
 }
 
 /// Type of a [`Stderr::StartActivity`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 #[repr(u64)]
 pub enum StderrActivityType {
     Unknown = 0,
@@ -141,7 +155,19 @@ pub struct StderrStartActivity {
 }
 
 /// Type of a [`StderrResult`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 #[repr(u64)]
 pub enum StderrResultType {
     FileLinked = 100,
@@ -174,7 +200,9 @@ pub struct StderrResult {
 }
 
 /// A raw field used in [`StderrStartActivity`] and [`StderrResult`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
+#[serde(untagged)]
+#[error("{:?}", self)]
 pub enum StderrField {
     Int(u64),
     String(String),
@@ -203,8 +231,64 @@ impl StderrField {
     }
 }
 
+impl From<u64> for StderrField {
+    fn from(value: u64) -> Self {
+        Self::Int(value)
+    }
+}
+impl From<StderrActivityType> for StderrField {
+    fn from(value: StderrActivityType) -> Self {
+        Self::Int(value.into())
+    }
+}
+impl From<String> for StderrField {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl TryFrom<StderrField> for u64 {
+    type Error = StderrField;
+    fn try_from(f: StderrField) -> Result<u64, Self::Error> {
+        match f {
+            StderrField::Int(v) => Ok(v),
+            _ => Err(f),
+        }
+    }
+}
+impl TryFrom<StderrField> for StderrActivityType {
+    type Error = StderrField;
+    fn try_from(f: StderrField) -> Result<StderrActivityType, Self::Error> {
+        match f {
+            StderrField::Int(v) => v.try_into().map_err(|_| f),
+            _ => Err(f),
+        }
+    }
+}
+impl TryFrom<StderrField> for String {
+    type Error = StderrField;
+    fn try_from(f: StderrField) -> Result<String, Self::Error> {
+        match f {
+            StderrField::String(v) => Ok(v),
+            _ => Err(f),
+        }
+    }
+}
+
 /// Verbosity of a [`Stderr`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 #[repr(u64)]
 pub enum Verbosity {
     Error = 0,
@@ -223,7 +307,19 @@ impl From<TryFromPrimitiveError<Verbosity>> for Error {
 }
 
 /// Passed to [`Store::build_paths()`] and [`Store::build_paths_with_results()`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 #[repr(u64)]
 pub enum BuildMode {
     Normal,
@@ -237,7 +333,19 @@ impl From<TryFromPrimitiveError<BuildMode>> for Error {
 }
 
 /// Status code for a [`BuildResult`], returned from [`Store::build_paths_with_results()`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    AsRefStr,
+    IntoStaticStr,
+    TryFromPrimitive,
+    IntoPrimitive,
+)]
 #[repr(u64)]
 pub enum BuildResultStatus {
     Built = 0,

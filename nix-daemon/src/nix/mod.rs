@@ -10,6 +10,7 @@
 //! Support for older versions will be added in the future - in particular, Protocol 1.21
 //! used by Nix 2.3.
 
+pub mod internal_json;
 pub mod wire;
 
 use crate::{

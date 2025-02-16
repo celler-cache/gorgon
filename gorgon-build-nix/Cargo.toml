@@ -10,10 +10,17 @@ license = "EUPL-1.2"
 
 [dependencies]
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+crossbeam = "0.8.4"
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
 nix-daemon = { path = "../nix-daemon" }
-nix-nar = "0.3.0"
+nutmeg = "0.1.4"
+owo-colors = "4.1.0"
+serde_json = "1.0.138"
 thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "macros", "parking_lot"] }
+tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "process", "macros", "parking_lot"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+strip-ansi-escapes = "0.2.1"
