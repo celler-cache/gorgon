@@ -4,7 +4,7 @@
 
 use clap::Parser;
 use crossbeam::channel;
-use gorgon_build_helper::{builds, Uuid};
+use gorgon_build_helper::Uuid;
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgon-util-cli"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+
+[dependencies]
+clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
+syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
+gorgon-build-helper = { path = "../gorgon-build-helper" }

@@ -12,4 +12,10 @@ members = [
     "gorgond",
     "gorgond-client",
     "gorgonctl",
+    "gorgon-build",
+    "gorgon-build-helper",
+    "gorgon-build-nix",
+    "gorgon-fetch",
+    "gorgon-fetch-git",
+    "gorgon-util-cli",
 ]

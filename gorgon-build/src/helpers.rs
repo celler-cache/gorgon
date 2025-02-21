@@ -4,8 +4,8 @@
 
 use gorgond_client::builds;
 use miette::Diagnostic;
-use std::{borrow::Cow, collections::BTreeMap, ffi::OsStr, fmt, path::Path, process::Command};
-use tracing::{debug, instrument};
+use std::{borrow::Cow, collections::BTreeMap, fmt, path::Path, process::Command};
+use tracing::instrument;
 
 #[derive(Debug, thiserror::Error, Diagnostic)]
 pub enum HelperError {

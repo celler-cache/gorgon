@@ -9,4 +9,11 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
+clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 gorgond-client = { path = "../gorgond-client" }
+miette = "7.5.0"
+owo-colors = "4.1.0"
+terminal_size = "0.4.1"
+thiserror = "2.0.11"
+tracing = "0.1.41"
+which = { version = "7.0.2", features = ["tracing"] }

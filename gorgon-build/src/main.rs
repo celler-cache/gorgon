@@ -68,6 +68,27 @@ impl Args {
     }
 }
 
+fn init_logging(args: &Args) {
+    use tracing::Level;
+    use tracing_subscriber::prelude::*;
+
+    let level = match args.verbose as i8 - args.quiet as i8 {
+        ..=-2 => Level::ERROR,
+        -1 => Level::WARN,
+        0 => Level::INFO,
+        1 => Level::DEBUG,
+        2.. => Level::TRACE,
+    };
+    tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::Targets::new().with_default(level))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+}
+
+fn init_client(args: &Args) -> Result<Client> {
+    Ok(Client::new(args.base_url.clone())?)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct FetcherConfig {
     pub command: PathBuf,
@@ -185,27 +206,6 @@ impl Config {
         }
         Ok(())
     }
-}
-
-fn init_logging(args: &Args) {
-    use tracing::Level;
-    use tracing_subscriber::prelude::*;
-
-    let level = match args.verbose as i8 - args.quiet as i8 {
-        ..=-2 => Level::ERROR,
-        -1 => Level::WARN,
-        0 => Level::INFO,
-        1 => Level::DEBUG,
-        2.. => Level::TRACE,
-    };
-    tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::filter::Targets::new().with_default(level))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-}
-
-fn init_client(args: &Args) -> Result<Client> {
-    Ok(Client::new(args.base_url.clone())?)
 }
 
 #[instrument(skip_all)]
