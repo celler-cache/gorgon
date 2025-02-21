@@ -11,6 +11,7 @@ license = "EUPL-1.2"
 [dependencies]
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 crossbeam = "0.8.4"
+gorgon-build-helper = { path = "../gorgon-build-helper" }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
 nix-daemon = { path = "../nix-daemon" }
 nutmeg = "0.1.4"

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use crate::{Client, Request, Result};
+use chrono::prelude::*;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -37,6 +38,22 @@ pub struct Build<'a> {
     pub name: Cow<'a, str>,
     pub kind: Cow<'a, str>,
     pub source: Source<'a>,
+}
+
+/// A task performed as part of a Build.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Task<'a> {
+    /// ID of the parent Build.
+    pub build_id: Uuid,
+    /// Sub-ID of this task. Unique together with build_id, but may be reused between builds.
+    /// This may be a UUIDv8 with a build system specific ID unceremoniously shoved into it.
+    pub task_id: Uuid,
+    /// Sub-ID of the parent task, if any. The parent task must have the same build_id.
+    pub parent_task_id: Uuid,
+
+    pub name: Cow<'a, str>,
+    pub start: DateTime<Utc>,
+    pub end: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

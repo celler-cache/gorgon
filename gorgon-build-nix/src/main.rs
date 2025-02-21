@@ -4,6 +4,7 @@
 
 use clap::Parser;
 use crossbeam::channel;
+use gorgon_build_helper::{builds, Uuid};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
@@ -408,11 +409,45 @@ fn main() {
     }
 }
 
+/// Casts a Nix Activity ID into a UUIDv8.
+///
+/// Nix (as of Lix 2.92) generates Activity IDs using:
+///
+/// ```cpp
+/// std::atomic<uint64_t> nextId{0};
+/// Activity::Activity(...): id(nextId++ + (((uint64_t) getpid()) << 32)) { ... }
+/// ```
+///
+/// In other words, it's effectively a tuple of (pid: u32, id: u32) mashed together.
+pub fn activity_uuid(id: u64) -> Uuid {
+    let id_bytes: [u8; 8] = id.to_be_bytes();
+    let mut data = [0u8; 16];
+    data[0..4].copy_from_slice(&id_bytes[0..4]);
+    data[12..16].copy_from_slice(&id_bytes[4..8]);
+    Uuid::new_v8(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::fmt::Write;
+
+    #[test]
+    fn test_activity_uuid_1122_3344_5566_7788() {
+        assert_eq!(
+            &activity_uuid(0x1122_3344_5566_7788).to_string(),
+            "11223344-0000-8000-8000-000055667788"
+        );
+    }
+
+    #[test]
+    fn test_activity_uuid_17368302284177417() {
+        assert_eq!(
+            &activity_uuid(17368302284177417).to_string(),
+            "003db461-0000-8000-8000-000000000009"
+        );
+    }
 
     #[test]
     fn test_progress_empty() {
