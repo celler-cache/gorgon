@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use clap::Parser;
+use gorgon_build_helper::helper::HelperCaller;
 use miette::{Context, Result};
 use url::Url;
 
@@ -27,15 +28,15 @@ pub struct Args {
 fn run(args: Args) -> Result<()> {
     gorgon_util_cli::logger(args.common.level()).init();
 
-    args.helpers
+    let git_caller = args.helpers.caller()?;
+    git_caller
         .helper("git")?
         .with_arg("clone")
         .with_arg(args.url.as_str())
         .with_arg(&args.fetcher.out)
         .run()
         .with_context(|| format!("Couldn't clone repository: {}", &args.url))?;
-
-    args.helpers
+    git_caller
         .helper("git")?
         .with_arg("checkout")
         .with_arg(&args.rev)

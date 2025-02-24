@@ -2,12 +2,11 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{ffi::OsStr, path::PathBuf};
+use std::{borrow::Cow, path::PathBuf};
 
 use clap::Parser;
-use gorgon_build_helper::helper::Helper;
+use gorgon_build_helper::helper::{Helper, HelperCaller, HelperContext, HelperFinder};
 use miette::{miette, Context, IntoDiagnostic, Result};
-use tracing::{debug, debug_span, instrument};
 use tracing_subscriber::filter::Targets;
 
 #[derive(Debug, Clone, Parser)]
@@ -15,11 +14,11 @@ use tracing_subscriber::filter::Targets;
 #[command(next_help_heading = "Logging")]
 pub struct Args {
     /// Increase log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
+    #[arg(long, short, env = "GORGON_VERBOSE", action=clap::ArgAction::Count)]
     verbose: u8,
 
     /// Decrease log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
+    #[arg(long, short, env = "GORGON_QUIET", action=clap::ArgAction::Count)]
     quiet: u8,
 }
 
@@ -33,15 +32,17 @@ impl Args {
             2.. => tracing::Level::TRACE,
         }
     }
+}
 
-    pub fn level_flag(&self) -> Option<&str> {
-        match self.level() {
-            tracing::Level::ERROR => Some("-qq"),
-            tracing::Level::WARN => Some("-q"),
-            tracing::Level::INFO => None,
-            tracing::Level::DEBUG => Some("-v"),
-            tracing::Level::TRACE => Some("-vv"),
+impl HelperContext for &Args {
+    fn apply(&self, mut helper: Helper) -> Helper {
+        if self.verbose > 0 {
+            helper = helper.with_env("GORGON_VERBOSE", self.verbose.to_string());
         }
+        if self.quiet > 0 {
+            helper = helper.with_env("GORGON_QUIET", self.quiet.to_string());
+        }
+        helper
     }
 }
 
@@ -63,45 +64,33 @@ pub struct HelperArgs {
 }
 
 impl HelperArgs {
-    #[instrument(skip_all, fields(name=?name.as_ref()))]
-    pub fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
-        let cwd = std::env::current_dir()
+    pub fn caller(&self) -> Result<impl HelperCaller + use<'_>> {
+        let current_dir = std::env::current_dir()
             .into_diagnostic()
             .context("Couldn't get current working directory")?;
 
-        // If --helper-dev is set, try to build the helper from source.
-        if self.helper_dev {
-            let _enter = debug_span!("--helper-dev").entered();
-            let repo_path = self.helper_dev_repo.as_ref().unwrap_or(&cwd);
-            let src_path = repo_path.join(PathBuf::from(&name));
-            match src_path.try_exists() {
-                Ok(true) => {
-                    return Helper::build_dev(&name, repo_path, &cwd)
-                        .with_context(|| format!("Couldn't build helper: `{:?}`", name.as_ref()))
-                }
-                Ok(false) => debug!(?src_path, "Path does not exist"),
-                Err(err) => debug!(?src_path, %err, "Couldn't check if path exists"),
-            }
-        }
-
-        // Try to find the helper in either --helper-path or $PATH.
-        match &self.helper_path[..] {
-            [] => Helper::find(
-                &name,
+        let path = match &self.helper_path[..] {
+            [] => Cow::Owned(
                 std::env::var_os("PATH")
                     .ok_or_else(|| miette!("Neither $PATH nor --search-path is set"))?,
-                &cwd,
             ),
-            [path] => Helper::find(&name, path, &cwd),
-            paths => Helper::find(
-                &name,
+            [path] => Cow::Borrowed(path.as_ref()),
+            paths => Cow::Owned(
                 std::env::join_paths(paths)
                     .into_diagnostic()
                     .context("Couldn't join --search-path")?,
-                &cwd,
             ),
+        };
+
+        let mut caller = HelperFinder::new(current_dir.into(), path);
+        if self.helper_dev {
+            caller.with_dev(
+                self.helper_dev_repo
+                    .as_ref()
+                    .map(|p| Cow::Borrowed(p.as_ref())),
+            );
         }
-        .with_context(|| format!("Couldn't find helper: `{:?}`", name.as_ref()))
+        Ok(caller)
     }
 }
 

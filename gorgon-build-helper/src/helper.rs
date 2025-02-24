@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{ffi::OsStr, fmt, path::Path, process::Command};
+use std::{borrow::Cow, ffi::OsStr, fmt, path::Path, process::Command};
 
 use owo_colors::OwoColorize;
-use tracing::{debug, event_enabled};
+use tracing::{debug, debug_span, event_enabled, instrument};
 
 pub type Result<T, E = HelperError> = std::result::Result<T, E>;
 
@@ -40,6 +40,70 @@ impl HelperError {
             Some(v) => write!(f, "{v}"),
             None => write!(f, "[unknown]"),
         }
+    }
+}
+
+pub trait HelperContext {
+    fn apply(&self, helper: Helper) -> Helper;
+}
+impl HelperContext for () {
+    fn apply(&self, helper: Helper) -> Helper {
+        helper
+    }
+}
+
+pub trait HelperCaller: Sized {
+    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper>;
+    fn with<Ctx: HelperContext>(self, ctx: Ctx) -> impl HelperCaller {
+        HelperCallerWith(ctx, self)
+    }
+}
+
+pub struct HelperFinder<'a> {
+    pub current_dir: Cow<'a, Path>,
+    pub path: Cow<'a, OsStr>,
+    pub dev: bool,
+    pub dev_repo: Option<Cow<'a, Path>>,
+}
+
+impl<'a> HelperFinder<'a> {
+    pub fn new(current_dir: Cow<'a, Path>, path: Cow<'a, OsStr>) -> Self {
+        Self {
+            current_dir,
+            path,
+            dev: false,
+            dev_repo: None,
+        }
+    }
+    pub fn with_dev(&mut self, dev_repo: Option<Cow<'a, Path>>) -> &mut Self {
+        self.dev = true;
+        self.dev_repo = dev_repo;
+        self
+    }
+}
+impl HelperCaller for HelperFinder<'_> {
+    #[instrument(name="finder", skip_all, fields(name=?name.as_ref()))]
+    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
+        if self.dev {
+            let _enter = debug_span!("dev").entered();
+            let repo_path = self.dev_repo.as_ref().unwrap_or(&self.current_dir);
+            let src_path = repo_path.join(Path::new(&name));
+            match src_path.try_exists() {
+                Ok(true) => return Helper::build_dev(&name, repo_path, &self.current_dir),
+                Ok(false) => debug!(?src_path, "Path does not exist"),
+                Err(err) => debug!(?src_path, %err, "Couldn't check if path exists"),
+            }
+        }
+
+        Helper::find(name, &self.path, &self.current_dir)
+    }
+}
+
+pub struct HelperCallerWith<Ctx: HelperContext, C: HelperCaller>(Ctx, C);
+
+impl<Ctx: HelperContext, C: HelperCaller> HelperCaller for HelperCallerWith<Ctx, C> {
+    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
+        self.1.helper(name).map(|h| h.with(&self.0))
     }
 }
 
@@ -133,6 +197,13 @@ impl Helper {
         )))
     }
 
+    pub fn with<C: HelperContext>(self, ctx: &C) -> Self {
+        ctx.apply(self)
+    }
+    pub fn with_env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
+        self.cmd.env(key, val);
+        self
+    }
     pub fn with_arg(mut self, p: impl AsRef<OsStr>) -> Self {
         self.cmd.arg(p);
         self

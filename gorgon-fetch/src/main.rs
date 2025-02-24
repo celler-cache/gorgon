@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 
 use clap::Parser;
+use gorgon_build_helper::helper::HelperCaller;
 use miette::{Context, IntoDiagnostic};
 use url::Url;
 
@@ -18,7 +19,7 @@ use url::Url;
 /// Query parameters are turned into commandline arguments:
 ///
 /// gorgon-fetch git+https://example.com?rev=73d6baaddf2a8972e4a24c1867a89874efee8a24
-/// gorgon-fetch-git --rev=73d6baaddf2a8972e4a24c1867a89874efee8a24 https://example.com
+/// gorgon-fetch-git https://example.com --rev=73d6baaddf2a8972e4a24c1867a89874efee8a24
 ///
 /// See the documentation for each `gorgon-fetch-*` helper for more specifics.
 #[derive(Debug, Clone, Parser)]
@@ -57,9 +58,10 @@ fn run(args: Args) -> miette::Result<()> {
     let (fetcher_name, mut url) = split_fetcher_url(&args.url).context("Couldn't parse URL")?;
     let mut helper = args
         .helpers
-        .helper(format!("gorgon-fetch-{fetcher_name}"))?
-        .with_arg_opt(args.common.level_flag())
-        .with_args(args.fetcher.iter());
+        .caller()?
+        .with(&args.common)
+        .with(&args.fetcher)
+        .helper(format!("gorgon-fetch-{fetcher_name}"))?;
 
     if url.query().is_some() {
         helper = helper.with_args(
