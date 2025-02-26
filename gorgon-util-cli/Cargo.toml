@@ -9,9 +9,12 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
+gorgon-build-helper = { path = "../gorgon-build-helper" }
+
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
-miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
+colored_json = "5.0.0"
+miette = { version = "7.5.0", features = ["fancy", "serde", "syntect-highlighter"] }
 syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
-gorgon-build-helper = { path = "../gorgon-build-helper" }
+tracing-subscriber = { version = "0.3.19", features = ["time", "json", "smallvec", "once_cell", "parking_lot"] }
+strum = { version = "0.27.1", features = ["derive"] }

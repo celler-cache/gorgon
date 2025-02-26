@@ -26,8 +26,6 @@ pub struct Args {
 }
 
 fn run(args: Args) -> Result<()> {
-    gorgon_util_cli::logger(args.common.level()).init();
-
     let git_caller = args.helpers.caller()?;
     git_caller
         .helper("git")?
@@ -48,5 +46,7 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn main() {
-    gorgon_util_cli::main(run);
+    let args = Args::parse();
+    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
+    gorgon_util_cli::main(args.common.output_format, || run(args));
 }

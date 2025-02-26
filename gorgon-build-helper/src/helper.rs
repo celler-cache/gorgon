@@ -2,10 +2,21 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{borrow::Cow, ffi::OsStr, fmt, path::Path, process::Command};
+use std::{
+    borrow::Cow,
+    cell::LazyCell,
+    ffi::OsStr,
+    fmt,
+    path::Path,
+    process::{Command, Stdio},
+};
 
+use bounded_static::IntoBoundedStatic;
+use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
 use tracing::{debug, debug_span, event_enabled, instrument};
+
+use crate::{task::Task, SerializedError};
 
 pub type Result<T, E = HelperError> = std::result::Result<T, E>;
 
@@ -14,10 +25,11 @@ pub enum HelperError {
     #[error(fmt = Self::fmt_find_binary)]
     FindBinary(String, Vec<String>, #[source] which::Error),
 
-    #[error("IO Error starting helper process")]
+    #[error("Failed to start helper process")]
     Start(#[source] std::io::Error),
-    #[error(fmt = Self::fmt_exit_status)]
-    Exit(Option<i32>),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Exit(HelperExitError),
 }
 
 impl HelperError {
@@ -33,15 +45,81 @@ impl HelperError {
         }
         Ok(())
     }
+}
 
-    fn fmt_exit_status(status: &Option<i32>, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Helper process exited with status: ")?;
-        match status {
-            Some(v) => write!(f, "{v}"),
-            None => write!(f, "[unknown]"),
-        }
+#[derive(Debug, thiserror::Error)]
+pub struct HelperExitError {
+    pub name: String,
+    pub status: Option<i32>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+}
+
+impl fmt::Display for HelperExitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = &self.name;
+        match (self.stdout.as_ref(), self.stderr.as_ref()) {
+            (Some(s), None) | (None, Some(s)) if !s.contains("\n") => {
+                write!(f, "{name}: {s}")?;
+            }
+            (Some(s), None) => write!(f, "STDOUT:\n\n{s}\n\n")?,
+            (None, Some(s)) => write!(f, "STDERR:\n\n{s}\n\n")?,
+            (Some(s1), Some(s2)) => {
+                write!(f, "STDOUT:\n\n{s1}\n\n")?;
+                write!(f, "STDERR:\n\n{s2}\n\n")?;
+            }
+            (None, None) => match self.status {
+                Some(v) => write!(f, "{name} exited with status code: {v}")?,
+                None => write!(f, "{name} exited with unknown status")?,
+            },
+        };
+        Ok(())
     }
 }
+
+impl miette::Diagnostic for HelperExitError {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        self.status
+            .map(|status| Box::new(format!("{} failed with code: {status}", self.name)) as _)
+    }
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum TaskError {
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Helper(#[from] HelperError),
+    #[error("Couldn't deserialize task error")]
+    ErrorJson(
+        #[label("{2}")] SourceOffset,
+        #[source_code] NamedSource<String>,
+        #[source] serde_json::Error,
+    ),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Task(TaskExitError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Task failed: `{}`", .0.1.name)]
+pub struct TaskExitError(TaskExitErrorCause);
+
+impl TaskExitError {
+    pub fn new(err: SerializedError, task: Task<'static>) -> Self {
+        Self(TaskExitErrorCause(err, task))
+    }
+}
+
+impl miette::Diagnostic for TaskExitError {
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
+        Some(Box::new(std::iter::once(&self.0 as _)))
+    }
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("Error from task: `{}`", .1.name)]
+#[diagnostic(forward(0))]
+struct TaskExitErrorCause(#[source] SerializedError, Task<'static>);
 
 pub trait HelperContext {
     fn apply(&self, helper: Helper) -> Helper;
@@ -107,9 +185,17 @@ impl<Ctx: HelperContext, C: HelperCaller> HelperCaller for HelperCallerWith<Ctx,
     }
 }
 
+#[derive(Debug)]
 pub struct Helper {
-    cmd: Command,
+    pub cmd: Command,
 }
+
+impl From<Command> for Helper {
+    fn from(cmd: Command) -> Self {
+        Self { cmd }
+    }
+}
+
 impl fmt::Display for Helper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (key, value) in self.cmd.get_envs() {
@@ -132,36 +218,29 @@ impl fmt::Display for Helper {
 }
 
 impl Helper {
+    fn name(&self) -> Cow<'_, str> {
+        let path = Path::new(self.cmd.get_program());
+        path.file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+    }
+
+    #[instrument(skip_all, fields(cmd = ?self.cmd.get_program()))]
     pub fn run(mut self) -> Result<()> {
-        let _enter = tracing::debug_span!("helper", cmd = ?self.cmd.get_program()).entered();
         if event_enabled!(tracing::Level::DEBUG) {
             debug!("Invoking helper:\n{self}");
         }
 
-        let status = {
-            // Print a header.
-            let termwidth = terminal_size::terminal_size_of(std::io::stderr())
-                .map(|(w, _)| w.0 as usize)
-                .unwrap_or(80);
-            let divider_style = owo_colors::style().dimmed();
-            let path = self.cmd.get_program();
-            let name = Path::new(path)
-                .file_name()
-                .unwrap_or(path)
-                .to_string_lossy();
-            eprintln!("{}", format!("{name:-^termwidth$}").style(divider_style));
-
-            // This bit runs the actual command.
-            let r = self.cmd.status().map_err(HelperError::Start);
-
-            // Print a footer.
-            eprintln!("{}", format!("{:-^termwidth$}", "").style(divider_style));
-
-            r?
-        };
-
-        match status {
-            status if !status.success() => Err(HelperError::Exit(status.code())),
+        let output = self.cmd.output().map_err(HelperError::Start)?;
+        match output.status {
+            status if !status.success() => Err(HelperError::Exit(HelperExitError {
+                name: self.name().to_string(),
+                status: status.code(),
+                stdout: Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                stderr: Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            })),
             _ => Ok(()),
         }
     }
@@ -222,10 +301,81 @@ impl Helper {
         self.cmd.current_dir(cwd);
         self
     }
+
+    pub fn into_task(self) -> TaskHelper<'static> {
+        TaskHelper::from(self)
+    }
 }
 
-impl From<Command> for Helper {
-    fn from(cmd: Command) -> Self {
-        Self { cmd }
+pub struct TaskHelper<'a> {
+    task: Task<'a>,
+    helper: Helper,
+}
+
+impl From<Helper> for TaskHelper<'static> {
+    fn from(helper: Helper) -> Self {
+        Self {
+            task: Task::new(helper.name()).into_static(),
+            helper,
+        }
+    }
+}
+
+impl TaskHelper<'_> {
+    #[instrument(name="task", skip_all, fields(name=self.task.name.as_ref()))]
+    pub fn run(self) -> Result<(), TaskError> {
+        if event_enabled!(tracing::Level::DEBUG) {
+            debug!("Invoking task helper:\n{}", self.helper);
+        }
+
+        let child = self
+            .helper
+            .with_env("GORGON_VERBOSE", "255")
+            .with_env("GORGON_OUTPUT_FORMAT", "json")
+            .with_env("GORGON_LOG_FORMAT", "json")
+            .cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(HelperError::Start)?;
+
+        let output = child.wait_with_output().map_err(HelperError::Start)?;
+        match output.status {
+            status if !status.success() => {
+                let stdout_str = LazyCell::new(|| String::from_utf8_lossy(&output.stdout));
+
+                // If debug logging is enabled, log stdout.
+                if event_enabled!(tracing::Level::DEBUG) {
+                    let termwidth = terminal_size::terminal_size_of(std::io::stderr())
+                        .map(|(w, _)| w.0 as usize)
+                        .unwrap_or(80);
+                    eprintln!(
+                        "{}",
+                        format!(
+                            "{:-^termwidth$}\n{}{:-^termwidth$}",
+                            " DEBUG --- failed task stdout --- DEBUG ",
+                            stdout_str.as_ref(),
+                            ""
+                        )
+                        .dimmed()
+                    );
+                }
+
+                // Try to parse the forwarded error from the child.
+                Err(TaskError::Task(TaskExitError::new(
+                    serde_json::from_slice::<SerializedError>(&output.stdout).map_err(|err| {
+                        TaskError::ErrorJson(
+                            SourceOffset::from_location(&*stdout_str, err.line(), err.column()),
+                            NamedSource::new("stdout", stdout_str.to_string())
+                                .with_language("JSON"),
+                            err,
+                        )
+                    })?,
+                    self.task.into_static(),
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 }

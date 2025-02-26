@@ -5,9 +5,37 @@
 use std::{borrow::Cow, path::PathBuf};
 
 use clap::Parser;
-use gorgon_build_helper::helper::{Helper, HelperCaller, HelperContext, HelperFinder};
+use colored_json::write_colored_json_with_mode;
+use gorgon_build_helper::{
+    helper::{Helper, HelperCaller, HelperContext, HelperFinder},
+    SerializedError,
+};
 use miette::{miette, Context, IntoDiagnostic, Result};
+use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 use tracing_subscriber::filter::Targets;
+
+#[derive(
+    Debug,
+    Display,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    AsRefStr,
+    IntoStaticStr,
+    clap::ValueEnum,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum OutputFormat {
+    #[default]
+    Default,
+    Json,
+}
 
 #[derive(Debug, Clone, Parser)]
 #[group(id = "common")]
@@ -15,11 +43,19 @@ use tracing_subscriber::filter::Targets;
 pub struct Args {
     /// Increase log level.
     #[arg(long, short, env = "GORGON_VERBOSE", action=clap::ArgAction::Count)]
-    verbose: u8,
+    pub verbose: u8,
 
     /// Decrease log level.
     #[arg(long, short, env = "GORGON_QUIET", action=clap::ArgAction::Count)]
-    quiet: u8,
+    pub quiet: u8,
+
+    /// Output format for logs.
+    #[arg(long, env = "GORGON_LOG_FORMAT", default_value = "default")]
+    pub log_format: OutputFormat,
+
+    /// Output format for output and errors.
+    #[arg(long, env = "GORGON_OUTPUT_FORMAT", default_value = "default")]
+    pub output_format: OutputFormat,
 }
 
 impl Args {
@@ -43,6 +79,8 @@ impl HelperContext for &Args {
             helper = helper.with_env("GORGON_QUIET", self.quiet.to_string());
         }
         helper
+            .with_env("GORGON_LOG_FORMAT", self.log_format.as_ref())
+            .with_env("GORGON_OUTPUT_FORMAT", self.output_format.as_ref())
     }
 }
 
@@ -96,6 +134,7 @@ impl HelperArgs {
 
 #[must_use]
 pub struct LoggerBuilder {
+    format: OutputFormat,
     targets: Targets,
 }
 
@@ -104,36 +143,57 @@ impl LoggerBuilder {
         self.targets = f(self.targets);
         self
     }
+    pub fn with_format(mut self, format: OutputFormat) -> Self {
+        self.format = format;
+        self
+    }
 
     pub fn init(self) {
-        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::{fmt::layer, prelude::*};
 
-        tracing_subscriber::Registry::default()
-            .with(self.targets)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .init();
+        // This is a dumb workaround for some type fuckery.
+        let reg = tracing_subscriber::Registry::default().with(self.targets);
+        match self.format {
+            OutputFormat::Default => reg.with(layer().with_writer(std::io::stderr)).init(),
+            OutputFormat::Json => reg.with(layer().json().with_writer(std::io::stderr)).init(),
+        }
     }
 }
 
-pub fn logger(level: tracing::Level) -> LoggerBuilder {
+pub fn logger(format: OutputFormat, level: tracing::Level) -> LoggerBuilder {
     LoggerBuilder {
+        format,
         targets: tracing_subscriber::filter::Targets::new().with_default(level),
     }
 }
 
-pub fn main<A: Parser, E: Into<miette::Report>, F: FnOnce(A) -> Result<(), E>>(f: F) {
-    miette::set_hook(Box::new(|_| {
-        Box::new(
-            miette::MietteHandlerOpts::new()
-                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
-                .context_lines(6)
-                .build(),
-        )
-    }))
-    .expect("Couldn't install miette hook");
+pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: OutputFormat, f: F) {
+    match format {
+        OutputFormat::Default => miette::set_hook(Box::new(|_| {
+            Box::new(
+                miette::MietteHandlerOpts::new()
+                    .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                    .context_lines(6)
+                    .build(),
+            )
+        }))
+        .expect("Couldn't install miette hook"),
+        OutputFormat::Json => {}
+    }
 
-    if let Err(err) = f(A::parse()).map_err(|err| err.into()) {
-        eprintln!("\n{err:?}");
+    if let Err(err) = f().map_err(|err| err.into()) {
+        match format {
+            OutputFormat::Default => eprintln!("\n{err:?}"),
+            OutputFormat::Json => {
+                write_colored_json_with_mode(
+                    &SerializedError::new(AsRef::<dyn miette::Diagnostic>::as_ref(&err)),
+                    &mut std::io::stdout(),
+                    colored_json::ColorMode::Auto(colored_json::Output::StdOut),
+                )
+                .expect("Couldn't serialize error");
+                println!();
+            }
+        }
         std::process::exit(1);
     }
 }

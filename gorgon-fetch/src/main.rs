@@ -53,13 +53,10 @@ fn split_fetcher_url(url: &Url) -> miette::Result<(&str, Cow<'_, Url>)> {
 }
 
 fn run(args: Args) -> miette::Result<()> {
-    gorgon_util_cli::logger(args.common.level()).init();
-
     let (fetcher_name, mut url) = split_fetcher_url(&args.url).context("Couldn't parse URL")?;
     let mut helper = args
         .helpers
         .caller()?
-        .with(&args.common)
         .with(&args.fetcher)
         .helper(format!("gorgon-fetch-{fetcher_name}"))?;
 
@@ -74,12 +71,15 @@ fn run(args: Args) -> miette::Result<()> {
 
     helper
         .with_arg(url.as_ref().as_str())
+        .into_task()
         .run()
         .map_err(|err| err.into())
 }
 
 fn main() {
-    gorgon_util_cli::main(run);
+    let args = Args::parse();
+    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
+    gorgon_util_cli::main(args.common.output_format, || run(args));
 }
 
 #[cfg(test)]
