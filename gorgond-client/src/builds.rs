@@ -25,19 +25,11 @@ impl BuildsClient<'_> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Source<'a> {
-    pub name: Cow<'a, str>,
-    pub kind: Cow<'a, str>,
-    pub rev: Option<Cow<'a, str>>,
-    pub url: Url,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Build<'a> {
     pub id: Uuid,
     pub name: Cow<'a, str>,
     pub kind: Cow<'a, str>,
-    pub source: Source<'a>,
+    pub source: Cow<'a, str>,
 }
 
 /// A task performed as part of a Build.

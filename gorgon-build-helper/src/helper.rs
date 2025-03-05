@@ -7,16 +7,17 @@ use std::{
     cell::LazyCell,
     ffi::OsStr,
     fmt,
+    io::{BufRead, Write},
     path::Path,
     process::{Command, Stdio},
 };
 
 use bounded_static::IntoBoundedStatic;
+use log::{debug, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
-use tracing::{debug, debug_span, event_enabled, instrument};
 
-use crate::{task::Task, SerializedError};
+use crate::{events::Event, task::Task, SerializedError};
 
 pub type Result<T, E = HelperError> = std::result::Result<T, E>;
 
@@ -90,14 +91,14 @@ pub enum TaskError {
     #[diagnostic(transparent)]
     Helper(#[from] HelperError),
     #[error("Couldn't deserialize task error")]
-    ErrorJson(
-        #[label("{2}")] SourceOffset,
-        #[source_code] NamedSource<String>,
-        #[source] serde_json::Error,
-    ),
+    #[diagnostic(transparent)]
+    ErrorJson(#[from] JsonError),
+    #[error("Couldn't process stderr")]
+    #[diagnostic(transparent)]
+    Stderr(#[from] StderrError),
     #[error(transparent)]
     #[diagnostic(transparent)]
-    Task(TaskExitError),
+    Task(#[from] TaskExitError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +121,35 @@ impl miette::Diagnostic for TaskExitError {
 #[error("Error from task: `{}`", .1.name)]
 #[diagnostic(forward(0))]
 struct TaskExitErrorCause(#[source] SerializedError, Task<'static>);
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum StderrError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("Couldn't deserialize event")]
+    #[diagnostic(transparent)]
+    EventJson(#[from] JsonError),
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("{err}")]
+pub struct JsonError {
+    pub err: serde_json::Error,
+    #[source_code]
+    pub src: NamedSource<String>,
+    #[label("{err}")]
+    pub pos: SourceOffset,
+}
+
+impl JsonError {
+    pub fn new(src: NamedSource<String>, err: serde_json::Error) -> Self {
+        Self {
+            pos: SourceOffset::from_location(src.inner(), err.line(), err.column()),
+            src,
+            err,
+        }
+    }
+}
 
 pub trait HelperContext {
     fn apply(&self, helper: Helper) -> Helper;
@@ -160,16 +190,22 @@ impl<'a> HelperFinder<'a> {
     }
 }
 impl HelperCaller for HelperFinder<'_> {
-    #[instrument(name="finder", skip_all, fields(name=?name.as_ref()))]
     fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
         if self.dev {
-            let _enter = debug_span!("dev").entered();
             let repo_path = self.dev_repo.as_ref().unwrap_or(&self.current_dir);
             let src_path = repo_path.join(Path::new(&name));
             match src_path.try_exists() {
-                Ok(true) => return Helper::build_dev(&name, repo_path, &self.current_dir),
-                Ok(false) => debug!(?src_path, "Path does not exist"),
-                Err(err) => debug!(?src_path, %err, "Couldn't check if path exists"),
+                Ok(true) => {
+                    info!(
+                        target: "helper::dev", name=name.as_ref().to_string_lossy();
+                        "🚧 Building helper from source..."
+                    );
+                    return Helper::build_dev(&name, repo_path, &self.current_dir);
+                }
+                Ok(false) => trace!(target: "helper::dev", src_path:?; "Path does not exist"),
+                Err(err) => {
+                    debug!(target: "helper::dev", src_path:?, err:%; "Couldn't check if path exists")
+                }
             }
         }
 
@@ -225,10 +261,9 @@ impl Helper {
             .to_string_lossy()
     }
 
-    #[instrument(skip_all, fields(cmd = ?self.cmd.get_program()))]
     pub fn run(mut self) -> Result<()> {
-        if event_enabled!(tracing::Level::DEBUG) {
-            debug!("Invoking helper:\n{self}");
+        if log_enabled!(log::Level::Debug) {
+            debug!(target:"helper", __log__:display=self; "Invoking helper...");
         }
 
         let output = self.cmd.output().map_err(HelperError::Start)?;
@@ -322,31 +357,87 @@ impl From<Helper> for TaskHelper<'static> {
 }
 
 impl TaskHelper<'_> {
-    #[instrument(name="task", skip_all, fields(name=self.task.name.as_ref()))]
     pub fn run(self) -> Result<(), TaskError> {
-        if event_enabled!(tracing::Level::DEBUG) {
-            debug!("Invoking task helper:\n{}", self.helper);
+        if log_enabled!(log::Level::Debug) {
+            debug!(target:"helper::task", __log__:display=self.helper; "Invoking task helper...");
         }
 
-        let child = self
+        let mut child = self
             .helper
-            .with_env("GORGON_VERBOSE", "255")
+            .with_env("GORGON_VERBOSE", "100")
             .with_env("GORGON_OUTPUT_FORMAT", "json")
             .with_env("GORGON_LOG_FORMAT", "json")
             .cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(HelperError::Start)?;
 
+        let join_stderr = std::thread::spawn({
+            let name = self.task.name.clone().into_owned();
+            let stderr = child.stderr.take().expect("No child stderr");
+            move || -> Result<(), StderrError> {
+                for line in std::io::BufReader::new(stderr).lines() {
+                    match line? {
+                        line if line.starts_with('{') => {
+                            let event: Event = match serde_json::from_str(&line) {
+                                Ok(event) => Ok(event),
+                                Err(err) => Err(JsonError::new(
+                                    NamedSource::new("stderr", line).with_language("JSON"),
+                                    err,
+                                )),
+                            }?;
+                            match event {
+                                Event::Log(log) => {
+                                    let target = format!("`{name}`::{}", log.target);
+                                    let meta = log::Metadata::builder()
+                                        .level(log.level)
+                                        .target(&target)
+                                        .build();
+                                    let logger = log::logger();
+                                    if logger.enabled(&meta) {
+                                        logger.log(
+                                            &log::Record::builder()
+                                                .metadata(meta)
+                                                .args(format_args!("{}", log.msg))
+                                                .key_values(&log)
+                                                .module_path(log.module_path.as_deref())
+                                                .file(log.file.as_deref())
+                                                .line(log.line)
+                                                .build(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        line => {
+                            warn!("stderr: {line}");
+                            // struct Line<'a>(&'a str, &'a str);
+                            // impl fmt::Display for Line<'_> {
+                            //     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                            //         let style = owo_colors::style().dimmed();
+                            //         style.fmt_prefix(f)?;
+                            //         writeln!(f, "[{}] {}", self.0, self.1)?;
+                            //         style.fmt_suffix(f)
+                            //     }
+                            // }
+                            // writeln!(std::io::stderr(), "{}", Line(&name, &line))?
+                        }
+                    }
+                }
+                Ok(())
+            }
+        });
+
         let output = child.wait_with_output().map_err(HelperError::Start)?;
+        join_stderr.join().expect("stderr thread panicked!?")?;
         match output.status {
             status if !status.success() => {
                 let stdout_str = LazyCell::new(|| String::from_utf8_lossy(&output.stdout));
 
                 // If debug logging is enabled, log stdout.
-                if event_enabled!(tracing::Level::DEBUG) {
+                if log_enabled!(log::Level::Debug) {
                     let termwidth = terminal_size::terminal_size_of(std::io::stderr())
                         .map(|(w, _)| w.0 as usize)
                         .unwrap_or(80);
@@ -365,12 +456,11 @@ impl TaskHelper<'_> {
                 // Try to parse the forwarded error from the child.
                 Err(TaskError::Task(TaskExitError::new(
                     serde_json::from_slice::<SerializedError>(&output.stdout).map_err(|err| {
-                        TaskError::ErrorJson(
-                            SourceOffset::from_location(&*stdout_str, err.line(), err.column()),
+                        TaskError::ErrorJson(JsonError::new(
                             NamedSource::new("stdout", stdout_str.to_string())
                                 .with_language("JSON"),
                             err,
-                        )
+                        ))
                     })?,
                     self.task.into_static(),
                 )))

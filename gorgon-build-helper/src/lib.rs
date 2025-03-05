@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub use gorgond_client::{builds, Uuid};
 
+pub mod events;
 pub mod fetcher;
 pub mod helper;
 pub mod task;

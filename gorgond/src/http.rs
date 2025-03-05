@@ -101,12 +101,7 @@ pub async fn builds_allocate(
             id: Uuid::now_v7(),
             name: "test-timestamp".into(),
             kind: "nix".into(),
-            source: builds::Source {
-                name: "test-hello".into(),
-                kind: "git".into(),
-                rev: Some("73d6baaddf2a8972e4a24c1867a89874efee8a24".into()),
-                url: parse_url("https://codeberg.org/gorgon/test-timestamp")?,
-            },
+            source: "git+https://codeberg.org/gorgon/test-timestamp?rev=73d6baaddf2a8972e4a24c1867a89874efee8a24".into(),
         },
     }))
 }

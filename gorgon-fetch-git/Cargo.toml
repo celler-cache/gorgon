@@ -9,11 +9,12 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
+
+clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+log = { version = "0.4.26", features = ["kv", "kv_serde"] }
 miette = "7.5.0"
-tracing = "0.1.41"
 url = { version = "2.5.4", features = ["serde"] }
 
 [dev-dependencies]

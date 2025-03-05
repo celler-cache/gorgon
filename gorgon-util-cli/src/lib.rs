@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{borrow::Cow, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, io::Write, path::PathBuf};
 
 use clap::Parser;
 use colored_json::write_colored_json_with_mode;
@@ -11,8 +11,8 @@ use gorgon_build_helper::{
     SerializedError,
 };
 use miette::{miette, Context, IntoDiagnostic, Result};
+use owo_colors::{OwoColorize, Stream, Style};
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
-use tracing_subscriber::filter::Targets;
 
 #[derive(
     Debug,
@@ -49,7 +49,7 @@ pub struct Args {
     #[arg(long, short, env = "GORGON_QUIET", action=clap::ArgAction::Count)]
     pub quiet: u8,
 
-    /// Output format for logs.
+    /// Output format for logs and events.
     #[arg(long, env = "GORGON_LOG_FORMAT", default_value = "default")]
     pub log_format: OutputFormat,
 
@@ -59,13 +59,13 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn level(&self) -> tracing::Level {
+    pub fn level(&self) -> log::LevelFilter {
         match self.verbose as i8 - self.quiet as i8 {
-            ..=-2 => tracing::Level::ERROR,
-            -1 => tracing::Level::WARN,
-            0 => tracing::Level::INFO,
-            1 => tracing::Level::DEBUG,
-            2.. => tracing::Level::TRACE,
+            ..=-2 => log::LevelFilter::Error,
+            -1 => log::LevelFilter::Warn,
+            0 => log::LevelFilter::Info,
+            1 => log::LevelFilter::Debug,
+            2.. => log::LevelFilter::Trace,
         }
     }
 }
@@ -88,17 +88,41 @@ impl HelperContext for &Args {
 #[group(id = "helpers")]
 #[command(next_help_heading = "Helpers")]
 pub struct HelperArgs {
+    #[cfg(not(windows))]
     /// Path(s) searched for helpers. Default: $PATH
-    #[arg(long)]
+    #[arg(long, env = "GORGON_HELPER_PATH", value_delimiter = ':')]
+    helper_path: Vec<PathBuf>,
+
+    #[cfg(windows)]
+    /// Path(s) searched for helpers. Default: $PATH
+    #[arg(long, env = "GORGON_HELPER_PATH", value_delimiter = ';')]
     helper_path: Vec<PathBuf>,
 
     /// Run helpers from source. Requires `cargo`.
-    #[arg(long)]
+    #[arg(long, env = "GORGON_HELPER_DEV")]
     helper_dev: bool,
 
     /// With --helper-dev, build from this repository.
-    #[arg(long)]
+    #[arg(long, env = "GORGON_HELPER_DEV_REPO")]
     helper_dev_repo: Option<PathBuf>,
+}
+
+impl HelperContext for HelperArgs {
+    fn apply(&self, mut helper: Helper) -> Helper {
+        if !self.helper_path.is_empty() {
+            helper = helper.with_env(
+                "GORGON_HELPER_PATH",
+                std::env::join_paths(&self.helper_path).expect("Couldn't join GORGON_HELPER_PATH"),
+            );
+        }
+        if self.helper_dev {
+            helper = helper.with_env("GORGON_HELPER_DEV", "true");
+        }
+        if let Some(path) = self.helper_dev_repo.as_deref() {
+            helper = helper.with_env("GORGON_HELPER_DEV_REPO", path);
+        }
+        helper
+    }
 }
 
 impl HelperArgs {
@@ -135,35 +159,122 @@ impl HelperArgs {
 #[must_use]
 pub struct LoggerBuilder {
     format: OutputFormat,
-    targets: Targets,
+    level: log::LevelFilter,
+    target_levels: BTreeMap<Cow<'static, str>, log::LevelFilter>,
 }
 
 impl LoggerBuilder {
-    pub fn with_targets<F: FnOnce(Targets) -> Targets>(mut self, f: F) -> Self {
-        self.targets = f(self.targets);
-        self
-    }
     pub fn with_format(mut self, format: OutputFormat) -> Self {
         self.format = format;
         self
     }
 
-    pub fn init(self) {
-        use tracing_subscriber::{fmt::layer, prelude::*};
+    pub fn with_target_level(
+        mut self,
+        target: impl Into<Cow<'static, str>>,
+        level: log::LevelFilter,
+    ) -> Self {
+        self.target_levels.insert(target.into(), level);
+        self
+    }
 
-        // This is a dumb workaround for some type fuckery.
-        let reg = tracing_subscriber::Registry::default().with(self.targets);
-        match self.format {
-            OutputFormat::Default => reg.with(layer().with_writer(std::io::stderr)).init(),
-            OutputFormat::Json => reg.with(layer().json().with_writer(std::io::stderr)).init(),
-        }
+    pub fn init(self) {
+        let disp = self.target_levels.into_iter().fold(
+            fern::Dispatch::new().level(self.level),
+            |disp, (target, level)| disp.level_for(target, level),
+        );
+        let disp = match self.format {
+            OutputFormat::Default => disp
+                .format(move |out, message, record| {
+                    let level = record.level();
+                    let level_style = match level {
+                        log::Level::Error => Style::new().red(),
+                        log::Level::Warn => Style::new().yellow(),
+                        log::Level::Info => Style::new(),
+                        log::Level::Debug => Style::new().blue(),
+                        log::Level::Trace => Style::new().dimmed(),
+                    };
+                    let text_style = match level {
+                        log::Level::Info => Style::new(),
+                        log::Level::Trace => Style::new().dimmed(),
+                        _ => level_style,
+                    };
+                    let kv_style = match level {
+                        log::Level::Debug | log::Level::Trace => level_style,
+                        _ => text_style.dimmed(),
+                    };
+
+                    // fern doesn't have a good way to do key/value formatting atm:
+                    // https://github.com/daboross/fern/issues/63
+                    struct KVDisplay<'a>(&'a dyn log::kv::Source);
+                    impl std::fmt::Display for KVDisplay<'_> {
+                        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                            struct Visitor<'b, 'f>(&'b mut std::fmt::Formatter<'f>);
+                            impl<'kv> log::kv::VisitSource<'kv> for Visitor<'_, '_> {
+                                fn visit_pair(
+                                    &mut self,
+                                    key: log::kv::Key<'kv>,
+                                    value: log::kv::Value<'kv>,
+                                ) -> std::result::Result<(), log::kv::Error>
+                                {
+                                    match key.as_str() {
+                                        "__log__" => Ok(()),
+                                        _ => write!(self.0, " {key}={value}")
+                                            .map_err(|_| log::kv::Error::msg("fmt::Error")),
+                                    }
+                                }
+                            }
+                            self.0
+                                .visit(&mut Visitor(f))
+                                .map_err(move |_| std::fmt::Error)
+                        }
+                    }
+
+                    let log = record.key_values().get("__log__".into()).map(|log| {
+                        textwrap::fill(
+                            &format!("{log}"),
+                            textwrap::Options::with_termwidth()
+                                .initial_indent("  ")
+                                .subsequent_indent("  "),
+                        )
+                    });
+
+                    out.finish(format_args!(
+                        "{:<5}  {}{}{}{}",
+                        level.if_supports_color(Stream::Stderr, |v| v.style(level_style)),
+                        format_args!("{target:<20}  {message}", target = record.target(),)
+                            .if_supports_color(Stream::Stderr, |v| v.style(text_style)),
+                        KVDisplay(record.key_values())
+                            .if_supports_color(Stream::Stderr, |v| v.style(kv_style)),
+                        log.as_ref().map(|_| "\n").unwrap_or(""),
+                        log.as_deref()
+                            .unwrap_or_default()
+                            .if_supports_color(Stream::Stderr, |v| v.style(text_style)),
+                    ))
+                })
+                .chain(std::io::stderr()),
+            OutputFormat::Json => disp.chain(fern::Output::call(|rec| {
+                let mut stderr = std::io::stderr().lock();
+                serde_json::to_writer(
+                    &mut stderr,
+                    &gorgon_build_helper::events::Event::Log(
+                        rec.try_into()
+                            .expect("Couldn't turn log record into log event: {rec}"),
+                    ),
+                )
+                .expect("Couldn't write JSON log line: {rec}");
+                writeln!(stderr).expect("Couldn't write newline after JSON line: {rec}");
+            })),
+        };
+        disp.apply().expect("Couldn't apply logger!?");
     }
 }
 
-pub fn logger(format: OutputFormat, level: tracing::Level) -> LoggerBuilder {
+pub fn logger(format: OutputFormat, level: log::LevelFilter) -> LoggerBuilder {
     LoggerBuilder {
         format,
-        targets: tracing_subscriber::filter::Targets::new().with_default(level),
+        level,
+        target_levels: BTreeMap::new(),
     }
 }
 

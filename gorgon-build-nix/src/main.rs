@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use clap::Parser;
-use crossbeam::channel;
 use gorgon_build_helper::Uuid;
+use log::debug;
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
@@ -22,87 +22,20 @@ use std::{
     process::{ChildStderr, Command, Stdio},
     sync::Arc,
 };
-use tracing::{debug, instrument, warn, Level};
-use tracing_subscriber::prelude::*;
 
 const BLANK: &str = "";
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
-    /// Increase log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
-    verbose: u8,
-
-    /// Decrease log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
-    quiet: u8,
-
     /// Nix command to run.
-    #[arg(long, short = 'C', default_value = "nix")]
-    nix_command: PathBuf,
+    #[arg(long, short = 'C', default_value = "nix-build")]
+    nix_build: PathBuf,
 
     /// Path to the source tree to build.
     source_path: PathBuf,
-}
 
-impl Args {
-    fn level(&self) -> Level {
-        match self.verbose as i8 - self.quiet as i8 {
-            ..=-2 => Level::ERROR,
-            -1 => Level::WARN,
-            0 => Level::INFO,
-            1 => Level::DEBUG,
-            2.. => Level::TRACE,
-        }
-    }
-}
-
-fn run(args: Args) -> Result<()> {
-    let view = Arc::new(nutmeg::View::new(
-        BuildState::default(),
-        nutmeg::Options::default(),
-    ));
-
-    tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::filter::Targets::new().with_default(args.level()))
-        .with(tracing_subscriber::fmt::layer().with_writer(Arc::clone(&view)))
-        .init();
-
-    // This will be replaced with calls to the `nix-daemon` crate in the future.
-    // Unfortunately, the client does *a lot* of... not even lifting, random errands?
-    let mut cmd = Command::new("nix-build");
-    cmd.arg("--no-out-link")
-        .args(["--log-format", "internal-json"])
-        .arg(args.source_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::piped());
-    debug!(?cmd, "Spawning...");
-
-    let mut child = cmd
-        .spawn()
-        .into_diagnostic()
-        .context("Couldn't spawn `nix-build`")?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| miette!("Couldn't get child stderr!?"))?;
-    let (stderr_result_send, stderr_result) = channel::bounded(0);
-    std::thread::spawn(move || stderr_result_send.send(handle_stderr(stderr, view)));
-
-    let status = child
-        .wait()
-        .into_diagnostic()
-        .context("Couldn't wait for `nix-build`")?;
-    if !status.success() {
-        match status.code() {
-            Some(code) => miette!("`nix-build` failed: {code}"),
-            None => miette!("`nix-build` failed"),
-        };
-    }
-
-    Ok(())
+    #[command(flatten)]
+    common: gorgon_util_cli::Args,
 }
 
 #[derive(Debug, Default)]
@@ -277,7 +210,6 @@ pub struct BuildStats {
     pub activities_by_type: BTreeMap<StderrActivityType, ActivityTypeStats>,
 }
 
-#[instrument(name = "stderr", skip_all)]
 fn handle_stderr(stderr: ChildStderr, view: Arc<nutmeg::View<BuildState>>) -> Result<()> {
     let mut reader = BufReader::new(stderr);
     let mut line = String::with_capacity(1024);
@@ -318,20 +250,34 @@ fn handle_stderr(stderr: ChildStderr, view: Arc<nutmeg::View<BuildState>>) -> Re
                 }
                 Action::Stop(ActionStop { id }) => view.update(|state| state.stop(id)),
                 Action::Message(ActionMessage {
-                    file: _,
+                    file,
                     column: _,
-                    line: _,
+                    line,
                     level,
                     msg,
                 }) => {
-                    match level {
-                        Verbosity::Error => tracing::error!(target: "nix-build", "{msg}"),
-                        Verbosity::Warn => tracing::warn!(target: "nix-build", "{msg}"),
-                        Verbosity::Notice | Verbosity::Info => {
-                            tracing::info!(target: "nix-build", "{msg}")
-                        }
-                        _ => tracing::trace!(target: "nix-build", "{msg}"),
-                    };
+                    let meta = log::Metadata::builder()
+                        .target("nix-build::stderr")
+                        .level(match level {
+                            Verbosity::Error => log::Level::Error,
+                            Verbosity::Warn => log::Level::Warn,
+                            Verbosity::Notice | Verbosity::Info => log::Level::Info,
+                            _ => log::Level::Trace,
+                        })
+                        .build();
+                    let logger = log::logger();
+                    if logger.enabled(&meta) {
+                        logger.log(
+                            &log::Record::builder()
+                                .metadata(meta)
+                                .args(format_args!("{msg}"))
+                                .file(file.as_deref())
+                                .line(
+                                    line.map(|l| l.try_into().expect("impossibly big line number")),
+                                )
+                                .build(),
+                        );
+                    }
                 }
                 Action::Result(ActionResult { id, data }) => match data {
                     ActionResultData::FileLinked(FileLinked { bytes_linked }) => {
@@ -392,21 +338,51 @@ fn handle_stderr(stderr: ChildStderr, view: Arc<nutmeg::View<BuildState>>) -> Re
     Ok(())
 }
 
-fn main() {
-    miette::set_hook(Box::new(|_| {
-        Box::new(
-            miette::MietteHandlerOpts::new()
-                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
-                .context_lines(6)
-                .build(),
-        )
-    }))
-    .expect("Couldn't install miette hook");
+fn run(args: Args) -> Result<()> {
+    let view = Arc::new(nutmeg::View::new(
+        BuildState::default(),
+        nutmeg::Options::default(),
+    ));
 
-    if let Err(err) = run(Args::parse()) {
-        eprintln!("\n{err:?}");
-        std::process::exit(1);
+    // This will be replaced with calls to the `nix-daemon` crate in the future.
+    // Unfortunately, the client does *a lot* of... not even lifting, random errands?
+    let mut cmd = Command::new(args.nix_build);
+    cmd.arg("--no-out-link")
+        .args(["--log-format", "internal-json"])
+        .arg(args.source_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped());
+    debug!(cmd:?; "Spawning...");
+
+    let mut child = cmd
+        .spawn()
+        .into_diagnostic()
+        .context("Couldn't spawn `nix-build`")?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| miette!("Couldn't get child stderr!?"))?;
+    let stderr_join = std::thread::spawn(move || handle_stderr(stderr, view));
+
+    let status = child
+        .wait()
+        .into_diagnostic()
+        .context("Couldn't wait for `nix-build`")?;
+    if !status.success() {
+        match status.code() {
+            Some(code) => miette!("`nix-build` failed: {code}"),
+            None => miette!("`nix-build` failed"),
+        };
     }
+    stderr_join.join().expect("stderr thread panicked")
+}
+
+fn main() {
+    let args = Args::parse();
+    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
+    gorgon_util_cli::main(args.common.output_format, || run(args));
 }
 
 /// Casts a Nix Activity ID into a UUIDv8.
