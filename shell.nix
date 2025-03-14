@@ -5,10 +5,14 @@
 { pkgs ? import <nixpkgs> {} }:
 pkgs.mkShell {
   buildInputs = with pkgs; [
+    direnv
+
     # build dependencies
+    cargo
     stdenv # C/C++ compiler and deps for crates with bindings
     pkg-config
     openssl
+    cacert
 
     # script dependencies
     fish
