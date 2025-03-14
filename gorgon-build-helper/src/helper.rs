@@ -7,7 +7,7 @@ use std::{
     cell::LazyCell,
     ffi::OsStr,
     fmt,
-    io::{BufRead, Write},
+    io::BufRead,
     path::Path,
     process::{Command, Stdio},
 };
@@ -376,57 +376,55 @@ impl TaskHelper<'_> {
 
         let join_stderr = std::thread::spawn({
             let name = self.task.name.clone().into_owned();
-            let stderr = child.stderr.take().expect("No child stderr");
+            let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
             move || -> Result<(), StderrError> {
-                for line in std::io::BufReader::new(stderr).lines() {
-                    match line? {
-                        line if line.starts_with('{') => {
-                            let event: Event = match serde_json::from_str(&line) {
-                                Ok(event) => Ok(event),
-                                Err(err) => Err(JsonError::new(
-                                    NamedSource::new("stderr", line).with_language("JSON"),
-                                    err,
-                                )),
-                            }?;
-                            match event {
-                                Event::Log(log) => {
-                                    let target = format!("`{name}`::{}", log.target);
-                                    let meta = log::Metadata::builder()
-                                        .level(log.level)
-                                        .target(&target)
-                                        .build();
-                                    let logger = log::logger();
-                                    if logger.enabled(&meta) {
-                                        logger.log(
-                                            &log::Record::builder()
-                                                .metadata(meta)
-                                                .args(format_args!("{}", log.msg))
-                                                .key_values(&log)
-                                                .module_path(log.module_path.as_deref())
-                                                .file(log.file.as_deref())
-                                                .line(log.line)
-                                                .build(),
-                                        );
-                                    }
+                let mut buf = String::new();
+                loop {
+                    stderr.read_line(&mut buf)?;
+                    if buf.is_empty() {
+                        return Ok(());
+                    }
+                    if buf.starts_with('{') {
+                        let event: Event = match serde_json::from_str(&buf) {
+                            Err(err) if err.is_eof() => {
+                                // Keep reading lines until we've got a complete JSON payload.
+                                continue;
+                            }
+                            Err(err) => Err(StderrError::from(JsonError::new(
+                                NamedSource::new("stderr", buf.clone()).with_language("JSON"),
+                                err,
+                            ))),
+                            Ok(event) => Ok(event),
+                        }?;
+                        match event {
+                            Event::Log(log) => {
+                                let target = format!("`{name}`::{}", log.target);
+                                let meta = log::Metadata::builder()
+                                    .level(log.level)
+                                    .target(&target)
+                                    .build();
+                                let logger = log::logger();
+                                if logger.enabled(&meta) {
+                                    logger.log(
+                                        &log::Record::builder()
+                                            .metadata(meta)
+                                            .args(format_args!("{}", log.msg))
+                                            .key_values(&log)
+                                            .module_path(log.module_path.as_deref())
+                                            .file(log.file.as_deref())
+                                            .line(log.line)
+                                            .build(),
+                                    );
                                 }
                             }
                         }
-                        line => {
-                            warn!("stderr: {line}");
-                            // struct Line<'a>(&'a str, &'a str);
-                            // impl fmt::Display for Line<'_> {
-                            //     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                            //         let style = owo_colors::style().dimmed();
-                            //         style.fmt_prefix(f)?;
-                            //         writeln!(f, "[{}] {}", self.0, self.1)?;
-                            //         style.fmt_suffix(f)
-                            //     }
-                            // }
-                            // writeln!(std::io::stderr(), "{}", Line(&name, &line))?
-                        }
+                    } else {
+                        warn!("stderr: {}", buf.trim_end());
                     }
+
+                    // Now we can clear the buffer.
+                    buf.clear();
                 }
-                Ok(())
             }
         });
 
