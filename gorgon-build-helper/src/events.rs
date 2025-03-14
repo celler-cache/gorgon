@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub enum Event<'a> {
     #[serde(borrow)]
     Log(LogEvent<'a>),
+    #[serde(untagged)]
+    Error(crate::SerializedError),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

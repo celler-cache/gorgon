@@ -13,7 +13,7 @@ use std::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::{debug, info, log_enabled, trace, warn};
+use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
 
@@ -101,26 +101,14 @@ pub enum TaskError {
     Task(#[from] TaskExitError),
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Task failed: `{}`", .0.1.name)]
-pub struct TaskExitError(TaskExitErrorCause);
-
-impl TaskExitError {
-    pub fn new(err: SerializedError, task: Task<'static>) -> Self {
-        Self(TaskExitErrorCause(err, task))
-    }
-}
-
-impl miette::Diagnostic for TaskExitError {
-    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn miette::Diagnostic> + 'a>> {
-        Some(Box::new(std::iter::once(&self.0 as _)))
-    }
-}
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("Task failed: `{}`", .1.name)]
+pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task<'static>);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
-#[error("Error from task: `{}`", .1.name)]
+#[error("Error from task: `{}`", .1)]
 #[diagnostic(forward(0))]
-struct TaskExitErrorCause(#[source] SerializedError, Task<'static>);
+struct TaskExitErrorCause(#[source] SerializedError, Cow<'static, str>);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum StderrError {
@@ -129,6 +117,8 @@ pub enum StderrError {
     #[error("Couldn't deserialize event")]
     #[diagnostic(transparent)]
     EventJson(#[from] JsonError),
+    #[error("Couldn't send deserialized error back to main thread")]
+    SendError(#[from] crossbeam::channel::TrySendError<SerializedError>),
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -374,6 +364,7 @@ impl TaskHelper<'_> {
             .spawn()
             .map_err(HelperError::Start)?;
 
+        let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
         let join_stderr = std::thread::spawn({
             let name = self.task.name.clone().into_owned();
             let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
@@ -397,6 +388,7 @@ impl TaskHelper<'_> {
                             Ok(event) => Ok(event),
                         }?;
                         match event {
+                            Event::Error(err) => send_err.try_send(err)?,
                             Event::Log(log) => {
                                 let target = format!("`{name}`::{}", log.target);
                                 let meta = log::Metadata::builder()
@@ -452,18 +444,21 @@ impl TaskHelper<'_> {
                 }
 
                 // Try to parse the forwarded error from the child.
-                Err(TaskError::Task(TaskExitError::new(
-                    serde_json::from_slice::<SerializedError>(&output.stdout).map_err(|err| {
-                        TaskError::ErrorJson(JsonError::new(
-                            NamedSource::new("stdout", stdout_str.to_string())
-                                .with_language("JSON"),
-                            err,
-                        ))
-                    })?,
-                    self.task.into_static(),
+                let task = self.task.into_static();
+                Err(TaskError::Task(TaskExitError(
+                    recv_err
+                        .into_iter()
+                        .map(|r| TaskExitErrorCause(r, task.name.clone()))
+                        .collect(),
+                    task,
                 )))
             }
-            _ => Ok(()),
+            _ => {
+                if let Some(err) = recv_err.into_iter().next() {
+                    unimplemented!("non-fatal error from child: {err}");
+                }
+                Ok(())
+            }
         }
     }
 }

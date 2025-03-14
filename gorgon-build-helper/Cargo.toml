@@ -13,6 +13,8 @@ gorgond-client = { path = "../gorgond-client" }
 
 bounded-static = { version = "0.8.0", features = ["derive"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
+crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
+log = { version = "0.4.26", features = ["kv", "kv_serde"] }
 miette = { version = "7.5.0", features = ["serde"] }
 owo-colors = "4.1.0"
 serde_json = "1.0.139"
@@ -20,4 +22,3 @@ serde = { version = "1.0.218", features = ["derive"] }
 terminal_size = "0.4.1"
 thiserror = "2.0.11"
 which = "7.0.2"
-log = { version = "0.4.26", features = ["kv", "kv_serde"] }
