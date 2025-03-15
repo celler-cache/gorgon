@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: EUPL-1.2
 
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import ./nix/nixpkgs.default.nix }:
 pkgs.mkShell {
   buildInputs = with pkgs; [
     direnv
