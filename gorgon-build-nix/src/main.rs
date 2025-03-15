@@ -28,7 +28,12 @@ const BLANK: &str = "";
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// Nix command to run.
-    #[arg(long, short = 'C', default_value = "nix-build")]
+    #[arg(
+        long,
+        short = 'C',
+        default_value = "nix-build",
+        env = "GORGON_BUILD_NIX_BUILD"
+    )]
     nix_build: PathBuf,
 
     /// Path to the source tree to build.
