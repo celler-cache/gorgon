@@ -102,6 +102,7 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     info!("Starting build...");
     builder
+        .with(&args.helpers)
         .with_arg(tmpdir.path())
         .into_task()
         .run()
