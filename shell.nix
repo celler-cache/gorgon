@@ -9,7 +9,7 @@ pkgs.mkShell {
 
     # build dependencies
     cargo
-    stdenv # C/C++ compiler and deps for crates with bindings
+    stdenv.cc
     pkg-config
     openssl
     cacert
