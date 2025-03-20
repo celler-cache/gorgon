@@ -7,8 +7,13 @@ pkgs.mkShell {
   buildInputs = with pkgs; [
     direnv
 
-    # build dependencies
+    # rust toolchain
     cargo
+    rustc
+    clippy
+    rust-analyzer
+
+    # build dependencies
     stdenv.cc
     pkg-config
     openssl
