@@ -9,7 +9,7 @@
 use derive_more::{Constructor, Unwrap};
 use miette::{Diagnostic, MietteDiagnostic, NamedSource, SourceOffset, SourceSpan};
 use reqwest::{header, IntoUrl, Method, StatusCode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Debug, Display};
 use std::future::Future;
@@ -17,10 +17,12 @@ use strum::{AsRefStr, IntoStaticStr};
 
 pub use url::Url;
 pub use uuid::Uuid;
+pub use yoke::Yokeable;
 
 pub mod builds;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+pub type Yoke<T, C = String> = yoke::Yoke<T, C>;
 
 #[derive(Debug, thiserror::Error, Diagnostic, Unwrap)]
 #[allow(clippy::large_enum_variant)]
@@ -67,10 +69,17 @@ pub enum RequestErrorKind {
 }
 
 pub trait Request: Serialize + Debug {
-    type Response: DeserializeOwned;
+    type Response: for<'y> Yokeable<'y>;
+
     fn endpoint(&self, base: &Url) -> Result<(Method, Url), url::ParseError>;
 
-    fn send(&self, client: &Client) -> impl Future<Output = Result<Self::Response, Error>> + Send {
+    fn send(
+        &self,
+        client: &Client,
+    ) -> impl Future<Output = Result<Yoke<Self::Response>, Error>> + Send
+    where
+        for<'y> <Self::Response as Yokeable<'y>>::Output: Deserialize<'y>,
+    {
         // Serialize self outside the future, this avoids needing to send &Self between threads.
         let endpoint_r = self.endpoint(&client.base_url);
         let body_r = serde_json::to_string_pretty(&self).map_err(|err| {
@@ -89,7 +98,9 @@ pub trait Request: Serialize + Debug {
             // Shut up, clippy. This closure exists so that the inner one can return a
             // RequestErrorKind, and the outer one can draw the rest of the RequestError.
             #[allow(clippy::redundant_closure_call)]
-            (async |method: &Method, url: &Url| -> Result<Self::Response, RequestErrorKind> {
+            (async |method: &Method,
+                    url: &Url|
+                   -> Result<Yoke<Self::Response>, RequestErrorKind> {
                 let req = client
                     .client
                     .request(method.clone(), url.clone())
@@ -100,27 +111,27 @@ pub trait Request: Serialize + Debug {
                 let status = rsp.status();
                 let body = rsp.text().await?;
 
-                fn parse<T: DeserializeOwned>(
+                fn parse<'de, T: Deserialize<'de>>(
                     url: &Url,
-                    body: String,
+                    body: &'de str,
                 ) -> Result<T, RequestErrorKind> {
-                    serde_json::from_str(&body).map_err(|err| {
+                    serde_json::from_str(body).map_err(|err| {
                         RequestErrorKind::Json(
                             SourceSpan::new(
-                                SourceOffset::from_location(&body, err.line(), err.column()),
+                                SourceOffset::from_location(body, err.line(), err.column()),
                                 body.lines()
                                     .nth(err.line() - 1)
                                     .map(|line| line.len() - err.column())
                                     .unwrap_or(0),
                             ),
-                            NamedSource::new(url, body).with_language("JSON"),
+                            NamedSource::new(url, body.to_string()).with_language("JSON"),
                             err,
                         )
                     })
                 }
                 match status {
-                    StatusCode::OK => Ok(parse(url, body)?),
-                    _ => Err(RequestErrorKind::Api(parse(url, body)?)),
+                    StatusCode::OK => Yoke::try_attach_to_cart(body, |body| parse(url, body)),
+                    _ => Err(RequestErrorKind::Api(parse(url, &body)?)),
                 }
             })(&method, &url)
             .await
@@ -245,7 +256,7 @@ impl ApiErrorKind {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Yokeable)]
 pub struct RootRequest {}
 
 impl Request for RootRequest {
@@ -255,7 +266,7 @@ impl Request for RootRequest {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Yokeable)]
 pub struct RootResponse {}
 
 #[derive(Debug)]
@@ -276,7 +287,7 @@ impl Client {
         })
     }
 
-    pub async fn root(&self) -> Result<RootResponse> {
+    pub async fn root(&self) -> Result<Yoke<RootResponse>> {
         RootRequest {}.send(self).await
     }
 

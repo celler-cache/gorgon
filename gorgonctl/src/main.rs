@@ -8,13 +8,14 @@
 
 use clap::{Parser, Subcommand};
 use derive_more::Unwrap;
-use gorgond_client::Client;
+use gorgond_client::{Client, Yoke};
 use miette::{Diagnostic, NamedSource};
 use std::{fmt::Debug, io::Write};
 use tracing::instrument;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, thiserror::Error, Diagnostic, Unwrap)]
 pub enum Error {
     #[error(transparent)]
@@ -68,7 +69,7 @@ enum Command {
 impl Command {
     pub async fn run(&self, args: &Args) -> Result<()> {
         match &args.command {
-            Command::Ping(cmd) => self.dump(cmd.run(args).await?),
+            Command::Ping(cmd) => self.dump(cmd.run(args).await?.get()),
         }
     }
 
@@ -84,7 +85,7 @@ impl Command {
 struct Ping;
 impl Ping {
     #[instrument(name = "ping", skip_all)]
-    pub async fn run(&self, args: &Args) -> Result<gorgond_client::RootResponse> {
+    pub async fn run(&self, args: &Args) -> Result<Yoke<gorgond_client::RootResponse>> {
         Ok(args.new_client()?.root().await?)
     }
 }

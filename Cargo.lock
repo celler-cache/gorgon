@@ -1562,6 +1562,7 @@ dependencies = [
  "gorgond-client",
  "miette",
  "serde",
+ "serde_json",
  "syntect",
  "thiserror 2.0.11",
  "tokio",
@@ -1587,6 +1588,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "yoke",
 ]
 
 [[package]]

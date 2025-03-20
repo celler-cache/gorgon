@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use axum::{
-    extract::{rejection::JsonRejection, FromRequest},
+    extract::FromRequest,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
@@ -11,9 +11,9 @@ use axum::{
 };
 use axum_extra::response::ErasedJson;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
-use gorgond_client::{builds, ApiError, ApiErrorKind, RootResponse, Url, Uuid};
+use gorgond_client::{builds, ApiError, ApiErrorKind, RootResponse, Url, Uuid, Yoke, Yokeable};
 use miette::Diagnostic;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{debug, info, instrument};
 
@@ -25,15 +25,9 @@ pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 #[error(transparent)]
 #[diagnostic(transparent)]
 pub struct ApiErrorAdapter(#[from] ApiError);
-
-impl From<JsonRejection> for ApiErrorAdapter {
-    fn from(rej: JsonRejection) -> Self {
-        let (status, body_text) = (rej.status(), rej.body_text());
-        Self(
-            ApiError::new_err(ApiErrorKind::RequestRejected, rej)
-                .with_status(status)
-                .with_detail(body_text),
-        )
+impl ApiErrorAdapter {
+    fn wrap<E: std::error::Error>(kind: ApiErrorKind) -> impl FnOnce(E) -> Self {
+        |err| Self::from(ApiError::new_err(kind, err))
     }
 }
 
@@ -47,11 +41,38 @@ impl IntoResponse for ApiErrorAdapter {
     }
 }
 
-#[derive(Debug, FromRequest)]
-#[from_request(via(axum::Json), rejection(ApiErrorAdapter))]
-pub struct ApiJson<T>(pub T);
+pub struct JsonRequest<T: for<'y> Yokeable<'y>>(pub Yoke<T>);
+impl<T: for<'y> Yokeable<'y>> std::fmt::Debug for JsonRequest<T>
+where
+    for<'y> <T as Yokeable<'y>>::Output: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("JsonRequest").field(&self.0).finish()
+    }
+}
 
-impl<T: Serialize> IntoResponse for ApiJson<T> {
+impl<T: for<'y> Yokeable<'y>, S: Send + Sync> FromRequest<S> for JsonRequest<T>
+where
+    for<'y> <T as Yokeable<'y>>::Output: Deserialize<'y>,
+{
+    type Rejection = ApiErrorAdapter;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(Yoke::try_attach_to_cart(
+            String::from_request(req, state)
+                .await
+                .map_err(ApiErrorAdapter::wrap(ApiErrorKind::RequestRejected))?,
+            |src| {
+                serde_json::from_str(src)
+                    .map_err(ApiErrorAdapter::wrap(ApiErrorKind::RequestRejected))
+            },
+        )?))
+    }
+}
+
+#[derive(Debug)]
+pub struct JsonResponse<T>(pub T);
+impl<T: Serialize> IntoResponse for JsonResponse<T> {
     fn into_response(self) -> axum::response::Response {
         ErasedJson::pretty(self.0).into_response()
     }
@@ -89,14 +110,14 @@ pub async fn error_method_not_allowed(req: axum::extract::Request) -> Result<()>
     )))
 }
 
-pub async fn root() -> ApiJson<RootResponse> {
-    ApiJson(RootResponse {})
+pub async fn root() -> JsonResponse<RootResponse> {
+    JsonResponse(RootResponse {})
 }
 
 pub async fn builds_allocate(
-    ApiJson(_req): ApiJson<builds::BuildAllocateRequest<'static>>,
-) -> Result<ApiJson<builds::BuildAllocateResponse<'static>>> {
-    Ok(ApiJson(builds::BuildAllocateResponse {
+    JsonRequest(_req): JsonRequest<builds::BuildAllocateRequest<'static>>,
+) -> Result<JsonResponse<builds::BuildAllocateResponse<'static>>> {
+    Ok(JsonResponse(builds::BuildAllocateResponse {
         build: builds::Build {
             id: Uuid::now_v7(),
             name: "test-timestamp".into(),

@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use gorgon_build_helper::helper::HelperCaller;
-use gorgond_client::{builds, Client};
+use gorgond_client::{builds, Client, Yoke};
 use log::info;
 use miette::{Context, IntoDiagnostic, Result};
 use std::path::PathBuf;
@@ -50,9 +50,13 @@ pub struct BuilderConfig {
     pub current_dir: Option<PathBuf>,
 }
 
-async fn request_build(args: &Args, client: &Client) -> Result<builds::Build<'static>> {
+async fn request_build(args: &Args, client: &Client) -> Result<Yoke<builds::Build<'static>>> {
     info!("Requesting something to build...");
-    Ok(client.builds().allocate(&args.id).await?.build)
+    Ok(client
+        .builds()
+        .allocate(&args.id)
+        .await?
+        .map_project(|rsp, _| rsp.build))
 }
 
 pub fn run(args: Args) -> miette::Result<()> {
@@ -68,11 +72,12 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     // Ask gorgond for something to do.
     let client = init_client(&args).context("Couldn't build gorgond client")?;
-    let build = main_rt.block_on(async {
+    let build_ = main_rt.block_on(async {
         request_build(&args, &client)
             .await
             .context("Couldn't get something to build; lost and without purpose")
     })?;
+    let build = build_.get();
     info!(name = build.name.as_ref(), id:% = build.id; " -> Got a task!");
 
     // Find fetcher and builder.
