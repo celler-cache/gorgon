@@ -17,6 +17,7 @@ pkgs.mkShell {
     stdenv.cc
     pkg-config
     openssl
+    libgit2
     cacert
 
     # script dependencies
@@ -47,6 +48,8 @@ pkgs.mkShell {
     # Hack to make woodpecker pipelines work locally.
     export CI_HACK_WORK_DIR=$PWD
   '';
+
+  LIBGIT2_NO_VENDOR = true;
 
   DIESEL = "${pkgs.diesel-cli}/bin/diesel";
 }
