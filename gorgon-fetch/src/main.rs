@@ -71,7 +71,7 @@ fn run(args: Args) -> miette::Result<()> {
 
     helper
         .with_arg(url.as_ref().as_str())
-        .into_task()
+        .into_task(None)
         .run()
         .map_err(|err| err.into())
 }

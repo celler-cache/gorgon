@@ -12,7 +12,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use bounded_static::IntoBoundedStatic;
+use gorgond_client::Uuid;
 use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
@@ -103,7 +103,7 @@ pub enum TaskError {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Task failed: `{}`", .1.name)]
-pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task<'static>);
+pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Error from task: `{}`", .1)]
@@ -327,26 +327,23 @@ impl Helper {
         self
     }
 
-    pub fn into_task(self) -> TaskHelper<'static> {
-        TaskHelper::from(self)
-    }
-}
-
-pub struct TaskHelper<'a> {
-    task: Task<'a>,
-    helper: Helper,
-}
-
-impl From<Helper> for TaskHelper<'static> {
-    fn from(helper: Helper) -> Self {
-        Self {
-            task: Task::new(helper.name()).into_static(),
-            helper,
+    pub fn into_task(self, sub_id: Option<Uuid>) -> TaskHelper {
+        TaskHelper {
+            task: Task {
+                sub_id: sub_id.unwrap_or_else(Task::gen_sub_id),
+                name: self.name().into_owned().into(),
+            },
+            helper: self,
         }
     }
 }
 
-impl TaskHelper<'_> {
+pub struct TaskHelper {
+    task: Task,
+    helper: Helper,
+}
+
+impl TaskHelper {
     pub fn run(self) -> Result<(), TaskError> {
         if log_enabled!(log::Level::Debug) {
             debug!(target:"helper::task", __log__:display=self.helper; "Invoking task helper...");
@@ -366,7 +363,7 @@ impl TaskHelper<'_> {
 
         let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
         let join_stderr = std::thread::spawn({
-            let name = self.task.name.clone().into_owned();
+            let name = self.task.name.clone();
             let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
             move || -> Result<(), StderrError> {
                 let mut buf = String::new();
@@ -444,13 +441,12 @@ impl TaskHelper<'_> {
                 }
 
                 // Try to parse the forwarded error from the child.
-                let task = self.task.into_static();
                 Err(TaskError::Task(TaskExitError(
                     recv_err
                         .into_iter()
-                        .map(|r| TaskExitErrorCause(r, task.name.clone()))
+                        .map(|r| TaskExitErrorCause(r, self.task.name.clone()))
                         .collect(),
-                    task,
+                    self.task,
                 )))
             }
             _ => {

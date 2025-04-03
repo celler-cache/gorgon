@@ -101,7 +101,7 @@ pub fn run(args: Args) -> miette::Result<()> {
         .with_arg("--out")
         .with_arg(tmpdir.path())
         .with_arg(&*build.source)
-        .into_task()
+        .into_task(None)
         .run()
         .context("Couldn't fetch sources")?;
 
@@ -109,7 +109,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     builder
         .with(&args.helpers)
         .with_arg(tmpdir.path())
-        .into_task()
+        .into_task(None)
         .run()
         .context("Couldn't run build")?;
 

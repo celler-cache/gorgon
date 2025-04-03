@@ -10,8 +10,8 @@ pkgs.mkShell {
     # rust toolchain
     cargo
     rustc
+    rustfmt
     clippy
-    rust-analyzer
 
     # build dependencies
     stdenv.cc
