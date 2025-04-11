@@ -10,8 +10,8 @@ use clap::Parser;
 use gorgon_build_helper::helper::HelperCaller;
 use gorgond_client::{builds, Client, Yoke};
 use log::info;
-use miette::{Context, IntoDiagnostic, Result};
-use std::path::PathBuf;
+use miette::{miette, Context, IntoDiagnostic, Result};
+use std::{path::PathBuf, process::Stdio};
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -80,38 +80,26 @@ pub fn run(args: Args) -> miette::Result<()> {
     let build = build_.get();
     info!(name = build.name.as_ref(), id:% = build.id; " -> Got a task!");
 
-    // Find fetcher and builder.
+    // Find builder.
     let caller = args.helpers.caller()?;
-    let fetcher = caller.helper("gorgon-fetch")?;
     let builder = caller.helper(format!("gorgon-build-{}", build.kind))?;
 
-    // Fetch sources into a temporary directory, then build it.
-    info!("Setting up build...");
-    let tmpdir = tempfile::Builder::new()
-        .prefix(&format!("gorgon-build.{}.", build.name))
-        .suffix(".d")
-        .tempdir()
-        .into_diagnostic()
-        .context("Couldn't create temporary directory")?;
-    info!(path:display=tmpdir.path().to_string_lossy(); "-> Created tempdir");
-
-    info!("Fetching sources...");
-    fetcher
-        .with(&args.helpers)
-        .with_arg("--out")
-        .with_arg(tmpdir.path())
-        .with_arg(&*build.source)
-        .into_task(None)
-        .run()
-        .context("Couldn't fetch sources")?;
-
+    // Run the builder, send it the build spec over stdin.
     info!("Starting build...");
-    builder
+    let mut build_task = builder
         .with(&args.helpers)
-        .with_arg(tmpdir.path())
-        .into_task(None)
-        .run()
-        .context("Couldn't run build")?;
+        .with_arg("-")
+        .with_stdin(Stdio::piped())
+        .into_task(None);
+    let mut build_child = build_task.start().context("Couldn't start build")?;
+    if let Some(mut stdin) = build_child.child.stdin.as_mut() {
+        serde_json::to_writer_pretty(&mut stdin, &build)
+            .into_diagnostic()
+            .context("Couldn't write Build to builder's stdin")?;
+    } else {
+        return Err(miette!("Builder process has no stdin?"));
+    };
+    build_child.wait_checked()?;
 
     info!("Done!");
     Ok(())

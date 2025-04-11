@@ -98,9 +98,7 @@ pub trait Request: Serialize + Debug {
             // Shut up, clippy. This closure exists so that the inner one can return a
             // RequestErrorKind, and the outer one can draw the rest of the RequestError.
             #[allow(clippy::redundant_closure_call)]
-            (async |method: &Method,
-                    url: &Url|
-                   -> Result<Yoke<Self::Response>, RequestErrorKind> {
+            (async |method: &Method, url: &Url| -> Result<Yoke<Self::Response>, RequestErrorKind> {
                 let req = client
                     .client
                     .request(method.clone(), url.clone())
@@ -237,10 +235,6 @@ pub enum ApiErrorKind {
     #[error("Request rejected")]
     #[serde(rename = "tag:RequestRejected")]
     RequestRejected,
-
-    #[error("Bad URL in data: {url}")]
-    #[serde(rename = "tag:BadDataUrl")]
-    BadDataUrl { url: String },
 
     #[error("unknown error type: {0}")]
     #[serde(untagged)]

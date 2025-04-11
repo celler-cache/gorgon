@@ -3,385 +3,435 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use clap::Parser;
-use gorgon_build_helper::Uuid;
-use log::debug;
+use clap_stdin::MaybeStdin;
+use derive_more::{Deref, DerefMut};
+use gorgon_build_helper::{helper::Helper, task::Task, Uuid};
+use gorgond_client::builds::Build;
+use log::{
+    info,
+    kv::{Key, Value},
+    warn,
+};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
         Action, ActionMessage, ActionResult, ActionResultData, ActionStart, ActionStop,
         BuildLogLine, FileLinked, Progress, SetExpected, SetPhase,
     },
-    StderrActivityType, Verbosity,
+    Verbosity,
 };
-use owo_colors::{style, OwoColorize, Style};
+use once_cell::unsync::Lazy;
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Display,
+    cell::LazyCell,
+    collections::BTreeMap,
+    fmt::Write,
     io::{BufRead, BufReader},
-    path::PathBuf,
-    process::{ChildStderr, Command, Stdio},
-    sync::Arc,
+    ops::Deref,
+    path::{Path, PathBuf},
+    process::Stdio,
 };
-
-const BLANK: &str = "";
+use url::{Position, Url};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
-    /// Nix command to run.
-    #[arg(
-        long,
-        short = 'C',
-        default_value = "nix-build",
-        env = "GORGON_BUILD_NIX_BUILD"
-    )]
-    nix_build: PathBuf,
+    /// Path to `nix-instantiate`.
+    #[arg(long, short = 'I', default_value = "nix-instantiate")]
+    nix_instantiate: PathBuf,
 
-    /// Path to the source tree to build.
-    source_path: PathBuf,
+    /// Path to `nix-store`.
+    #[arg(long, short = 'S', default_value = "nix-store")]
+    nix_store: PathBuf,
+
+    /// Build spec in JSON format, or "-" to read from stdin.
+    build_json: MaybeStdin<String>,
 
     #[command(flatten)]
     common: gorgon_util_cli::Args,
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
+pub enum FetchExprError {
+    #[error("{1}")]
+    #[diagnostic(code = "FetchExpr::url::parse")]
+    ParseUrl(String, #[source] url::ParseError),
+    #[error("{1}")]
+    #[diagnostic(forward(1))]
+    Url(Url, #[source] FetchExprUrlError),
+}
+#[derive(Debug, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
+pub enum FetchExprUrlError {
+    #[error("Unsupported fetcher: {0}")]
+    #[diagnostic(
+        code = "FetchExpr::url::scheme",
+        help = "Fetchers are specified by the URL scheme, eg. 'git://' or 'git+http://'.\nSupported fetchers: 'git'."
+    )]
+    Fetcher(String),
+    #[error("Unknown query parameter: ?{0}")]
+    #[diagnostic(
+        code = "FetchExpr::url::query::unknown",
+        help = "Valid query parameters are: ?rev"
+    )]
+    UnknownQueryParameter(String),
+    #[error("Missing required query parameter: ?{0}")]
+    #[diagnostic(
+        code = "FetchExpr::url::query::required",
+        help = "Required query parameters are: ?rev"
+    )]
+    MissingQueryParameter(&'static str),
+}
+
+/// A nix expression for a fetcher, eg. `builtins.fetchGit`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FetchExpr {
+    FetchGit { url: String, rev: String },
+}
+impl std::fmt::Display for FetchExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FetchGit { url, rev } => write!(
+                f,
+                r#"builtins.fetchGit {{ url = "{url}"; rev = "{rev}"; }}"#,
+            ),
+        }
+    }
+}
+impl FetchExpr {
+    /// Parses a Fetcher URL, eg. `git+https://example.com/?rev=abc123`.
+    pub fn parse_url(url_s: &str) -> Result<Self, FetchExprError> {
+        let url = Url::parse(url_s).map_err(|err| FetchExprError::ParseUrl(url_s.into(), err))?;
+        let url_err = |err| FetchExprError::Url(url.clone(), err);
+
+        // The URL crate won't let us do `set_scheme()` involving "special" schemes like
+        // https://, which... is unfortunate for doing git+https -> https, so if we need
+        // to do that, we need to rebuild the whole string ourselves.
+        // https://github.com/servo/rust-url/issues/577
+        let scheme_ = url.scheme();
+        let (fetcher, scheme) = scheme_.split_once("+").unwrap_or((scheme_, scheme_));
+        let url_s = [scheme, &url[Position::AfterScheme..Position::AfterPath]].join("");
+
+        match fetcher {
+            "git" => {
+                let mut rev = None;
+                for (k, v) in url.query_pairs() {
+                    match k.deref() {
+                        "rev" => rev = Some(v.to_string()),
+                        _ => {
+                            return Err(url_err(FetchExprUrlError::UnknownQueryParameter(k.into())))
+                        }
+                    }
+                }
+                Ok(Self::FetchGit {
+                    url: url_s,
+                    rev: rev
+                        .ok_or_else(|| url_err(FetchExprUrlError::MissingQueryParameter("rev")))?,
+                })
+            }
+            _ => Err(url_err(FetchExprUrlError::Fetcher(fetcher.into()))),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum TaskError {
+    #[error("Task not found: {0}")]
+    NotFound(Uuid),
+    #[error("Attempted to register a duplicate task:\nNew: {new:?}\nOld: {old:?}")]
+    Duplicate { new: Box<Task>, old: Box<Task> },
+}
+
 #[derive(Debug, Default)]
-pub struct BuildState {
-    pub act_by_id: BTreeMap<u64, ActivityState>,
-    pub act_ids_by_parent: BTreeMap<u64, BTreeSet<u64>>,
-    pub stats: BuildStats,
+struct Tasks {
+    pub tasks: BTreeMap<Uuid, Task>,
 }
-
-impl BuildState {
-    pub fn start(&mut self, act: ActivityState) {
-        self.act_ids_by_parent
-            .entry(act.parent)
-            .or_default()
-            .insert(act.id);
-        self.act_by_id.insert(act.id, act);
-    }
-
-    pub fn stop(&mut self, id: u64) {
-        if let Some(act) = self.act_by_id.remove(&id) {
-            if let Some(set) = self.act_ids_by_parent.get_mut(&act.parent) {
-                set.remove(&id);
-            }
-        }
-    }
-
-    fn display_by_parent(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-        parent: u64,
-        indent: usize,
-    ) -> std::fmt::Result {
-        if let Some(ids) = self.act_ids_by_parent.get(&parent) {
-            let width = f.width().unwrap_or(80) - indent;
-            for act in ids.iter().filter_map(|id| self.act_by_id.get(id)) {
-                writeln!(f, "{BLANK:bw$}{act:width$}", bw = indent * 3)?;
-                self.display_by_parent(f, act.id, indent + 1)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Display for BuildState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.display_by_parent(f, 0, 0)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct ActivityState {
-    // Start
-    pub id: u64,
-    pub level: Verbosity,
-    pub parent: u64,
-    pub text: String,
-    pub type_: StderrActivityType,
-
-    // SetPhase
-    pub phase: Option<String>,
-
-    // Progress
-    pub progress: Option<ActivityProgress>,
-}
-
-impl Default for ActivityState {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            level: Verbosity::Vomit,
-            parent: 0,
-            text: String::default(),
-            type_: StderrActivityType::Unknown,
-            phase: None,
-            progress: None,
-        }
-    }
-}
-
-impl Display for ActivityState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let icon = match self.type_ {
-            StderrActivityType::Unknown => "  ",
-            StderrActivityType::CopyPath | StderrActivityType::CopyPaths => "📂",
-            StderrActivityType::FileTransfer => "📡",
-            StderrActivityType::Realise => "🪄",
-            StderrActivityType::Build | StderrActivityType::Builds => "🚧",
-            StderrActivityType::OptimiseStore => "🚂",
-            StderrActivityType::VerifyPaths => "🔬",
-            StderrActivityType::Substitute => "🏗️",
-            StderrActivityType::QueryPathInfo => "🔍",
-            StderrActivityType::PostBuildHook => "🔜",
-            StderrActivityType::BuildWaiting => "⏸️",
-        };
-        write!(f, "{icon}")?;
-        if let Some(phase) = &self.phase {
-            write!(f, " {}", phase.dimmed())?;
-        }
-
-        if let Some(progress) = &self.progress {
-            write!(f, " {progress:20}")?;
-        }
-
-        if !self.text.is_empty() {
-            write!(f, " {}", self.text)?;
+impl Tasks {
+    pub fn start(&mut self, task: Task) -> Result<&Task, TaskError> {
+        if let Some(old) = self.tasks.get(&task.sid) {
+            Err(TaskError::Duplicate {
+                new: Box::new(task.clone()),
+                old: Box::new(old.clone()),
+            })
         } else {
-            write!(f, " {}", self.type_.as_ref().dimmed())?;
+            let sid = task.sid;
+            self.tasks.insert(sid, task);
+            Ok(self
+                .tasks
+                .get(&sid)
+                .expect("can't get task we just inserted?"))
         }
+    }
+
+    pub fn try_get(&self, sid: Uuid) -> Result<&Task, TaskError> {
+        self.tasks.get(&sid).ok_or(TaskError::NotFound(sid))
+    }
+    pub fn try_get_mut(&mut self, sid: Uuid) -> Result<&mut Task, TaskError> {
+        self.tasks.get_mut(&sid).ok_or(TaskError::NotFound(sid))
+    }
+    pub fn log_target<'a>(
+        &self,
+        buf: &'a mut String,
+        prefix: impl std::fmt::Display,
+        sid: Uuid,
+    ) -> Result<&'a str, TaskError> {
+        fn walk_log_target<'t>(
+            tasks: &'t Tasks,
+            buf: &mut String,
+            sid: Uuid,
+        ) -> Result<&'t Task, TaskError> {
+            let task = tasks.try_get(sid)?;
+            if let Some(parent_sid) = task.parent_sid {
+                walk_log_target(tasks, buf, parent_sid)?;
+            }
+            if !task.name.is_empty() {
+                write!(buf, "::{}", task.name).unwrap();
+            }
+            Ok(task)
+        }
+        buf.clear();
+        write!(buf, "{}", prefix).unwrap();
+        let task = walk_log_target(self, buf, sid)?;
+        if let Some(phase) = &task.phase {
+            write!(buf, "::{phase}").unwrap();
+        }
+        Ok(buf)
+    }
+}
+
+#[derive(Debug, Deref, DerefMut)]
+struct NixCommand(Helper);
+
+impl NixCommand {
+    fn new(path: impl AsRef<Path>) -> Self {
+        let mut helper = Helper::new(path.as_ref());
+        helper
+            .args(["--log-format", "internal-json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self(helper)
+    }
+
+    fn input(&mut self, name: &str, expr: &FetchExpr) {
+        self.args(["--arg", name, &expr.to_string()]);
+    }
+    fn input_url(&mut self, name: &str, url_s: &str) -> Result<(), FetchExprError> {
+        self.input(name, &FetchExpr::parse_url(url_s)?);
         Ok(())
     }
-}
 
-#[derive(Debug, Default)]
-pub struct ActivityProgress {
-    pub done: u64,
-    pub expected: u64,
-    pub running: u64,
-    pub failed: u64,
-}
+    fn call(mut self) -> Result<String> {
+        let mut child = self.start()?;
 
-impl Display for ActivityProgress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let width = f.width().unwrap_or(20) as u64;
-        let total = std::cmp::max(self.expected, self.done + self.running + self.failed);
-        let failed_style = style().red().dimmed();
-        let failed_w = match Self::write_seg(f, width, self.failed, total, &failed_style, "▓")? {
-            0 if self.failed > 0 => 1,
-            v => v,
-        };
-        let done_style = style().green().dimmed();
-        let done_w = Self::write_seg(f, width, self.done, total, &done_style, "█")?;
-        let running_style = style().blue().dimmed();
-        let running_w = Self::write_seg(f, width, self.running, total, &running_style, "░")?;
-        let rest_w = width - failed_w - done_w - running_w;
-        write!(f, "{BLANK:rest_w$}", rest_w = rest_w as usize)
-    }
-}
+        let join_stderr = std::thread::spawn({
+            let stderr = child.child.stderr.take().expect("child has no stderr");
+            move || -> Result<()> {
+                let mut buf = String::new();
+                let mut tasks = Tasks::default();
 
-impl ActivityProgress {
-    fn write_seg(
-        f: &mut std::fmt::Formatter<'_>,
-        bar_width: u64,
-        value: u64,
-        total: u64,
-        style: &Style,
-        fill: &str,
-    ) -> Result<u64, std::fmt::Error> {
-        let width = (bar_width as f64 * (value as f64 / total as f64)) as u64;
-        if width > 0 {
-            style.fmt_prefix(f)?;
-            (0..width).try_for_each(|_| write!(f, "{fill}"))?;
-            style.fmt_suffix(f)?;
-        }
-        Ok(width)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ActivityTypeStats {
-    pub done: u64,
-    pub expected: u64,
-    pub failed: u64,
-}
-
-#[derive(Debug, Default)]
-pub struct BuildStats {
-    pub files_linked: u64,
-    pub bytes_linked: u64,
-    pub untrusted_paths: u64,
-    pub corrupted_paths: u64,
-    pub activities_by_type: BTreeMap<StderrActivityType, ActivityTypeStats>,
-}
-
-fn handle_stderr(stderr: ChildStderr, view: Arc<nutmeg::View<BuildState>>) -> Result<()> {
-    let mut reader = BufReader::new(stderr);
-    let mut line = String::with_capacity(1024);
-    loop {
-        line.clear();
-        if reader
-            .read_line(&mut line)
-            .into_diagnostic()
-            .context("Couldn't read line from stderr")?
-            == 0
-        {
-            debug!("End of child stderr");
-            break;
-        }
-        if let Some(json) = line.strip_prefix("@nix ") {
-            let action: Action = serde_json::from_str(json)
-                .into_diagnostic()
-                .context("Couldn't parse nix log line")?;
-            match action {
-                Action::Start(ActionStart {
-                    id,
-                    level,
-                    parent,
-                    text,
-                    type_,
-                }) => {
-                    view.update(|state| {
-                        state.start(ActivityState {
-                            id,
-                            level,
-                            parent,
-                            text,
-                            type_,
-                            phase: None,
-                            progress: None,
-                        })
-                    });
-                }
-                Action::Stop(ActionStop { id }) => view.update(|state| state.stop(id)),
-                Action::Message(ActionMessage {
-                    file,
-                    column: _,
-                    line,
-                    level,
-                    msg,
-                }) => {
-                    let meta = log::Metadata::builder()
-                        .target("nix-build::stderr")
-                        .level(match level {
-                            Verbosity::Error => log::Level::Error,
-                            Verbosity::Warn => log::Level::Warn,
-                            Verbosity::Notice | Verbosity::Info => log::Level::Info,
-                            _ => log::Level::Trace,
-                        })
-                        .build();
-                    let logger = log::logger();
-                    if logger.enabled(&meta) {
-                        logger.log(
-                            &log::Record::builder()
-                                .metadata(meta)
-                                .args(format_args!("{msg}"))
-                                .file(file.as_deref())
-                                .line(
-                                    line.map(|l| l.try_into().expect("impossibly big line number")),
-                                )
-                                .build(),
-                        );
-                    }
-                }
-                Action::Result(ActionResult { id, data }) => match data {
-                    ActionResultData::FileLinked(FileLinked { bytes_linked }) => {
-                        view.update(|state| {
-                            state.stats.files_linked += 1;
-                            state.stats.bytes_linked += bytes_linked;
-                        });
-                    }
-                    ActionResultData::BuildLogLine(BuildLogLine { line })
-                    | ActionResultData::PostBuildLogLine(BuildLogLine { line }) => {
-                        view.message(line.dimmed().to_string());
-                    }
-                    ActionResultData::UntrustedPath => {
-                        view.update(|state| state.stats.untrusted_paths += 1)
-                    }
-                    ActionResultData::CorruptedPath => {
-                        view.update(|state| state.stats.corrupted_paths += 1)
-                    }
-                    ActionResultData::SetPhase(SetPhase { phase }) => view.update(|state| {
-                        if let Some(act) = state.act_by_id.get_mut(&id) {
-                            act.phase = Some(phase);
-                        }
-                    }),
-                    ActionResultData::Progress(Progress {
-                        done,
-                        expected,
-                        running,
-                        failed,
-                    }) => view.update(|state| {
-                        if let Some(act) = state.act_by_id.get_mut(&id) {
-                            act.progress = Some(ActivityProgress {
-                                done,
-                                expected,
-                                running,
-                                failed,
-                            });
-                        }
-                    }),
-                    ActionResultData::SetExpected(SetExpected {
-                        activity_type,
-                        expected,
-                    }) => view.update(|state| {
-                        if let Some(act) = state.act_by_id.get_mut(&id) {
-                            if let Some(typestats) =
-                                state.stats.activities_by_type.get_mut(&activity_type)
-                            {
-                                typestats.expected -=
-                                    act.progress.as_ref().map(|p| p.expected).unwrap_or(0);
-                                typestats.expected += expected;
+                let mut lines = BufReader::new(stderr).lines();
+                while let Some(line) = lines.next().transpose().into_diagnostic()? {
+                    if let Some(json) = line.strip_prefix("@nix ") {
+                        let logger = log::logger();
+                        let action = match serde_json::from_str::<Action>(json).into_diagnostic() {
+                            Ok(action) => action,
+                            Err(err) => {
+                                warn!(err:display; "Couldn't decode log line");
+                                continue;
                             }
-                            act.progress.get_or_insert_default().expected = expected;
+                        };
+                        match action {
+                            Action::Start(ActionStart {
+                                id,
+                                level,
+                                parent,
+                                text,
+                                type_,
+                            }) => {
+                                let sid = activity_sid(id);
+                                tasks.start(Task {
+                                    sid,
+                                    parent_sid: Some(parent)
+                                        .filter(|id| *id != 0)
+                                        .map(activity_sid),
+                                    name: text.clone().into(),
+                                    level: Some(nix_level(level)),
+                                    ..Default::default()
+                                })?;
+                                let metadata = log::Metadata::builder()
+                                    .target(tasks.log_target(&mut buf, "nix", sid)?)
+                                    .level(log::Level::Trace)
+                                    .build();
+                                if logger.enabled(&metadata) {
+                                    logger.log(
+                                        &log::Record::builder()
+                                            .metadata(metadata)
+                                            .key_values(&[
+                                                ("id", Value::from(id)),
+                                                ("type", Value::from_debug(&type_)),
+                                            ])
+                                            .args(format_args!("Started"))
+                                            .build(),
+                                    );
+                                }
+                            }
+                            Action::Stop(ActionStop { id }) => {
+                                let sid = activity_sid(id);
+                                let metadata = log::Metadata::builder()
+                                    .target(tasks.log_target(&mut buf, "nix", sid)?)
+                                    .level(log::Level::Trace)
+                                    .build();
+                                if logger.enabled(&metadata) {
+                                    logger.log(
+                                        &log::Record::builder()
+                                            .metadata(metadata)
+                                            .key_values(&[("id", Value::from(id))])
+                                            .args(format_args!("Stopped"))
+                                            .build(),
+                                    );
+                                }
+                            }
+                            Action::Result(ActionResult { id, data }) => {
+                                let sid = activity_sid(id);
+                                let target = tasks.log_target(&mut buf, "nix", sid)?;
+                                let task = tasks.try_get_mut(sid)?;
+                                let metadata = log::Metadata::builder()
+                                    .level(log::Level::Trace)
+                                    .target(target)
+                                    .build();
+                                if logger.enabled(&metadata) {
+                                    let mut kv = BTreeMap::<&'static str, Value>::from_iter([(
+                                        "id",
+                                        id.into(),
+                                    )]);
+                                    let finish = move |kv, args| {
+                                        logger.log(
+                                            &log::Record::builder()
+                                                .metadata(metadata)
+                                                .key_values(kv)
+                                                .args(args)
+                                                .build(),
+                                        )
+                                    };
+
+                                    match data {
+                                        ActionResultData::FileLinked(FileLinked {
+                                            bytes_linked,
+                                        }) => {
+                                            kv.insert("bytes_linked", bytes_linked.into());
+                                            finish(&kv, format_args!("File Linked"))
+                                        }
+                                        ActionResultData::BuildLogLine(BuildLogLine { line })
+                                        | ActionResultData::PostBuildLogLine(BuildLogLine {
+                                            line,
+                                        }) => finish(&kv, format_args!("{line}")),
+                                        ActionResultData::UntrustedPath => {
+                                            finish(&kv, format_args!("Untrusted Path"))
+                                        }
+                                        ActionResultData::CorruptedPath => {
+                                            finish(&kv, format_args!("Corrupted Path"))
+                                        }
+                                        ActionResultData::SetPhase(SetPhase { phase }) => {
+                                            task.phase = Some(phase);
+                                            finish(&kv, format_args!("[ SetPhase ]"))
+                                        }
+                                        ActionResultData::Progress(Progress {
+                                            done,
+                                            expected,
+                                            running,
+                                            failed,
+                                        }) => {
+                                            kv.insert("done", done.into());
+                                            kv.insert("expected", expected.into());
+                                            kv.insert("running", running.into());
+                                            kv.insert("failed", failed.into());
+                                            finish(&kv, format_args!("[ Progress ]"))
+                                        }
+                                        ActionResultData::SetExpected(SetExpected {
+                                            activity_type,
+                                            expected,
+                                        }) => {
+                                            kv.insert(
+                                                "activity_type",
+                                                <&str>::from(activity_type).into(),
+                                            );
+                                            kv.insert("expected", expected.into());
+                                            finish(&kv, format_args!("[ Set Expected ]"))
+                                        }
+                                    };
+                                }
+                            }
+                            Action::Message(ActionMessage {
+                                file,
+                                column: _,
+                                line,
+                                level,
+                                msg,
+                            }) => {
+                                let metadata = log::Metadata::builder()
+                                    .level(nix_level(level))
+                                    .target("nix")
+                                    .build();
+                                if logger.enabled(&metadata) {
+                                    logger.log(
+                                        &log::Record::builder()
+                                            .metadata(metadata)
+                                            .file(file.as_deref())
+                                            .line(line.and_then(|v| v.try_into().ok()))
+                                            .args(format_args!("{msg}"))
+                                            .build(),
+                                    )
+                                }
+                            }
                         }
-                    }),
-                },
+                    }
+                }
+                Ok(())
+            }
+        });
+
+        let out = {
+            let out_r = child.wait_checked();
+            join_stderr.join().expect("stderr thread panicked!?")?;
+            out_r
+        }?;
+        if !out.status.success() {
+            return match out.status.code() {
+                Some(code) => Err(miette!("Process exited with status: {code}")),
+                None => Err(miette!("Process exited with unknown status")),
             };
         }
+        let mut stdout = String::from_utf8(out.stdout)
+            .into_diagnostic()
+            .context("stdout contains invalid UTF-8")?;
+        stdout.truncate(stdout.trim_end().len());
+        Ok(stdout)
     }
-    Ok(())
 }
 
 fn run(args: Args) -> Result<()> {
-    let view = Arc::new(nutmeg::View::new(
-        BuildState::default(),
-        nutmeg::Options::default(),
-    ));
-
-    // This will be replaced with calls to the `nix-daemon` crate in the future.
-    // Unfortunately, the client does *a lot* of... not even lifting, random errands?
-    let mut cmd = Command::new(args.nix_build);
-    cmd.arg("--no-out-link")
-        .args(["--log-format", "internal-json"])
-        .arg(args.source_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::piped());
-    debug!(cmd:?; "Spawning...");
-
-    let mut child = cmd
-        .spawn()
+    let build: Build = serde_json::from_str(&args.build_json)
         .into_diagnostic()
-        .context("Couldn't spawn `nix-build`")?;
+        .context("Couldn't parse Build spec")?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| miette!("Couldn't get child stderr!?"))?;
-    let stderr_join = std::thread::spawn(move || handle_stderr(stderr, view));
-
-    let status = child
-        .wait()
-        .into_diagnostic()
-        .context("Couldn't wait for `nix-build`")?;
-    if !status.success() {
-        match status.code() {
-            Some(code) => miette!("`nix-build` failed: {code}"),
-            None => miette!("`nix-build` failed"),
-        };
+    // First, instantiate the derivation...
+    let mut inst = NixCommand::new(args.nix_instantiate);
+    for (i, (name, s)) in build.inputs.iter().enumerate() {
+        inst.input_url(name, s)
+            .with_context(|| format!("build.inputs[{i}]"))?;
     }
-    stderr_join.join().expect("stderr thread panicked")
+    inst.input_url("source", &build.source)
+        .context("build.source")?;
+    inst.args(["--expr", &build.expr]);
+    info!(inst:?; "Instantiating derivation...");
+    let drv = inst.call().context("nix-instantiate failed")?;
+
+    // ...then realise (build) it.
+    let mut build = NixCommand::new(args.nix_store);
+    build.args(["--realise", &drv]);
+    info!(build:?; "Building...");
+    let out = build.call().context("nix-instantiate failed")?;
+
+    println!("{out}");
+    Ok(())
 }
 
 fn main() {
@@ -400,7 +450,7 @@ fn main() {
 /// ```
 ///
 /// In other words, it's effectively a tuple of (pid: u32, id: u32) mashed together.
-pub fn activity_uuid(id: u64) -> Uuid {
+pub fn activity_sid(id: u64) -> Uuid {
     let id_bytes: [u8; 8] = id.to_be_bytes();
     let mut data = [0u8; 16];
     data[0..4].copy_from_slice(&id_bytes[0..4]);
@@ -408,66 +458,79 @@ pub fn activity_uuid(id: u64) -> Uuid {
     Uuid::new_v8(data)
 }
 
+pub fn nix_level(level: Verbosity) -> log::Level {
+    match level {
+        Verbosity::Error => log::Level::Error,
+        Verbosity::Warn => log::Level::Warn,
+        Verbosity::Notice | Verbosity::Info => log::Level::Info,
+        Verbosity::Talkative | Verbosity::Chatty | Verbosity::Debug => log::Level::Debug,
+        Verbosity::Vomit => log::Level::Trace,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::fmt::Write;
 
     #[test]
-    fn test_activity_uuid_1122_3344_5566_7788() {
+    fn test_fetchexpr_parse_url_bad_url() {
         assert_eq!(
-            &activity_uuid(0x1122_3344_5566_7788).to_string(),
-            "11223344-0000-8000-8000-000055667788"
+            FetchExprError::ParseUrl("bad".into(), url::ParseError::RelativeUrlWithoutBase),
+            FetchExpr::parse_url("bad").unwrap_err(),
         );
     }
-
     #[test]
-    fn test_activity_uuid_17368302284177417() {
+    fn test_fetchexpr_parse_url_bad_scheme() {
+        let url = "bad://";
         assert_eq!(
-            &activity_uuid(17368302284177417).to_string(),
-            "003db461-0000-8000-8000-000000000009"
+            FetchExprError::Url(
+                Url::parse(url).unwrap(),
+                FetchExprUrlError::Fetcher("bad".into()),
+            ),
+            FetchExpr::parse_url(url).unwrap_err(),
         );
     }
-
     #[test]
-    fn test_progress_empty() {
-        let mut s = String::new();
-        write!(&mut s, "{}", ActivityProgress::default()).unwrap();
-        assert_eq!(&s, "                    ");
+    fn test_fetchexpr_parse_url_unknown_query() {
+        let url = "git+https://example.com/?bad=yes";
+        assert_eq!(
+            FetchExprError::Url(
+                Url::parse(url).unwrap(),
+                FetchExprUrlError::UnknownQueryParameter("bad".into()),
+            ),
+            FetchExpr::parse_url(url).unwrap_err(),
+        );
     }
-
     #[test]
-    fn test_progress_full() {
-        let mut s = String::new();
-        write!(
-            &mut s,
-            "{}",
-            ActivityProgress {
-                done: 10,
-                expected: 10,
-                running: 0,
-                failed: 0
-            }
-        )
-        .unwrap();
-        assert_eq!(&strip_ansi_escapes::strip_str(s), "████████████████████");
+    fn test_fetchexpr_parse_url_missing_rev() {
+        let url = "git+https://example.com/";
+        assert_eq!(
+            FetchExprError::Url(
+                Url::parse(url).unwrap(),
+                FetchExprUrlError::MissingQueryParameter("rev"),
+            ),
+            FetchExpr::parse_url(url).unwrap_err(),
+        );
     }
-
     #[test]
-    fn test_progress_half() {
-        let mut s = String::new();
-        write!(
-            &mut s,
-            "{}",
-            ActivityProgress {
-                done: 5,
-                expected: 10,
-                running: 0,
-                failed: 0
-            }
-        )
-        .unwrap();
-        assert_eq!(&strip_ansi_escapes::strip_str(s), "██████████          ");
+    fn test_fetchexpr_parse_url_git() {
+        assert_eq!(
+            FetchExpr::FetchGit {
+                url: "git://example.com/".into(),
+                rev: "abc123".into(),
+            },
+            FetchExpr::parse_url("git://example.com/?rev=abc123").unwrap(),
+        );
+    }
+    #[test]
+    fn test_fetchexpr_parse_url_git_https() {
+        assert_eq!(
+            FetchExpr::FetchGit {
+                url: "https://example.com/".into(),
+                rev: "abc123".into(),
+            },
+            FetchExpr::parse_url("git+https://example.com/?rev=abc123").unwrap(),
+        );
     }
 }

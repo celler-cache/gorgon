@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use std::collections::BTreeMap;
+
 use axum::{
     extract::FromRequest,
     http::StatusCode,
@@ -11,7 +13,7 @@ use axum::{
 };
 use axum_extra::response::ErasedJson;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
-use gorgond_client::{builds, ApiError, ApiErrorKind, RootResponse, Url, Uuid, Yoke, Yokeable};
+use gorgond_client::{builds, ApiError, ApiErrorKind, RootResponse, Uuid, Yoke, Yokeable};
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -122,12 +124,20 @@ pub async fn builds_allocate(
             id: Uuid::now_v7(),
             name: "test-timestamp".into(),
             kind: "nix".into(),
-            source: "git+https://codeberg.org/gorgon/test-timestamp?rev=73d6baaddf2a8972e4a24c1867a89874efee8a24".into(),
+            inputs: BTreeMap::from_iter([(
+                "nixpkgs".into(),
+                concat!(
+                    "git+https://github.com/NixOS/nixpkgs",
+                    "?rev=b75693fb46bfaf09e662d09ec076c5a162efa9f6"
+                )
+                .into(),
+            )]),
+            source: concat!(
+                "git+https://codeberg.org/gorgon/test-timestamp",
+                "?rev=73d6baaddf2a8972e4a24c1867a89874efee8a24"
+            )
+            .into(),
+            expr: r#"{ source, nixpkgs }: (import nixpkgs {}).callPackage source {}"#.into(),
         },
     }))
-}
-
-fn parse_url<S: AsRef<str> + ToString>(s: S) -> Result<Url, ApiError> {
-    Url::parse(s.as_ref())
-        .map_err(|err| ApiError::new_err(ApiErrorKind::BadDataUrl { url: s.to_string() }, err))
 }

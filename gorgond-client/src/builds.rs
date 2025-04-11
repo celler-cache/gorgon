@@ -6,7 +6,7 @@ use crate::{Client, Request, Result, Yoke, Yokeable};
 use chrono::prelude::*;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 use url::Url;
 use uuid::Uuid;
 
@@ -32,7 +32,11 @@ pub struct Build<'a> {
     #[serde(borrow)]
     pub kind: Cow<'a, str>,
     #[serde(borrow)]
+    pub inputs: BTreeMap<Cow<'a, str>, Cow<'a, str>>,
+    #[serde(borrow)]
     pub source: Cow<'a, str>,
+    #[serde(borrow)]
+    pub expr: Cow<'a, str>,
 }
 
 /// A task performed as part of a Build.
@@ -42,9 +46,9 @@ pub struct Task<'a> {
     pub build_id: Uuid,
     /// Sub-ID of this task. Unique together with build_id, but may be reused between builds.
     /// This may be a UUIDv8 with a build system specific ID unceremoniously shoved into it.
-    pub task_id: Uuid,
+    pub task_sid: Uuid,
     /// Sub-ID of the parent task, if any. The parent task must have the same build_id.
-    pub parent_task_id: Uuid,
+    pub parent_task_sid: Uuid,
 
     #[serde(borrow)]
     pub name: Cow<'a, str>,

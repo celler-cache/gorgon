@@ -9,9 +9,11 @@ use std::{
     fmt,
     io::BufRead,
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread::JoinHandle,
 };
 
+use derive_more::{Deref, DerefMut, From};
 use gorgond_client::Uuid;
 use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
@@ -211,32 +213,29 @@ impl<Ctx: HelperContext, C: HelperCaller> HelperCaller for HelperCallerWith<Ctx,
     }
 }
 
-#[derive(Debug)]
-pub struct Helper {
-    pub cmd: Command,
-}
+#[derive(Debug, Deref, DerefMut, From)]
+pub struct Helper(Command);
 
-impl From<Command> for Helper {
-    fn from(cmd: Command) -> Self {
-        Self { cmd }
-    }
+#[derive(Debug)]
+pub struct HelperChild<'a> {
+    pub helper: &'a Helper,
+    pub child: Child,
 }
 
 impl fmt::Display for Helper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (key, value) in self.cmd.get_envs() {
+        for (key, value) in self.get_envs() {
             let key = key.to_string_lossy();
             let value = value.map(|s| s.to_string_lossy()).unwrap_or_default();
             writeln!(f, "{key}={value}")?;
         }
         let cwd = self
-            .cmd
             .get_current_dir()
             .map(|p| p.to_string_lossy())
             .unwrap_or_default();
         writeln!(f, "[{cwd}]")?;
-        write!(f, "$ {}", self.cmd.get_program().to_string_lossy())?;
-        for arg in self.cmd.get_args() {
+        write!(f, "$ {}", self.get_program().to_string_lossy())?;
+        for arg in self.get_args() {
             write!(f, " {}", arg.to_string_lossy())?;
         }
         Ok(())
@@ -244,30 +243,31 @@ impl fmt::Display for Helper {
 }
 
 impl Helper {
-    fn name(&self) -> Cow<'_, str> {
-        let path = Path::new(self.cmd.get_program());
+    pub fn new(program: impl AsRef<OsStr>) -> Self {
+        Self::from(Command::new(program))
+    }
+
+    pub fn name(&self) -> Cow<'_, str> {
+        let path = Path::new(self.get_program());
         path.file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy()
     }
 
-    pub fn run(mut self) -> Result<()> {
+    pub fn run(mut self) -> Result<Output> {
+        self.start().and_then(|child| child.wait_checked())
+    }
+
+    pub fn start(&mut self) -> Result<HelperChild> {
         if log_enabled!(log::Level::Debug) {
             debug!(target:"helper", __log__:display=self; "Invoking helper...");
         }
-
-        let output = self.cmd.output().map_err(HelperError::Start)?;
-        match output.status {
-            status if !status.success() => Err(HelperError::Exit(HelperExitError {
-                name: self.name().to_string(),
-                status: status.code(),
-                stdout: Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                    .filter(|s| !s.is_empty()),
-                stderr: Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
-                    .filter(|s| !s.is_empty()),
-            })),
-            _ => Ok(()),
-        }
+        self.spawn()
+            .map(|child| HelperChild {
+                helper: self,
+                child,
+            })
+            .map_err(HelperError::Start)
     }
 
     pub fn build_dev(
@@ -305,61 +305,87 @@ impl Helper {
         ctx.apply(self)
     }
     pub fn with_env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
-        self.cmd.env(key, val);
+        self.env(key, val);
         self
     }
     pub fn with_arg(mut self, p: impl AsRef<OsStr>) -> Self {
-        self.cmd.arg(p);
+        self.arg(p);
         self
     }
     pub fn with_arg_opt(mut self, p: Option<impl AsRef<OsStr>>) -> Self {
         if let Some(p) = p {
-            self.cmd.arg(p);
+            self.arg(p);
         }
         self
     }
     pub fn with_args(mut self, it: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Self {
-        self.cmd.args(it);
+        self.args(it);
         self
     }
     pub fn with_cwd(mut self, cwd: impl AsRef<Path>) -> Self {
-        self.cmd.current_dir(cwd);
+        self.current_dir(cwd);
+        self
+    }
+    pub fn with_stdin(mut self, stdin: impl Into<std::process::Stdio>) -> Self {
+        self.stdin(stdin);
         self
     }
 
-    pub fn into_task(self, sub_id: Option<Uuid>) -> TaskHelper {
+    pub fn into_task(self, sid: Option<Uuid>) -> TaskHelper {
         TaskHelper {
             task: Task {
-                sub_id: sub_id.unwrap_or_else(Task::gen_sub_id),
+                sid: sid.unwrap_or_else(Task::gen_sid),
                 name: self.name().into_owned().into(),
+                ..Default::default()
             },
             helper: self,
         }
     }
 }
 
+impl HelperChild<'_> {
+    pub fn wait_checked(self) -> Result<Output> {
+        let output = self.child.wait_with_output().map_err(HelperError::Start)?;
+        match output.status {
+            status if !status.success() => Err(HelperError::Exit(HelperExitError {
+                name: self.helper.name().to_string(),
+                status: status.code(),
+                stdout: Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty()),
+                stderr: Some(String::from_utf8_lossy(&output.stderr).trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            })),
+            _ => Ok(output),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct TaskHelper {
     task: Task,
     helper: Helper,
 }
 
-impl TaskHelper {
-    pub fn run(self) -> Result<(), TaskError> {
-        if log_enabled!(log::Level::Debug) {
-            debug!(target:"helper::task", __log__:display=self.helper; "Invoking task helper...");
-        }
+#[derive(Debug)]
+pub struct TaskChild<'a> {
+    pub helper: &'a TaskHelper,
+    pub child: Child,
+    join_stderr: JoinHandle<Result<(), StderrError>>,
+    recv_err: crossbeam::channel::Receiver<SerializedError>,
+}
 
-        let mut child = self
-            .helper
-            .with_env("GORGON_VERBOSE", "100")
-            .with_env("GORGON_OUTPUT_FORMAT", "json")
-            .with_env("GORGON_LOG_FORMAT", "json")
-            .cmd
-            .stdin(Stdio::null())
+impl TaskHelper {
+    pub fn start(&mut self) -> Result<TaskChild, TaskError> {
+        self.helper
+            .env("GORGON_VERBOSE", "100")
+            .env("GORGON_OUTPUT_FORMAT", "json")
+            .env("GORGON_LOG_FORMAT", "json")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(HelperError::Start)?;
+            .stderr(Stdio::piped());
+        let HelperChild {
+            helper: _,
+            mut child,
+        } = self.helper.start()?;
 
         let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
         let join_stderr = std::thread::spawn({
@@ -387,7 +413,11 @@ impl TaskHelper {
                         match event {
                             Event::Error(err) => send_err.try_send(err)?,
                             Event::Log(log) => {
-                                let target = format!("`{name}`::{}", log.target);
+                                let target = if !log.target.is_empty() {
+                                    format!("{name}::{}", log.target)
+                                } else {
+                                    name.to_string()
+                                };
                                 let meta = log::Metadata::builder()
                                     .level(log.level)
                                     .target(&target)
@@ -416,9 +446,19 @@ impl TaskHelper {
                 }
             }
         });
+        Ok(TaskChild {
+            helper: self,
+            child,
+            join_stderr,
+            recv_err,
+        })
+    }
+}
 
-        let output = child.wait_with_output().map_err(HelperError::Start)?;
-        join_stderr.join().expect("stderr thread panicked!?")?;
+impl TaskChild<'_> {
+    pub fn wait_checked(self) -> Result<Output, TaskError> {
+        let output = self.child.wait_with_output().map_err(HelperError::Start)?;
+        self.join_stderr.join().expect("stderr thread panicked!?")?;
         match output.status {
             status if !status.success() => {
                 let stdout_str = LazyCell::new(|| String::from_utf8_lossy(&output.stdout));
@@ -442,18 +482,18 @@ impl TaskHelper {
 
                 // Try to parse the forwarded error from the child.
                 Err(TaskError::Task(TaskExitError(
-                    recv_err
+                    self.recv_err
                         .into_iter()
-                        .map(|r| TaskExitErrorCause(r, self.task.name.clone()))
+                        .map(|r| TaskExitErrorCause(r, self.helper.task.name.clone()))
                         .collect(),
-                    self.task,
+                    self.helper.task.clone(),
                 )))
             }
             _ => {
-                if let Some(err) = recv_err.into_iter().next() {
+                if let Some(err) = self.recv_err.into_iter().next() {
                     unimplemented!("non-fatal error from child: {err}");
                 }
-                Ok(())
+                Ok(output)
             }
         }
     }

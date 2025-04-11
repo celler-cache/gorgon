@@ -15,8 +15,6 @@ members = [
     "gorgon-build",
     "gorgon-build-helper",
     "gorgon-build-nix",
-    "gorgon-fetch",
-    "gorgon-fetch-git",
     "gorgon-util-cli",
     "gorgon-rollup",
 ]
