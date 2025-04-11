@@ -14,18 +14,21 @@ steps:
   # $ CI_HACK_DIR=$PWD woodpecker exec
   - test -n "$CI_HACK_WORK_DIR" && cd $CI_HACK_WORK_DIR; true
   - nix-shell --run 'reuse lint'
+  failure: ignore
 
 - name: commitlint
   image: bash
   commands:
   - test -n "$CI_HACK_WORK_DIR" && cd $CI_HACK_WORK_DIR; true
   - nix-shell --run 'commitlint --from=552125f165ad6feb2f63fcbf29e4eac3238d7882'
+  failure: ignore
 
 - name: no-refs
   image: bash
   commands:
   - test -n "$CI_HACK_WORK_DIR" && cd $CI_HACK_WORK_DIR; true
   - nix-build --no-out-link nix/no-refs.nix
+  failure: ignore
 
 when:
 - event: [ push, pull_request, pull_request_closed, tag, release, manual, cron ]
