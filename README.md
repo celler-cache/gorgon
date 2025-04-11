@@ -4,6 +4,12 @@
 Gorgon
 ======
 
+Gorgon is an experimental CI system for your dependencies.
+
+By tracking incoming changes to dependencies, and running your test suite against them, it can potentially catch regressions that would've been missed by upstream, before they make it into a release.
+
+## Other Projects
+
 - [nix-web](nix-web)
 - [nix-supervisor](nix-supervisor)
 
