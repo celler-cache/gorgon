@@ -7,7 +7,7 @@ use std::fmt;
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 
-pub use gorgond_client::{builds, Uuid};
+pub use gorgond_client::Uuid;
 
 pub mod events;
 pub mod fetcher;

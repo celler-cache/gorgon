@@ -7,30 +7,10 @@
 #![allow(clippy::result_large_err)]
 
 use clap::{Parser, Subcommand};
-use derive_more::Unwrap;
-use gorgond_client::{Client, Yoke};
-use miette::{Diagnostic, NamedSource};
+use gorgond_client::{api, Client, Yoke};
+use miette::{IntoDiagnostic, NamedSource, Result};
 use std::{fmt::Debug, io::Write};
 use tracing::instrument;
-
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, thiserror::Error, Diagnostic, Unwrap)]
-pub enum Error {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-
-    #[error("Serializing output failed")]
-    DumpJSON(
-        #[source] serde_json::Error,
-        #[source_code] NamedSource<String>,
-    ),
-
-    #[error(transparent)]
-    #[diagnostic(transparent)]
-    Gorgond(#[from] gorgond_client::Error),
-}
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -56,6 +36,16 @@ struct Args {
 }
 
 impl Args {
+    fn level(&self) -> tracing::Level {
+        match self.verbose as i8 - self.quiet as i8 {
+            ..=-2 => tracing::Level::ERROR,
+            -1 => tracing::Level::WARN,
+            0 => tracing::Level::INFO,
+            1 => tracing::Level::DEBUG,
+            2.. => tracing::Level::TRACE,
+        }
+    }
+
     fn new_client(&self) -> Result<Client> {
         Ok(Client::new(self.base_url.clone())?)
     }
@@ -74,10 +64,16 @@ impl Command {
     }
 
     fn dump<V: serde::Serialize + Debug>(&self, v: V) -> Result<()> {
+        #[derive(Debug, thiserror::Error, miette::Diagnostic)]
+        #[error("Serializing output failed")]
+        struct DumpJsonError(
+            #[source] serde_json::Error,
+            #[source_code] NamedSource<String>,
+        );
         let mut stdout = std::io::stdout();
         colored_json::write_colored_json(&v, &mut stdout)
-            .map_err(|err| Error::DumpJSON(err, NamedSource::new("", format!("{v:#?}"))))?;
-        Ok(stdout.write_all(b"\n")?)
+            .map_err(|err| DumpJsonError(err, NamedSource::new("", format!("{v:#?}"))))?;
+        stdout.write_all(b"\n").into_diagnostic()
     }
 }
 
@@ -85,36 +81,26 @@ impl Command {
 struct Ping;
 impl Ping {
     #[instrument(name = "ping", skip_all)]
-    pub async fn run(&self, args: &Args) -> Result<Yoke<gorgond_client::RootResponse>> {
+    pub async fn run(&self, args: &Args) -> Result<Yoke<api::RootResponse>> {
         Ok(args.new_client()?.root().await?)
     }
 }
 
-fn init_logging(args: &Args) {
-    use tracing::Level;
-    use tracing_subscriber::prelude::*;
-
-    let level = match args.verbose as i8 - args.quiet as i8 {
-        ..=-2 => Level::ERROR,
-        -1 => Level::WARN,
-        0 => Level::INFO,
-        1 => Level::DEBUG,
-        2.. => Level::TRACE,
-    };
-    tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::filter::Targets::new().with_default(level))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
-}
-
 async fn run(args: Args) -> Result<()> {
-    init_logging(&args);
     args.command.run(&args).await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() {
+    let args = Args::parse();
+
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::Registry::default()
+        .with(tracing_subscriber::filter::Targets::new().with_default(args.level()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+
     miette::set_hook(Box::new(|_| {
         Box::new(
             miette::MietteHandlerOpts::new()
@@ -123,9 +109,9 @@ async fn main() {
                 .build(),
         )
     }))
-    .expect("Couldn't install miette hook");
+    .unwrap();
 
-    if let Err(err) = run(Args::parse()).await.map_err(miette::Report::from) {
+    if let Err(err) = run(args).await {
         eprintln!("\n{err:?}");
         std::process::exit(1);
     }

@@ -9,14 +9,16 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
+gorgond-client = { path = "../gorgond-client", features = ["axum"] }
+
 axum-extra = { version = "0.10.0", features = ["erased-json"] }
 axum = { version = "0.8.1", features = ["macros"] }
+chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 derive_more = { version = "2.0.1", features = ["full"] }
 diesel-async = { version = "0.5.2", features = ["async-connection-wrapper", "deadpool", "postgres"] }
 diesel_migrations = "2.2.0"
 diesel = { version = "2.2.7", features = ["chrono", "uuid", "postgres_backend"] }
-gorgond-client = { path = "../gorgond-client", features = ["axum"] }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
 serde_json = "1.0.140"
 serde = { version = "1.0.217", features = ["derive"] }

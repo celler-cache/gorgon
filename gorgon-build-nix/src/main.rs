@@ -6,12 +6,8 @@ use clap::Parser;
 use clap_stdin::MaybeStdin;
 use derive_more::{Deref, DerefMut};
 use gorgon_build_helper::{helper::Helper, task::Task, Uuid};
-use gorgond_client::builds::Build;
-use log::{
-    info,
-    kv::{Key, Value},
-    warn,
-};
+use gorgond_client::models::Build;
+use log::{info, kv::Value, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
@@ -20,9 +16,7 @@ use nix_daemon::{
     },
     Verbosity,
 };
-use once_cell::unsync::Lazy;
 use std::{
-    cell::LazyCell,
     collections::BTreeMap,
     fmt::Write,
     io::{BufRead, BufReader},

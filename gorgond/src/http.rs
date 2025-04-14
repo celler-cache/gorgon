@@ -6,14 +6,17 @@ use std::collections::BTreeMap;
 
 use axum::{
     extract::FromRequest,
-    http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
     Router,
 };
 use axum_extra::response::ErasedJson;
+use chrono::prelude::*;
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
-use gorgond_client::{builds, ApiError, ApiErrorKind, RootResponse, Uuid, Yoke, Yokeable};
+use gorgond_client::{
+    api::{self, ApiError},
+    models, Uuid, Yoke, Yokeable,
+};
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -26,18 +29,12 @@ pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
-pub struct ApiErrorAdapter(#[from] ApiError);
-impl ApiErrorAdapter {
-    fn wrap<E: std::error::Error>(kind: ApiErrorKind) -> impl FnOnce(E) -> Self {
-        |err| Self::from(ApiError::new_err(kind, err))
-    }
-}
-
+pub struct ApiErrorAdapter(#[from] api::ApiError);
 impl IntoResponse for ApiErrorAdapter {
     fn into_response(self) -> axum::response::Response {
         (
-            StatusCode::from_u16(self.0.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            ErasedJson::pretty(self.0),
+            self.0.status(),
+            ErasedJson::pretty(api::ApiErrorWrapper::from(self.0)),
         )
             .into_response()
     }
@@ -63,10 +60,13 @@ where
         Ok(Self(Yoke::try_attach_to_cart(
             String::from_request(req, state)
                 .await
-                .map_err(ApiErrorAdapter::wrap(ApiErrorKind::RequestRejected))?,
+                .map_err(|err| ApiError::BadRequestBody {
+                    error: err.to_string(),
+                })?,
             |src| {
-                serde_json::from_str(src)
-                    .map_err(ApiErrorAdapter::wrap(ApiErrorKind::RequestRejected))
+                serde_json::from_str(src).map_err(|err| ApiError::BadRequestJson {
+                    error: err.to_string(),
+                })
             },
         )?))
     }
@@ -96,33 +96,29 @@ pub async fn run(args: &Args, pool: Pool<AsyncPgConnection>) -> crate::Result<()
 }
 
 pub async fn error_not_found(req: axum::extract::Request) -> Result<()> {
-    Err(ApiErrorAdapter::from(ApiError::from(
-        ApiErrorKind::NoSuchRoute {
-            route: req.uri().path().to_string(),
-        },
-    )))
+    Err(ApiErrorAdapter::from(ApiError::NoSuchRoute {
+        route: req.uri().path().to_string(),
+    }))
 }
 
 pub async fn error_method_not_allowed(req: axum::extract::Request) -> Result<()> {
-    Err(ApiErrorAdapter::from(ApiError::from(
-        ApiErrorKind::MethodNotAllowed {
-            method: req.method().to_string(),
-            route: req.uri().path().to_string(),
-        },
-    )))
+    Err(ApiErrorAdapter::from(ApiError::MethodNotAllowed {
+        method: req.method().to_string(),
+        route: req.uri().path().to_string(),
+    }))
 }
 
-pub async fn root() -> JsonResponse<RootResponse> {
-    JsonResponse(RootResponse {})
+pub async fn root() -> JsonResponse<api::RootResponse> {
+    JsonResponse(api::RootResponse {})
 }
 
 pub async fn builds_allocate(
-    JsonRequest(_req): JsonRequest<builds::BuildAllocateRequest<'static>>,
-) -> Result<JsonResponse<builds::BuildAllocateResponse<'static>>> {
-    Ok(JsonResponse(builds::BuildAllocateResponse {
-        build: builds::Build {
+    JsonRequest(_req): JsonRequest<api::BuildAllocateRequest<'static>>,
+) -> Result<JsonResponse<api::BuildAllocateResponse<'static>>> {
+    Ok(JsonResponse(api::BuildAllocateResponse {
+        build: models::Build {
             id: Uuid::now_v7(),
-            name: "test-timestamp".into(),
+            project_id: Uuid::nil(),
             kind: "nix".into(),
             inputs: BTreeMap::from_iter([(
                 "nixpkgs".into(),
@@ -138,6 +134,14 @@ pub async fn builds_allocate(
             )
             .into(),
             expr: r#"{ source, nixpkgs }: (import nixpkgs {}).callPackage source {}"#.into(),
+            worker_id: None,
+            result: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            allocated_at: None,
+            heartbeat_at: None,
+            started_at: None,
+            ended_at: None,
         },
     }))
 }

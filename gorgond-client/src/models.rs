@@ -2,33 +2,47 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use crate::{Client, Request, Result, Yoke, Yokeable};
 use chrono::prelude::*;
-use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use std::{borrow::Cow, collections::BTreeMap};
-use url::Url;
+use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
 use uuid::Uuid;
+use yoke::Yokeable;
 
-pub struct BuildsClient<'c>(pub &'c Client);
-impl BuildsClient<'_> {
-    pub async fn allocate<'a>(
-        &self,
-        builder: impl Into<Cow<'_, str>>,
-    ) -> Result<Yoke<BuildAllocateResponse<'static>>> {
-        BuildAllocateRequest {
-            builder: builder.into(),
-        }
-        .send(self.0)
-        .await
-    }
+#[derive(Debug, Serialize, Deserialize, Yokeable)]
+pub struct Project<'a> {
+    pub id: Uuid,
+    #[serde(borrow)]
+    pub slug: Cow<'a, str>,
+    #[serde(borrow)]
+    pub name: Cow<'a, str>,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Yokeable)]
+pub struct Worker<'a> {
+    pub id: Uuid,
+    #[serde(borrow)]
+    pub slug: Cow<'a, str>,
+    #[serde(borrow)]
+    pub name: Cow<'a, str>,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum BuildResult {
+    Success,
+    Failure,
+    WorkerLost,
 }
 
 #[derive(Debug, Serialize, Deserialize, Yokeable)]
 pub struct Build<'a> {
     pub id: Uuid,
-    #[serde(borrow)]
-    pub name: Cow<'a, str>,
+    pub project_id: Uuid,
     #[serde(borrow)]
     pub kind: Cow<'a, str>,
     #[serde(borrow)]
@@ -37,6 +51,16 @@ pub struct Build<'a> {
     pub source: Cow<'a, str>,
     #[serde(borrow)]
     pub expr: Cow<'a, str>,
+
+    pub worker_id: Option<Uuid>,
+    pub result: Option<BuildResult>,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub allocated_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 /// A task performed as part of a Build.
@@ -54,22 +78,4 @@ pub struct Task<'a> {
     pub name: Cow<'a, str>,
     pub start: DateTime<Utc>,
     pub end: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Yokeable)]
-pub struct BuildAllocateRequest<'a> {
-    #[serde(borrow)]
-    pub builder: Cow<'a, str>,
-}
-impl Request for BuildAllocateRequest<'_> {
-    type Response = BuildAllocateResponse<'static>;
-    fn endpoint(&self, base: &Url) -> Result<(Method, Url), url::ParseError> {
-        Ok((Method::PUT, base.join("builds/allocate")?))
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Yokeable)]
-pub struct BuildAllocateResponse<'a> {
-    #[serde(borrow)]
-    pub build: Build<'a>,
 }
