@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use gorgon_build_helper::helper::HelperCaller;
-use gorgond_client::{models::Build, Client, Yoke};
+use gorgond_client::{api, models::Build, Client, Yoke};
 use log::info;
 use miette::{miette, Context, IntoDiagnostic, Result};
 use std::{path::PathBuf, process::Stdio};
@@ -53,8 +53,10 @@ pub struct BuilderConfig {
 async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'static>>> {
     info!("Requesting something to build...");
     Ok(client
-        .builds()
-        .allocate(&args.id)
+        .workers()
+        .id(&args.id)
+        .internal()
+        .allocate_build(api::WorkerInternalAllocateBuildRequest {})
         .await?
         .map_project(|rsp, _| rsp.build))
 }
@@ -82,7 +84,7 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     // Find builder.
     let caller = args.helpers.caller()?;
-    let builder = caller.helper(format!("gorgon-build-{}", build.kind))?;
+    let builder = caller.helper(format!("gorgon-build-{}", build.spec.kind))?;
 
     // Run the builder, send it the build spec over stdin.
     info!("Starting build...");

@@ -7,10 +7,18 @@
 #![allow(clippy::result_large_err)]
 
 use clap::{Parser, Subcommand};
-use gorgond_client::{api, Client, Yoke};
-use miette::{IntoDiagnostic, NamedSource, Result};
-use std::{fmt::Debug, io::Write};
-use tracing::instrument;
+use gorgond_client::{api, models, Client};
+use miette::{miette, IntoDiagnostic, NamedSource, Result};
+use std::{collections::BTreeMap, fmt::Debug, io::Write};
+
+#[derive(Debug, Clone, Parser)]
+struct AllArgs {
+    #[command(flatten)]
+    args: Args,
+
+    #[command(subcommand)]
+    command: Command,
+}
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -30,9 +38,6 @@ struct Args {
         default_value = "http://localhost:9999/"
     )]
     base_url: url::Url,
-
-    #[command(subcommand)]
-    command: Command,
 }
 
 impl Args {
@@ -49,19 +54,6 @@ impl Args {
     fn new_client(&self) -> Result<Client> {
         Ok(Client::new(self.base_url.clone())?)
     }
-}
-
-#[derive(Debug, Clone, Subcommand)]
-enum Command {
-    /// Test your connection to gorgond.
-    Ping(Ping),
-}
-impl Command {
-    pub async fn run(&self, args: &Args) -> Result<()> {
-        match &args.command {
-            Command::Ping(cmd) => self.dump(cmd.run(args).await?.get()),
-        }
-    }
 
     fn dump<V: serde::Serialize + Debug>(&self, v: V) -> Result<()> {
         #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -77,27 +69,153 @@ impl Command {
     }
 }
 
-#[derive(Debug, Clone, Parser)]
-struct Ping;
-impl Ping {
-    #[instrument(name = "ping", skip_all)]
-    pub async fn run(&self, args: &Args) -> Result<Yoke<api::RootResponse>> {
-        Ok(args.new_client()?.root().await?)
+#[derive(Debug, Clone, Subcommand)]
+enum Command {
+    /// Test your connection to gorgond.
+    Ping(Ping),
+    /// Manage Projects.
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCommand,
+    },
+    /// Manage a Project.
+    Project {
+        id: String,
+        #[command(subcommand)]
+        cmd: ProjectCommand,
+    },
+}
+impl Command {
+    pub async fn run(self, args: &Args, client: Client) -> Result<()> {
+        match self {
+            Command::Ping(cmd) => cmd.run(args, client).await,
+            Command::Projects { cmd } => cmd.run(args, client.projects()).await,
+            Command::Project { id, cmd } => cmd.run(args, client.projects().id(&id)).await,
+        }
     }
 }
 
-async fn run(args: Args) -> Result<()> {
-    args.command.run(&args).await?;
+#[derive(Debug, Clone, Parser)]
+struct Ping;
+impl Ping {
+    pub async fn run(self, args: &Args, client: Client) -> Result<()> {
+        args.dump(client.root(api::RootRequest {}).await?.get())
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectsCommand {
+    /// Create a new project.
+    Create(ProjectCreateCommand),
+}
+impl ProjectsCommand {
+    pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
+        match self {
+            Self::Create(cmd) => cmd.run(args, projects).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectCommand {
+    /// Get a new project.
+    Get,
+    /// Manage builds for this projects.
+    Builds {
+        #[command(subcommand)]
+        cmd: ProjectBuildCommand,
+    },
+}
+impl ProjectCommand {
+    pub async fn run(self, args: &Args, project: api::ProjectClient<'_>) -> Result<()> {
+        match self {
+            Self::Get => args.dump(project.get(api::ProjectGetRequest {}).await?.get()),
+            Self::Builds { cmd } => cmd.run(args, project.builds()).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Parser)]
+struct ProjectCreateCommand {
+    pub slug: String,
+    pub name: String,
+}
+impl ProjectCreateCommand {
+    pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
+        args.dump(
+            projects
+                .create(api::ProjectCreateRequest {
+                    project: models::ProjectSpec {
+                        slug: self.slug.as_str().into(),
+                        name: self.name.as_str().into(),
+                    },
+                })
+                .await?
+                .get(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectBuildCommand {
+    Create(ProjectBuildCreateCommand),
+}
+impl ProjectBuildCommand {
+    pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
+        match self {
+            Self::Create(cmd) => cmd.run(args, builds).await,
+        }
+    }
+}
+
+/// Create a new project.
+#[derive(Debug, Clone, Parser)]
+struct ProjectBuildCreateCommand {
+    #[arg(short, long)]
+    pub input: Vec<String>,
+    #[arg(short, long, default_value = "nix")]
+    pub kind: String,
+
+    pub source: String,
+    pub expr: String,
+}
+impl ProjectBuildCreateCommand {
+    pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
+        let mut inputs = BTreeMap::new();
+        for input in self.input {
+            let (k, v) = input.split_once("=").ok_or(miette!("-i/--input=key=url"))?;
+            inputs.insert(k.to_string().into(), v.to_string().into());
+        }
+        args.dump(
+            builds
+                .create(api::ProjectBuildCreateRequest {
+                    build: models::BuildSpec {
+                        kind: self.kind.into(),
+                        inputs,
+                        source: self.source.into(),
+                        expr: self.expr.into(),
+                    },
+                })
+                .await?
+                .get(),
+        )
+    }
+}
+
+async fn run(args: AllArgs) -> Result<()> {
+    args.command
+        .run(&args.args, args.args.new_client()?)
+        .await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let args = AllArgs::parse();
 
     use tracing_subscriber::prelude::*;
     tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::filter::Targets::new().with_default(args.level()))
+        .with(tracing_subscriber::filter::Targets::new().with_default(args.args.level()))
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 

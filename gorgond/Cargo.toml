@@ -17,9 +17,11 @@ chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 derive_more = { version = "2.0.1", features = ["full"] }
 diesel-async = { version = "0.5.2", features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel-derive-enum = { version = "3.0.0-beta.1", features = ["postgres"] }
 diesel_migrations = "2.2.0"
 diesel = { version = "2.2.7", features = ["chrono", "uuid", "postgres_backend"] }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
+ownable = "0.6.2"
 serde_json = "1.0.140"
 serde = { version = "1.0.217", features = ["derive"] }
 syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
@@ -27,3 +29,5 @@ thiserror = "2.0.11"
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "macros", "parking_lot"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
+uuid = { version = "1.16.0", features = ["v7", "serde"] }
+yoke = { version = "0.8.0", features = ["derive"] }

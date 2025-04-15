@@ -17,6 +17,8 @@ use std::{cmp::min, error::Error as StdError};
 use tracing::{debug, debug_span, info, instrument};
 
 pub mod http;
+pub mod models;
+pub mod schema;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -30,7 +32,7 @@ pub enum Error {
     #[error("Failed to build database connection pool")]
     DeadpoolBuild(#[from] diesel_async::pooled_connection::deadpool::BuildError),
     #[error("Migrations failed")]
-    MigrationError(Box<dyn StdError + Send + Sync>),
+    MigrationError(#[source] Box<dyn StdError + Send + Sync>),
 }
 
 #[derive(Debug, Clone, Parser)]

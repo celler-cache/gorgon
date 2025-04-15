@@ -408,13 +408,13 @@ fn run(args: Args) -> Result<()> {
 
     // First, instantiate the derivation...
     let mut inst = NixCommand::new(args.nix_instantiate);
-    for (i, (name, s)) in build.inputs.iter().enumerate() {
+    for (i, (name, s)) in build.spec.inputs.iter().enumerate() {
         inst.input_url(name, s)
             .with_context(|| format!("build.inputs[{i}]"))?;
     }
-    inst.input_url("source", &build.source)
+    inst.input_url("source", &build.spec.source)
         .context("build.source")?;
-    inst.args(["--expr", &build.expr]);
+    inst.args(["--expr", &build.spec.expr]);
     info!(inst:?; "Instantiating derivation...");
     let drv = inst.call().context("nix-instantiate failed")?;
 
