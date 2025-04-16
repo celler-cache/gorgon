@@ -9,10 +9,12 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
+gorgond-client = { path = "../gorgond-client" }
+
+chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 colored_json = "5.0.0"
 derive_more = { version = "2.0.1", features = ["full"] }
-gorgond-client = { path = "../gorgond-client" }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
 serde_json = "1.0.138"
 serde = { version = "1.0.217", features = ["derive"] }
@@ -22,4 +24,3 @@ tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros", "pa
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
 url = "2.5.4"
-chrono = { version = "0.4.40", features = ["serde"] }

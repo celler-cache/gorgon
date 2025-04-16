@@ -8,8 +8,14 @@
 
 use clap::{Parser, Subcommand};
 use gorgond_client::{api, models, Client};
-use miette::{miette, IntoDiagnostic, NamedSource, Result};
-use std::{collections::BTreeMap, fmt::Debug, io::Write};
+use miette::{IntoDiagnostic, NamedSource, Result};
+use std::{borrow::Cow, fmt::Debug, io::Write};
+
+fn parse_key_value(s: &str) -> Result<(Cow<'static, str>, Cow<'static, str>), clap::Error> {
+    s.split_once("=")
+        .map(|(a, b)| (a.to_string().into(), b.to_string().into()))
+        .ok_or(clap::Error::new(clap::error::ErrorKind::NoEquals))
+}
 
 #[derive(Debug, Clone, Parser)]
 struct AllArgs {
@@ -74,13 +80,7 @@ enum Command {
     /// Test your connection to gorgond.
     Ping(Ping),
     /// Manage Projects.
-    Projects {
-        #[command(subcommand)]
-        cmd: ProjectsCommand,
-    },
-    /// Manage a Project.
     Project {
-        id: String,
         #[command(subcommand)]
         cmd: ProjectCommand,
     },
@@ -89,8 +89,7 @@ impl Command {
     pub async fn run(self, args: &Args, client: Client) -> Result<()> {
         match self {
             Command::Ping(cmd) => cmd.run(args, client).await,
-            Command::Projects { cmd } => cmd.run(args, client.projects()).await,
-            Command::Project { id, cmd } => cmd.run(args, client.projects().id(&id)).await,
+            Command::Project { cmd } => cmd.run(args, client.projects()).await,
         }
     }
 }
@@ -104,101 +103,95 @@ impl Ping {
 }
 
 #[derive(Debug, Clone, Subcommand)]
-enum ProjectsCommand {
-    /// Create a new project.
-    Create(ProjectCreateCommand),
-}
-impl ProjectsCommand {
-    pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
-        match self {
-            Self::Create(cmd) => cmd.run(args, projects).await,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Subcommand)]
 enum ProjectCommand {
+    /// Create a new project.
+    Create {
+        #[command(flatten)]
+        project: ProjectArgs,
+    },
     /// Get a new project.
-    Get,
+    Get { slug: String },
     /// Manage builds for this projects.
     Builds {
+        slug: String,
         #[command(subcommand)]
         cmd: ProjectBuildCommand,
     },
 }
 impl ProjectCommand {
-    pub async fn run(self, args: &Args, project: api::ProjectClient<'_>) -> Result<()> {
+    pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
         match self {
-            Self::Get => args.dump(project.get(api::ProjectGetRequest {}).await?.get()),
-            Self::Builds { cmd } => cmd.run(args, project.builds()).await,
+            Self::Create { project } => args.dump(
+                projects
+                    .create(api::ProjectCreateRequest {
+                        project: models::ProjectSpec {
+                            slug: project.slug.as_str().into(),
+                            name: project.name.as_str().into(),
+                        },
+                    })
+                    .await?
+                    .get(),
+            ),
+            Self::Get { slug } => args.dump(
+                projects
+                    .slug(&slug)
+                    .get(api::ProjectGetRequest {})
+                    .await?
+                    .get(),
+            ),
+            Self::Builds { slug, cmd } => cmd.run(args, projects.slug(&slug).builds()).await,
         }
     }
 }
 
 #[derive(Debug, Clone, Parser)]
-struct ProjectCreateCommand {
+struct ProjectArgs {
     pub slug: String,
     pub name: String,
 }
-impl ProjectCreateCommand {
-    pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
-        args.dump(
-            projects
-                .create(api::ProjectCreateRequest {
-                    project: models::ProjectSpec {
-                        slug: self.slug.as_str().into(),
-                        name: self.name.as_str().into(),
-                    },
-                })
-                .await?
-                .get(),
-        )
+
+#[derive(Debug, Clone, Parser)]
+struct BuildArgs {
+    #[arg(short, long)]
+    pub kind: Cow<'static, str>,
+    #[arg(short, long, value_parser = parse_key_value)]
+    pub inputs: Vec<(Cow<'static, str>, Cow<'static, str>)>,
+    #[arg(short, long)]
+    pub source: Cow<'static, str>,
+    #[arg(short, long)]
+    pub expr: Cow<'static, str>,
+}
+impl From<BuildArgs> for models::BuildSpec<'static> {
+    fn from(args: BuildArgs) -> Self {
+        Self {
+            kind: args.kind,
+            inputs: args.inputs.into_iter().collect(),
+            source: args.source,
+            expr: args.expr,
+        }
     }
 }
 
 #[derive(Debug, Clone, Subcommand)]
 enum ProjectBuildCommand {
-    Create(ProjectBuildCreateCommand),
+    /// Create a new (unallocated) job for this project.
+    Create {
+        #[command(flatten)]
+        build: BuildArgs,
+    },
 }
 impl ProjectBuildCommand {
     pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
         match self {
-            Self::Create(cmd) => cmd.run(args, builds).await,
+            Self::Create { build } => args.dump(
+                builds
+                    .create(api::ProjectBuildCreateRequest {
+                        build: build.into(),
+                    })
+                    .await?
+                    .get(),
+            ),
         }
-    }
-}
-
-/// Create a new project.
-#[derive(Debug, Clone, Parser)]
-struct ProjectBuildCreateCommand {
-    #[arg(short, long)]
-    pub input: Vec<String>,
-    #[arg(short, long, default_value = "nix")]
-    pub kind: String,
-
-    pub source: String,
-    pub expr: String,
-}
-impl ProjectBuildCreateCommand {
-    pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
-        let mut inputs = BTreeMap::new();
-        for input in self.input {
-            let (k, v) = input.split_once("=").ok_or(miette!("-i/--input=key=url"))?;
-            inputs.insert(k.to_string().into(), v.to_string().into());
-        }
-        args.dump(
-            builds
-                .create(api::ProjectBuildCreateRequest {
-                    build: models::BuildSpec {
-                        kind: self.kind.into(),
-                        inputs,
-                        source: self.source.into(),
-                        expr: self.expr.into(),
-                    },
-                })
-                .await?
-                .get(),
-        )
     }
 }
 

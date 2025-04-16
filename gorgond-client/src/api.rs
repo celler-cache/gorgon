@@ -172,8 +172,8 @@ pub struct ProjectsClient<'a> {
     client: &'a Client,
 }
 impl<'a> ProjectsClient<'a> {
-    pub fn id(&self, id: &'a str) -> ProjectClient<'a> {
-        ProjectClient::new(self.client, id)
+    pub fn slug(&self, slug: &'a str) -> ProjectClient<'a> {
+        ProjectClient::new(self.client, slug)
     }
     gen_endpoints!("projects", (), {
         fn create(ProjectCreateRequest<'_>) -> (POST, "");
@@ -183,13 +183,13 @@ impl<'a> ProjectsClient<'a> {
 #[derive(Debug, Constructor)]
 pub struct ProjectClient<'a> {
     client: &'a Client,
-    project_id: &'a str,
+    project_slug: &'a str,
 }
 impl<'a> ProjectClient<'a> {
     pub fn builds(&self) -> ProjectsBuildsClient<'a> {
-        ProjectsBuildsClient::new(self.client, self.project_id)
+        ProjectsBuildsClient::new(self.client, self.project_slug)
     }
-    gen_endpoints!("projects/{project_id}", (project_id), {
+    gen_endpoints!("projects/{project_slug}", (project_slug), {
         fn get(ProjectGetRequest) -> (GET, "");
     });
 }
@@ -203,10 +203,10 @@ mkmodelrequest!(
 #[derive(Debug, Constructor)]
 pub struct ProjectsBuildsClient<'a> {
     client: &'a Client,
-    project_id: &'a str,
+    project_slug: &'a str,
 }
 impl ProjectsBuildsClient<'_> {
-    gen_endpoints!("projects/{project_id}/builds", (project_id), {
+    gen_endpoints!("projects/{project_slug}/builds", (project_slug), {
         fn create(ProjectBuildCreateRequest<'_>) -> (POST, "");
     });
 }
@@ -216,19 +216,19 @@ pub struct WorkersClient<'a> {
     client: &'a Client,
 }
 impl<'a> WorkersClient<'a> {
-    pub fn id(&self, id: &'a str) -> WorkerClient<'a> {
-        WorkerClient::new(self.client, id)
+    pub fn slug(&self, slug: &'a str) -> WorkerClient<'a> {
+        WorkerClient::new(self.client, slug)
     }
 }
 
 #[derive(Debug, Constructor)]
 pub struct WorkerClient<'a> {
     client: &'a Client,
-    id: &'a str,
+    worker_slug: &'a str,
 }
 impl WorkerClient<'_> {
     pub fn internal(&self) -> WorkerInternalClient<'_> {
-        WorkerInternalClient::new(self.client, self.id)
+        WorkerInternalClient::new(self.client, self.worker_slug)
     }
 }
 
@@ -249,10 +249,10 @@ mkrequest!(
 #[derive(Debug, Constructor)]
 pub struct WorkerInternalClient<'a> {
     client: &'a Client,
-    id: &'a str,
+    worker_slug: &'a str,
 }
 impl WorkerInternalClient<'_> {
-    gen_endpoints!("workers/{id}/internal", (id), {
+    gen_endpoints!("workers/{worker_slug}/internal", (worker_slug), {
         fn allocate_build(WorkerInternalAllocateBuildRequest) -> (PUT, "allocate-build");
     });
 }

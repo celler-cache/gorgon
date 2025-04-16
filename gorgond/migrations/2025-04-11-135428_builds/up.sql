@@ -1,3 +1,7 @@
+-- SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+--
+-- SPDX-License-Identifier: EUPL-1.2
+
 CREATE TABLE projects (
     id          UUID PRIMARY KEY,
     slug        TEXT UNIQUE NOT NULL CHECK (name <> ''),

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::BTreeMap, fmt::Debug};
+use std::fmt::Debug;
 
 use axum::{
     extract::{FromRequest, Path, State},
@@ -18,11 +18,11 @@ use diesel_async::{
         deadpool::{Pool, PoolError as DeadpoolPoolError},
         PoolError,
     },
-    AsyncPgConnection, RunQueryDsl,
+    AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
 use gorgond_client::{
     api::{self, ApiError},
-    models as client, Uuid, Yoke, Yokeable,
+    Uuid, Yoke, Yokeable,
 };
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -144,9 +144,13 @@ pub async fn run(args: &Args, pool: Pool<AsyncPgConnection>) -> crate::Result<()
     let app = Router::new()
         .route("/", get(root))
         .route("/projects", post(project_create))
-        .route("/projects/{project_id}", get(project_get))
+        .route("/projects/{project_slug}", get(project_get))
         .route(
-            "/workers/{worker_id}/internal/allocate-build",
+            "/projects/{project_slug}/builds",
+            post(project_build_create),
+        )
+        .route(
+            "/workers/{worker_slug}/internal/allocate-build",
             put(worker_internal_allocate_build),
         )
         .fallback(error_not_found)
@@ -205,14 +209,14 @@ async fn project_create(
 
 async fn project_get(
     State(state): State<S>,
-    Path(project_id): Path<String>,
+    Path(project_slug): Path<String>,
 ) -> Result<JsonResponse<api::ProjectGetResponse<'static>>> {
     let project = {
         use schema::projects::dsl::*;
 
         let mut conn = state.pool.get().await?;
         projects
-            .filter(schema::projects::slug.eq(&project_id))
+            .filter(schema::projects::slug.eq(&project_slug))
             .first::<models::Project>(&mut conn)
             .await?
     };
@@ -221,39 +225,98 @@ async fn project_get(
     }))
 }
 
+async fn project_build_create(
+    State(state): State<S>,
+    Path(project_slug): Path<String>,
+    JsonRequest(req): JsonRequest<api::ProjectBuildCreateRequest<'static>>,
+) -> Result<JsonResponse<api::ProjectBuildCreateResponse<'static>>> {
+    let now = Utc::now();
+    let mut conn = state.pool.get().await?;
+    let project_id: Uuid = {
+        use schema::projects;
+        projects::table
+            .select(projects::id)
+            .filter(projects::slug.eq(project_slug))
+            .first(&mut conn)
+            .await?
+    };
+
+    let (build, inputs) =
+        models::Build::from_spec(req.get().build.to_owned(), Uuid::now_v7(), project_id, now);
+    let build = {
+        use schema::builds;
+        diesel::insert_into(builds::table)
+            .values(&build)
+            .get_result::<models::Build>(&mut conn)
+            .await?
+    };
+    let inputs = {
+        use schema::build_inputs;
+        diesel::insert_into(build_inputs::table)
+            .values(inputs.collect::<Vec<_>>())
+            .get_results::<models::BuildInput>(&mut conn)
+            .await?
+    };
+    Ok(JsonResponse(api::ProjectBuildCreateResponse {
+        build: build.to_client(inputs),
+    }))
+}
+
 async fn worker_internal_allocate_build(
-    Path(_worker_id): Path<String>,
+    State(state): State<S>,
+    Path(worker_slug): Path<String>,
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
+    let now = Utc::now();
+    let build = state
+        .pool
+        .get()
+        .await?
+        .transaction(|conn| {
+            Box::pin(async {
+                use schema::{build_inputs, builds, workers};
+
+                let default_worker = models::Worker {
+                    id: Uuid::now_v7(),
+                    slug: worker_slug.clone(),
+                    name: worker_slug.clone(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                let worker_id = diesel::insert_into(workers::table)
+                    .values(&default_worker)
+                    .returning(workers::id)
+                    .on_conflict(workers::slug)
+                    .do_update()
+                    .set(&default_worker)
+                    .get_result::<Uuid>(conn)
+                    .await?;
+
+                let build_id = builds::table
+                    .select(builds::id)
+                    .filter(builds::worker_id.is_null())
+                    .limit(1)
+                    .order_by(builds::created_at.asc())
+                    .for_no_key_update()
+                    .get_result::<Uuid>(conn)
+                    .await?;
+                let build = diesel::update(builds::table)
+                    .filter(builds::id.eq(build_id))
+                    .set(builds::worker_id.eq(worker_id))
+                    .returning(models::Build::as_returning())
+                    .get_result(conn)
+                    .await?;
+                let inputs = build_inputs::table
+                    .filter(build_inputs::build_id.eq(build.id))
+                    .get_results::<models::BuildInput>(conn)
+                    .await?;
+
+                Ok::<_, diesel::result::Error>(build.to_client(inputs))
+            })
+        })
+        .await?;
+
     Ok(JsonResponse(api::WorkerInternalAllocateBuildResponse {
-        build: client::Build {
-            id: Uuid::now_v7(),
-            project_id: Uuid::nil(),
-            spec: client::BuildSpec {
-                kind: "nix".into(),
-                inputs: BTreeMap::from_iter([(
-                    "nixpkgs".into(),
-                    concat!(
-                        "git+https://github.com/NixOS/nixpkgs",
-                        "?rev=b75693fb46bfaf09e662d09ec076c5a162efa9f6"
-                    )
-                    .into(),
-                )]),
-                source: concat!(
-                    "git+https://codeberg.org/gorgon/test-timestamp",
-                    "?rev=73d6baaddf2a8972e4a24c1867a89874efee8a24"
-                )
-                .into(),
-                expr: r#"{ source, nixpkgs }: (import nixpkgs {}).callPackage source {}"#.into(),
-            },
-            worker_id: None,
-            result: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            allocated_at: None,
-            heartbeat_at: None,
-            started_at: None,
-            ended_at: None,
-        },
+        build,
     }))
 }

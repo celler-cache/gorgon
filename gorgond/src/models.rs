@@ -1,10 +1,11 @@
+// SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+//
+// SPDX-License-Identifier: EUPL-1.2
+
 use std::collections::BTreeMap;
 
 use chrono::prelude::*;
-use diesel::{
-    prelude::{Insertable, Queryable},
-    Selectable,
-};
+use diesel::{prelude::*, Selectable};
 use diesel_derive_enum::DbEnum;
 use gorgond_client::models as client;
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,18 @@ impl Project {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    QueryableByName,
+    Selectable,
+    Insertable,
+    AsChangeset,
+)]
+#[diesel(table_name = crate::schema::workers, check_for_backend(diesel::pg::Pg))]
 pub struct Worker {
     pub id: Uuid,
     pub slug: String,
@@ -109,18 +121,19 @@ pub struct Build {
     pub ended_at: Option<DateTime<Utc>>,
 }
 impl Build {
-    pub fn from_client(
-        v: client::Build<'static>,
+    pub fn from_spec(
+        v: client::BuildSpec<'static>,
         id: Uuid,
+        project_id: Uuid,
         now: DateTime<Utc>,
     ) -> (Self, impl Iterator<Item = BuildInput>) {
         (
             Self {
                 id,
-                project_id: v.project_id,
-                kind: v.spec.kind.into(),
-                source: v.spec.source.into(),
-                expr: v.spec.expr.into(),
+                project_id,
+                kind: v.kind.into(),
+                source: v.source.into(),
+                expr: v.expr.into(),
                 worker_id: None,
                 result: None,
                 created_at: now,
@@ -130,7 +143,7 @@ impl Build {
                 started_at: None,
                 ended_at: None,
             },
-            v.spec.inputs.into_iter().map(move |(k, v)| BuildInput {
+            v.inputs.into_iter().map(move |(k, v)| BuildInput {
                 id: Uuid::nil(),
                 build_id: id,
                 key: k.into(),
@@ -138,14 +151,16 @@ impl Build {
             }),
         )
     }
-    pub fn to_client(self, inputs: impl Iterator<Item = BuildInput>) -> client::Build<'static> {
+    pub fn to_client(self, inputs: impl IntoIterator<Item = BuildInput>) -> client::Build<'static> {
         client::Build {
             id: self.id,
             project_id: self.project_id,
             spec: client::BuildSpec {
                 kind: self.kind.into(),
                 inputs: BTreeMap::from_iter(
-                    inputs.map(|input| (input.key.into(), input.source.into())),
+                    inputs
+                        .into_iter()
+                        .map(|input| (input.key.into(), input.source.into())),
                 ),
                 source: self.source.into(),
                 expr: self.expr.into(),

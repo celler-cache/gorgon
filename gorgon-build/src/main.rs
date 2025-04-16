@@ -54,7 +54,7 @@ async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'stati
     info!("Requesting something to build...");
     Ok(client
         .workers()
-        .id(&args.id)
+        .slug(&args.id)
         .internal()
         .allocate_build(api::WorkerInternalAllocateBuildRequest {})
         .await?
