@@ -27,6 +27,7 @@ serde = { version = "1.0.217", features = ["derive"] }
 syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
 thiserror = "2.0.11"
 tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "macros", "parking_lot"] }
+tower-http = { version = "0.6.2", features = ["trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
 uuid = { version = "1.16.0", features = ["v7", "serde"] }
