@@ -3,7 +3,7 @@
 -- SPDX-License-Identifier: EUPL-1.2
 
 CREATE TABLE projects (
-    id          UUID PRIMARY KEY,
+    id          UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     slug        TEXT UNIQUE NOT NULL CHECK (name <> ''),
     name        TEXT NOT NULL CHECK (name <> ''),
 
@@ -16,7 +16,7 @@ SELECT diesel_manage_updated_at('projects');
 ---
 
 CREATE TABLE workers (
-    id          UUID PRIMARY KEY,
+    id          UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     slug        TEXT UNIQUE NOT NULL CHECK (name <> ''),
     name        TEXT NOT NULL CHECK (name <> ''),
 
@@ -31,7 +31,7 @@ SELECT diesel_manage_updated_at('workers');
 CREATE TYPE build_result AS ENUM ('success', 'failure', 'worker_lost');
 
 CREATE TABLE builds (
-    id              UUID PRIMARY KEY,
+    id              UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     project_id      UUID NOT NULL REFERENCES projects (id),
     kind            TEXT NOT NULL CHECK (kind <> ''),
     source          TEXT NOT NULL CHECK (source <> ''),
@@ -53,7 +53,7 @@ SELECT diesel_manage_updated_at('builds');
 ---
 
 CREATE TABLE build_inputs (
-    id          UUID PRIMARY KEY,
+    id          UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     build_id    UUID NOT NULL REFERENCES builds (id) ON DELETE CASCADE,
     key         TEXT NOT NULL CHECK (key <> ''),
     source      TEXT NOT NULL CHECK (source <> ''),

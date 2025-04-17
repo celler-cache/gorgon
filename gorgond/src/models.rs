@@ -192,7 +192,7 @@ impl Build {
                 ended_at: None,
             },
             v.inputs.into_iter().map(move |(k, v)| BuildInput {
-                id: Uuid::nil(),
+                id: Uuid::now_v7(),
                 build_id: id,
                 key: k.into(),
                 source: v.into(),
