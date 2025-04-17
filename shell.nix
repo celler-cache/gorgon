@@ -34,6 +34,8 @@ pkgs.mkShell {
     # fetcher/builder dependencies
     git # gorgon-fetch-git
     nix # gorgon-build-nix
+
+    cargo-expand
   ] ++ (lib.optionals stdenv.isDarwin [
     iconv
     darwin.apple_sdk.frameworks.SystemConfiguration
