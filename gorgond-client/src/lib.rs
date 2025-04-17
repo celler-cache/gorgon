@@ -45,7 +45,7 @@ pub struct RequestError {
 pub enum RequestErrorKind {
     #[error("Request Failed")]
     Reqwest(#[from] reqwest::Error),
-    #[error("HTTP {}: {}", .0.status(), .0.status().canonical_reason().unwrap_or("???") )]
+    #[error("HTTP {}", .0.status())]
     #[diagnostic(transparent)]
     Api(#[from] api::ApiError),
     #[error("JSON Error")]

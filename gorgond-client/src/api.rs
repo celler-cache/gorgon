@@ -2,73 +2,25 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use std::fmt::Display;
+
 use derive_more::Constructor;
 use miette::Diagnostic;
 use ownable::{IntoOwned, ToOwned};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, IntoStaticStr};
+use strum::{AsRefStr, Display as EnumDisplay, IntoStaticStr};
 use yoke::Yokeable;
 
 use crate::{models, Client, Request, Result, Yoke};
 
-/// An error returned from the API (wrapped in an ApiErrorWrapper).
-#[derive(Debug, thiserror::Error, Diagnostic, Serialize, Deserialize, AsRefStr, IntoStaticStr)]
-#[serde(tag = "type")]
-#[strum(serialize_all = "title_case")]
-pub enum ApiError {
-    #[error("No such route: {route}")]
-    #[serde(rename = "tag:NoSuchRoute")]
-    NoSuchRoute { method: String, route: String },
-
-    #[error("Method not allowed: {method} {route}")]
-    #[serde(rename = "tag:MethodNotAllowed")]
-    MethodNotAllowed { method: String, route: String },
-
-    #[error("Bad request body")]
-    #[serde(rename = "tag:BadRequestBody")]
-    BadRequestBody { error: String },
-    #[error("Bad request JSON")]
-    #[serde(rename = "tag:BadRequestJson")]
-    BadRequestJson { error: String },
-
-    #[error("Not found in database")]
-    #[serde(rename = "tag:DatabaseNotFound")]
-    DatabaseNotFound { error: String },
-    #[error("Attempted to insert duplicate record")]
-    #[serde(rename = "tag:DatabaseDuplicate")]
-    DatabaseDuplicate { error: String },
-    #[error("Database constraints violated")]
-    #[serde(rename = "tag:DatabaseConstraints")]
-    DatabaseConstraints { error: String },
-    #[error("Database connection error")]
-    #[serde(rename = "tag:DatabaseConnection")]
-    DatabaseConnection { error: String },
-    #[error("Database query failed")]
-    #[serde(rename = "tag:DatabaseQuery")]
-    DatabaseQueryError { error: String },
-
-    #[error("unknown error type: {0}")]
+#[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Model {
+    Project,
+    Worker,
+    Build,
     #[serde(untagged)]
     Unknown(String),
-}
-
-impl ApiError {
-    pub fn status(&self) -> StatusCode {
-        match self {
-            Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
-            Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
-            Self::BadRequestBody { .. } | Self::BadRequestJson { .. } => StatusCode::BAD_REQUEST,
-            Self::DatabaseNotFound { .. } => StatusCode::NOT_FOUND,
-            Self::DatabaseDuplicate { .. } | Self::DatabaseConstraints { .. } => {
-                StatusCode::BAD_REQUEST
-            }
-            Self::DatabaseConnection { .. } | Self::DatabaseQueryError { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-            Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
 }
 
 /// Wraps an ApiError in RFC 9457 ("Problem Details for HTTP APIs") format:
@@ -95,6 +47,271 @@ impl From<ApiError> for ApiErrorWrapper {
 impl From<ApiErrorWrapper> for ApiError {
     fn from(wrap: ApiErrorWrapper) -> Self {
         wrap.inner
+    }
+}
+
+/// An error returned from the API (wrapped in an ApiErrorWrapper).
+#[derive(Debug, Serialize, Deserialize, AsRefStr, IntoStaticStr, thiserror::Error, Diagnostic)]
+#[serde(tag = "type")]
+#[strum(serialize_all = "title_case")]
+pub enum ApiError {
+    #[serde(rename = "tag:NoSuchRoute")]
+    #[error("No such route: {route}")]
+    NoSuchRoute { method: String, route: String },
+
+    #[serde(rename = "tag:MethodNotAllowed")]
+    #[error("Method not allowed: {method} {route}")]
+    MethodNotAllowed { method: String, route: String },
+
+    #[serde(rename = "tag:BadRequestBody")]
+    #[error("Bad request body")]
+    BadRequestBody {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:BadRequestJson")]
+    #[error("Bad request JSON")]
+    BadRequestJson {
+        #[source]
+        error: ApiErrorSource,
+    },
+
+    #[serde(rename = "tag:DatabaseNotFound")]
+    #[error("Database returned no rows")]
+    DatabaseNotFound {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:DatabaseDuplicate")]
+    #[error("Attempted to insert duplicate record")]
+    DatabaseDuplicate {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:DatabaseConstraints")]
+    #[error("Database constraints violated")]
+    DatabaseConstraints {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:DatabaseConnection")]
+    #[error("Database connection error")]
+    DatabaseConnection {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:DatabaseQuery")]
+    #[error("Database query failed")]
+    DatabaseQueryError {
+        #[source]
+        error: ApiErrorSource,
+    },
+
+    #[serde(rename = "tag:NotFoundByKey")]
+    #[error("{model} not found: '{key}'")]
+    NotFoundByKey { model: Model, key: String },
+    #[serde(rename = "tag:NoWorkAvailable")]
+    #[error("No work available")]
+    #[diagnostic(
+        help = "Until automatic build creation is implemented, you have to create builds manually with `gorgonctl builds <project_slug> create`."
+    )]
+    NoWorkAvailable,
+
+    #[serde(untagged)]
+    #[error("unknown error type: {0}")]
+    Unknown(String),
+}
+
+impl ApiError {
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
+            Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
+            Self::BadRequestBody { .. } | Self::BadRequestJson { .. } => StatusCode::BAD_REQUEST,
+            Self::DatabaseNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::DatabaseDuplicate { .. } | Self::DatabaseConstraints { .. } => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::DatabaseConnection { .. } | Self::DatabaseQueryError { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            Self::NotFoundByKey { .. } => StatusCode::NOT_FOUND,
+            Self::NoWorkAvailable => StatusCode::NOT_FOUND,
+            Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub fn wrap_err<E: std::error::Error + ?Sized>(err: &E) -> ApiErrorSource {
+        ApiErrorSource {
+            error: err.to_string(),
+            source: err.source().map(|err| Box::new(Self::wrap_err(err))),
+            ..Default::default()
+        }
+    }
+    pub fn wrap<E: Diagnostic + ?Sized>(err: &E) -> ApiErrorSource {
+        ApiErrorSource {
+            error: err.to_string(),
+            source: err
+                .diagnostic_source()
+                .map(|err| Box::new(Self::wrap(err)))
+                .or_else(|| err.source().map(|err| Box::new(Self::wrap_err(err)))),
+            code: err.code().map(|s| s.to_string()),
+            severity: err.severity(),
+            help: err.help().map(|s| s.to_string()),
+            url: err.url().map(|s| s.to_string()),
+            source_code: err.source_code().and_then(|src| {
+                src.read_span(&miette::SourceSpan::new(0.into(), 0), 0, usize::MAX)
+                    .map(|sc| String::from_utf8_lossy(sc.data()).to_string())
+                    .ok()
+            }),
+            labels: err.labels().map(|it| it.collect()),
+            related: err.related().map(|it| it.map(Self::wrap).collect()),
+        }
+    }
+}
+
+#[cfg(feature = "diesel")]
+impl From<diesel::result::Error> for ApiError {
+    fn from(err: diesel::result::Error) -> Self {
+        match err {
+            diesel::result::Error::NotFound => Self::DatabaseNotFound {
+                error: Self::wrap_err(&err),
+            },
+            diesel::result::Error::DatabaseError(kind, _) => match kind {
+                diesel::result::DatabaseErrorKind::UniqueViolation => Self::DatabaseDuplicate {
+                    error: Self::wrap_err(&err),
+                },
+                diesel::result::DatabaseErrorKind::ForeignKeyViolation
+                | diesel::result::DatabaseErrorKind::NotNullViolation
+                | diesel::result::DatabaseErrorKind::CheckViolation => Self::DatabaseConstraints {
+                    error: Self::wrap_err(&err),
+                },
+                _ => Self::DatabaseQueryError {
+                    error: Self::wrap_err(&err),
+                },
+            },
+            err => Self::DatabaseConnection {
+                error: Self::wrap_err(&err),
+            },
+        }
+    }
+}
+#[cfg(feature = "diesel")]
+impl From<diesel_async::pooled_connection::PoolError> for ApiError {
+    fn from(err: diesel_async::pooled_connection::PoolError) -> Self {
+        use diesel_async::pooled_connection::PoolError;
+        match err {
+            PoolError::ConnectionError(err) => Self::DatabaseConnection {
+                error: Self::wrap_err(&err),
+            },
+            PoolError::QueryError(err) => match err {
+                diesel::result::Error::NotFound => Self::DatabaseNotFound {
+                    error: Self::wrap_err(&err),
+                },
+                _ => Self::DatabaseConnection {
+                    error: Self::wrap_err(&err),
+                },
+            },
+        }
+    }
+}
+#[cfg(feature = "diesel")]
+impl From<diesel_async::pooled_connection::deadpool::PoolError> for ApiError {
+    fn from(err: diesel_async::pooled_connection::deadpool::PoolError) -> Self {
+        use diesel_async::pooled_connection::deadpool::PoolError;
+        match err {
+            PoolError::Backend(err) => Self::from(err),
+            err => Self::DatabaseConnection {
+                error: Self::wrap_err(&err),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{error}")]
+pub struct ApiErrorSource {
+    pub error: String,
+
+    #[source]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<ApiErrorSource>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<miette::Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<miette::LabeledSpan>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub related: Option<Vec<ApiErrorSource>>,
+}
+
+impl Diagnostic for ApiErrorSource {
+    fn code<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.code
+            .as_ref()
+            .map(|s| Box::new(s) as _)
+            .or_else(|| self.source.as_ref().and_then(|src| src.code()))
+    }
+    fn severity(&self) -> Option<miette::Severity> {
+        self.severity
+            .or_else(|| self.source.as_ref().and_then(|src| src.severity()))
+    }
+    fn help<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.help
+            .as_ref()
+            .map(|s| Box::new(s) as _)
+            .or_else(|| self.source.as_ref().and_then(|src| src.help()))
+    }
+    fn url<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
+        self.url
+            .as_ref()
+            .map(|s| Box::new(s) as _)
+            .or_else(|| self.source.as_ref().and_then(|src| src.url()))
+    }
+
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        self.source_code
+            .as_ref()
+            .map(|s| s as _)
+            .or_else(|| self.source.as_ref().and_then(|src| src.source_code()))
+    }
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        let own_labels = self
+            .labels
+            .as_ref()
+            .map(|v| Box::new(v.iter().cloned()) as _);
+        let src_labels = self.source.as_ref().and_then(|src| src.labels());
+
+        match (own_labels, src_labels) {
+            (Some(a), Some(b)) => Some(Box::new(a.chain(b))),
+            (Some(it), None) | (None, Some(it)) => Some(it),
+            (None, None) => None,
+        }
+    }
+
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn Diagnostic> + 'a>> {
+        let own_related = self
+            .related
+            .as_ref()
+            .map(|v| Box::new(v.iter().map(|err| err as &dyn Diagnostic)) as _);
+        let src_related = self.source.as_ref().and_then(|src| src.related());
+
+        match (own_related, src_related) {
+            (Some(a), Some(b)) => Some(Box::new(a.chain(b))),
+            (Some(it), None) | (None, Some(it)) => Some(it),
+            (None, None) => None,
+        }
+    }
+    fn diagnostic_source(&self) -> Option<&dyn Diagnostic> {
+        None
     }
 }
 

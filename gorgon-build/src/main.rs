@@ -11,7 +11,7 @@ use gorgon_build_helper::helper::HelperCaller;
 use gorgond_client::{api, models::Build, Client, Yoke};
 use log::info;
 use miette::{miette, Context, IntoDiagnostic, Result};
-use std::{path::PathBuf, process::Stdio};
+use std::process::Stdio;
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -36,18 +36,6 @@ pub struct Args {
 
 fn init_client(args: &Args) -> Result<Client> {
     Ok(Client::new(args.base_url.clone())?)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct FetcherConfig {
-    pub command: PathBuf,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct BuilderConfig {
-    pub command: PathBuf,
-    pub args: Vec<String>,
-    pub current_dir: Option<PathBuf>,
 }
 
 async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'static>>> {
@@ -80,7 +68,7 @@ pub fn run(args: Args) -> miette::Result<()> {
             .context("Couldn't get something to build; lost and without purpose")
     })?;
     let build = build_.get();
-    info!(id:% = build.id; " -> Got a task!");
+    info!(id:% = build.id, __log__=build_.backing_cart(); " -> Got a task!");
 
     // Find builder.
     let caller = args.helpers.caller()?;

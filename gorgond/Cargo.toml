@@ -9,7 +9,7 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-gorgond-client = { path = "../gorgond-client", features = ["axum"] }
+gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 
 axum-extra = { version = "0.10.0", features = ["erased-json"] }
 axum = { version = "0.8.1", features = ["macros"] }

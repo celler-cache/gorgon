@@ -14,11 +14,7 @@ use axum_extra::response::ErasedJson;
 use chrono::prelude::*;
 use diesel::prelude::*;
 use diesel_async::{
-    pooled_connection::{
-        deadpool::{Pool, PoolError as DeadpoolPoolError},
-        PoolError,
-    },
-    AsyncConnection, AsyncPgConnection, RunQueryDsl,
+    pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
 use gorgond_client::{
     api::{self, ApiError},
@@ -27,7 +23,7 @@ use gorgond_client::{
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tracing::{debug, info, instrument};
+use tracing::{debug, field::Empty, info, instrument, warn, Span};
 
 use crate::{models, schema, Args};
 
@@ -36,7 +32,7 @@ pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error, Diagnostic)]
 #[error(transparent)]
 #[diagnostic(transparent)]
-pub struct ApiErrorAdapter(#[from] ApiError);
+pub struct ApiErrorAdapter(ApiError);
 impl IntoResponse for ApiErrorAdapter {
     fn into_response(self) -> axum::response::Response {
         (
@@ -46,59 +42,9 @@ impl IntoResponse for ApiErrorAdapter {
             .into_response()
     }
 }
-
-impl From<diesel::result::Error> for ApiErrorAdapter {
-    fn from(err: diesel::result::Error) -> Self {
-        Self(match err {
-            diesel::result::Error::NotFound => ApiError::DatabaseNotFound {
-                error: err.to_string(),
-            },
-            diesel::result::Error::DatabaseError(kind, _) => match kind {
-                diesel::result::DatabaseErrorKind::UniqueViolation => ApiError::DatabaseDuplicate {
-                    error: err.to_string(),
-                },
-                diesel::result::DatabaseErrorKind::ForeignKeyViolation
-                | diesel::result::DatabaseErrorKind::NotNullViolation
-                | diesel::result::DatabaseErrorKind::CheckViolation => {
-                    ApiError::DatabaseConstraints {
-                        error: err.to_string(),
-                    }
-                }
-                _ => ApiError::DatabaseQueryError {
-                    error: err.to_string(),
-                },
-            },
-            err => ApiError::DatabaseConnection {
-                error: err.to_string(),
-            },
-        })
-    }
-}
-impl From<PoolError> for ApiErrorAdapter {
-    fn from(err: PoolError) -> Self {
-        Self(match err {
-            PoolError::ConnectionError(err) => ApiError::DatabaseConnection {
-                error: err.to_string(),
-            },
-            PoolError::QueryError(err) => match err {
-                diesel::result::Error::NotFound => ApiError::DatabaseNotFound {
-                    error: err.to_string(),
-                },
-                _ => ApiError::DatabaseConnection {
-                    error: err.to_string(),
-                },
-            },
-        })
-    }
-}
-impl From<DeadpoolPoolError> for ApiErrorAdapter {
-    fn from(err: DeadpoolPoolError) -> Self {
-        match err {
-            DeadpoolPoolError::Backend(err) => Self::from(err),
-            err => Self(ApiError::DatabaseConnection {
-                error: err.to_string(),
-            }),
-        }
+impl<E: Into<ApiError>> From<E> for ApiErrorAdapter {
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
 }
 
@@ -115,11 +61,11 @@ impl<T: for<'y> Yokeable<'y, Output: Debug + Deserialize<'y>>, S: Send + Sync> F
             String::from_request(req, state)
                 .await
                 .map_err(|err| ApiError::BadRequestBody {
-                    error: err.to_string(),
+                    error: ApiError::wrap_err(&err),
                 })?,
             |src| {
                 serde_json::from_str(src).map_err(|err| ApiError::BadRequestJson {
-                    error: err.to_string(),
+                    error: ApiError::wrap_err(&err),
                 })
             },
         )?))
@@ -211,15 +157,8 @@ async fn project_get(
     State(state): State<S>,
     Path(project_slug): Path<String>,
 ) -> Result<JsonResponse<api::ProjectGetResponse<'static>>> {
-    let project = {
-        use schema::projects::dsl::*;
-
-        let mut conn = state.pool.get().await?;
-        projects
-            .filter(schema::projects::slug.eq(&project_slug))
-            .first::<models::Project>(&mut conn)
-            .await?
-    };
+    let mut conn = state.pool.get().await?;
+    let project = models::Project::get(&mut conn, &project_slug).await?;
     Ok(JsonResponse(api::ProjectGetResponse {
         project: project.to_client(),
     }))
@@ -231,44 +170,52 @@ async fn project_build_create(
     JsonRequest(req): JsonRequest<api::ProjectBuildCreateRequest<'static>>,
 ) -> Result<JsonResponse<api::ProjectBuildCreateResponse<'static>>> {
     let now = Utc::now();
-    let mut conn = state.pool.get().await?;
-    let project_id: Uuid = {
-        use schema::projects;
-        projects::table
-            .select(projects::id)
-            .filter(projects::slug.eq(project_slug))
-            .first(&mut conn)
-            .await?
-    };
+    let (build, inputs) = state
+        .pool
+        .get()
+        .await?
+        .transaction(|conn| {
+            Box::pin(async move {
+                let project_id = models::Project::get_id(conn, &project_slug).await?;
 
-    let (build, inputs) =
-        models::Build::from_spec(req.get().build.to_owned(), Uuid::now_v7(), project_id, now);
-    let build = {
-        use schema::builds;
-        diesel::insert_into(builds::table)
-            .values(&build)
-            .get_result::<models::Build>(&mut conn)
-            .await?
-    };
-    let inputs = {
-        use schema::build_inputs;
-        diesel::insert_into(build_inputs::table)
-            .values(inputs.collect::<Vec<_>>())
-            .get_results::<models::BuildInput>(&mut conn)
-            .await?
-    };
+                let (build, inputs) = models::Build::from_spec(
+                    req.get().build.to_owned(),
+                    Uuid::now_v7(),
+                    project_id,
+                    now,
+                );
+                let build = {
+                    use schema::builds;
+                    diesel::insert_into(builds::table)
+                        .values(&build)
+                        .get_result::<models::Build>(conn)
+                        .await?
+                };
+                let inputs = {
+                    use schema::build_inputs;
+                    diesel::insert_into(build_inputs::table)
+                        .values(inputs.collect::<Vec<_>>())
+                        .get_results::<models::BuildInput>(conn)
+                        .await?
+                };
+                Ok::<_, ApiError>((build, inputs))
+            })
+        })
+        .await?;
     Ok(JsonResponse(api::ProjectBuildCreateResponse {
         build: build.to_client(inputs),
     }))
 }
 
+#[instrument(skip(state, _req), fields(worker_id=Empty, build_id=Empty))]
 async fn worker_internal_allocate_build(
     State(state): State<S>,
     Path(worker_slug): Path<String>,
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
+    let span = Span::current();
     let now = Utc::now();
-    let build = state
+    let (build, inputs) = state
         .pool
         .get()
         .await?
@@ -276,47 +223,84 @@ async fn worker_internal_allocate_build(
             Box::pin(async {
                 use schema::{build_inputs, builds, workers};
 
-                let default_worker = models::Worker {
-                    id: Uuid::now_v7(),
-                    slug: worker_slug.clone(),
-                    name: worker_slug.clone(),
-                    created_at: now,
-                    updated_at: now,
+                // Resolve the worker slug to an ID, or create it if it doesn't exist.
+                debug!("Resolving worker_slug to worker_id...");
+                let worker_id = {
+                    let default_worker = models::Worker {
+                        id: Uuid::now_v7(),
+                        slug: worker_slug.clone(),
+                        name: worker_slug.clone(),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    let worker = diesel::insert_into(workers::table)
+                        .values(&default_worker)
+                        .returning(models::Worker::as_returning())
+                        .on_conflict(workers::slug)
+                        .do_update()
+                        .set(&default_worker)
+                        .get_result::<models::Worker>(conn)
+                        .await?;
+                    span.record("worker_id", tracing::field::display(worker.id));
+                    if worker.id == default_worker.id {
+                        info!("New worker node registered!");
+                    }
+                    worker.id
                 };
-                let worker_id = diesel::insert_into(workers::table)
-                    .values(&default_worker)
-                    .returning(workers::id)
-                    .on_conflict(workers::slug)
-                    .do_update()
-                    .set(&default_worker)
-                    .get_result::<Uuid>(conn)
-                    .await?;
 
-                let build_id = builds::table
-                    .select(builds::id)
-                    .filter(builds::worker_id.is_null())
+                // If worker has an unfinished task, remind it to get back on it.
+                // This is also our idempotency mechanism for this endpoint.
+                let build = if let Some(build) = builds::table
                     .limit(1)
-                    .order_by(builds::created_at.asc())
-                    .for_no_key_update()
-                    .get_result::<Uuid>(conn)
-                    .await?;
-                let build = diesel::update(builds::table)
-                    .filter(builds::id.eq(build_id))
-                    .set(builds::worker_id.eq(worker_id))
-                    .returning(models::Build::as_returning())
-                    .get_result(conn)
-                    .await?;
+                    .filter(builds::worker_id.eq(worker_id))
+                    .get_result::<models::Build>(conn)
+                    .await
+                    .optional()?
+                {
+                    span.record("build_id", tracing::field::display(build.id));
+                    info!("Worker has an unfinished build, reminding it");
+                    build
+                } else {
+                    // If not, try to find an unallocated task...
+                    let build_id = if let Some(build_id) = builds::table
+                        .filter(builds::worker_id.is_null())
+                        .select(builds::id)
+                        .limit(1)
+                        .order_by(builds::created_at.asc())
+                        .for_no_key_update() // No race conditions pls.
+                        .get_result::<Uuid>(conn)
+                        .await
+                        .optional()?
+                    {
+                        span.record("build_id", tracing::field::display(build_id));
+                        info!("Found an unallocated build, allocating it");
+                        build_id
+                    } else {
+                        warn!("No work available!");
+                        return Err(ApiError::NoWorkAvailable.into());
+                    };
+
+                    // ...and allocate it to this worker.
+                    debug!("Allocating build...");
+                    diesel::update(builds::table)
+                        .filter(builds::id.eq(build_id))
+                        .set(builds::worker_id.eq(worker_id))
+                        .returning(models::Build::as_returning())
+                        .get_result(conn)
+                        .await?
+                };
+
+                debug!("Finding build inputs...");
                 let inputs = build_inputs::table
                     .filter(build_inputs::build_id.eq(build.id))
                     .get_results::<models::BuildInput>(conn)
                     .await?;
-
-                Ok::<_, diesel::result::Error>(build.to_client(inputs))
+                Ok::<_, ApiErrorAdapter>((build, inputs))
             })
         })
         .await?;
 
     Ok(JsonResponse(api::WorkerInternalAllocateBuildResponse {
-        build,
+        build: build.to_client(inputs),
     }))
 }

@@ -6,11 +6,59 @@ use std::collections::BTreeMap;
 
 use chrono::prelude::*;
 use diesel::{prelude::*, Selectable};
+use diesel_async::RunQueryDsl;
 use diesel_derive_enum::DbEnum;
-use gorgond_client::models as client;
+use gorgond_client::{api, models as client};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use yoke::Yokeable;
+
+macro_rules! slugged {
+    ($model:ident, $schema:ident) => {
+        impl $model {
+            pub async fn get<C: diesel_async::AsyncConnection<Backend = diesel::pg::Pg>>(
+                conn: &mut C,
+                ident: &str,
+            ) -> Result<Self, api::ApiError> {
+                use crate::schema::$schema;
+                let q = $schema::table.select($model::as_select());
+                if let Ok(id) = Uuid::parse_str(ident) {
+                    q.filter($schema::id.eq(id)).first::<Self>(conn).await
+                } else {
+                    q.filter($schema::slug.eq(ident)).first::<Self>(conn).await
+                }
+                .optional()?
+                .ok_or_else(|| api::ApiError::NotFoundByKey {
+                    model: api::Model::$model,
+                    key: ident.to_string(),
+                })
+            }
+
+            pub async fn get_id<C: diesel_async::AsyncConnection<Backend = diesel::pg::Pg>>(
+                conn: &mut C,
+                ident: &str,
+            ) -> Result<Uuid, api::ApiError> {
+                if let Ok(id) = Uuid::parse_str(ident) {
+                    Ok(id)
+                } else {
+                    use crate::schema::$schema;
+                    $schema::table
+                        .select($schema::id)
+                        .filter($schema::slug.eq(&ident))
+                        .first::<Uuid>(conn)
+                        .await
+                        .optional()?
+                        .ok_or_else(|| api::ApiError::NotFoundByKey {
+                            model: api::Model::$model,
+                            key: ident.to_string(),
+                        })
+                }
+            }
+        }
+    };
+}
+slugged!(Project, projects);
+slugged!(Worker, workers);
 
 #[derive(Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable)]
 #[diesel(table_name = crate::schema::projects, check_for_backend(diesel::pg::Pg))]
