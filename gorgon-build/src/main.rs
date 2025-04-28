@@ -13,10 +13,9 @@ use backon::{BlockingRetryable, ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use clap::Parser;
 use gorgon_build_helper::{
-    events::{self, Event, EventHandler},
-    helper::HelperCaller,
+    event_handler, helper::HelperCaller, set_event_handler, Event, EventHandler,
 };
-use gorgond_client::{api, models::Build, Client, Yoke};
+use gorgond_client::{api, models::Build, Client, Uuid, Yoke};
 use log::{error, info};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use thingbuf::{mpsc, recycling::WithCapacity};
@@ -118,6 +117,7 @@ async fn run_nats_publisher(
 
 struct NatsEventHandler {
     next: &'static dyn EventHandler,
+    build_id: Uuid,
     sender: RefCell<Option<mpsc::Sender<Vec<u8>, WithCapacity>>>,
 }
 impl NatsEventHandler {
@@ -126,23 +126,27 @@ impl NatsEventHandler {
     }
 }
 impl EventHandler for NatsEventHandler {
-    fn handle(&self, target: &str, event: Event) {
-        let sender = self.sender.borrow();
-        let sender = sender
-            .as_ref()
-            .expect("Event received after sender was dropped");
-        (|| -> Result<()> {
-            let mut buf = sender.try_send_ref().into_diagnostic()?;
-            serde_json::to_writer_pretty(&mut *buf, &event).into_diagnostic()?;
-            Ok(())
-        })
-        .retry(ExponentialBuilder::new())
-        .notify(|err, d| {
-            let d = humantime::Duration::from(d);
-            error!("Couldn't enqueue event, retrying in {d}...\n\n{err:?}")
-        })
-        .call()
-        .unwrap();
+    fn handle(&self, target: &str, mut event: Event) {
+        if let Event::Build(event) = &mut event {
+            event.build_id = self.build_id;
+
+            let sender = self.sender.borrow();
+            let sender = sender
+                .as_ref()
+                .expect("Event received after sender was dropped");
+            (|| -> Result<()> {
+                let mut buf = sender.try_send_ref().into_diagnostic()?;
+                serde_json::to_writer_pretty(&mut *buf, &event).into_diagnostic()?;
+                Ok(())
+            })
+            .retry(ExponentialBuilder::new())
+            .notify(|err, d| {
+                let d = humantime::Duration::from(d);
+                error!("Couldn't enqueue event, retrying in {d}...\n\n{err:?}")
+            })
+            .call()
+            .unwrap();
+        }
         self.next.handle(target, event);
     }
 }
@@ -150,14 +154,6 @@ impl EventHandler for NatsEventHandler {
 pub fn run(args: Args) -> miette::Result<()> {
     let (event_tx, event_rx) =
         mpsc::with_recycle::<Vec<u8>, WithCapacity>(args.event_buffers, WithCapacity::default());
-
-    // The *very first thing* we need to do is substitute the event handler.
-    // SAFETY: This is only safe to do before any events start being emitted.
-    let events_handler = Box::leak(Box::new(NatsEventHandler {
-        next: events::handler(),
-        sender: RefCell::new(Some(event_tx)),
-    }));
-    unsafe { events::set_handler(events_handler) };
 
     // We need to make some async API calls, but most of what this program does is very
     // sync-shaped. So instead of this being an async program that spends most of its
@@ -200,6 +196,15 @@ pub fn run(args: Args) -> miette::Result<()> {
         .context("Couldn't get something to build; lost and without purpose")?;
     let build = build_.get();
     info!(id:% = build.id, __log__=build_.backing_cart(); " -> Got a task!");
+
+    // Before we start the build, we need to install an event handler.
+    // SAFETY: This is only safe to do before any events start being emitted.
+    let events_handler = Box::leak(Box::new(NatsEventHandler {
+        next: event_handler(),
+        build_id: build.id,
+        sender: RefCell::new(Some(event_tx)),
+    }));
+    unsafe { set_event_handler(events_handler) };
 
     // Find builder.
     let caller = args.helpers.caller()?;

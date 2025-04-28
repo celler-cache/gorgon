@@ -14,11 +14,15 @@ use std::{
 use clap::Parser;
 use colored_json::write_colored_json_with_mode;
 use gorgon_build_helper::{
-    events::{Event, EventHandler, TaskEvent, TaskEventKind, TaskLog, TaskStart},
     helper::{Helper, HelperCaller, HelperContext, HelperFinder},
-    SerializedError, Uuid,
+    Event, EventHandler, SerializedError,
 };
-use log::{error, log, log_enabled, Level};
+use gorgond_client::{
+    events::{BuildEvent, BuildEventKind, Log, TaskEvent, TaskEventKind, TaskUpdate},
+    models::Task,
+    Uuid,
+};
+use log::{error, info, log, log_enabled, Level};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use owo_colors::{OwoColorize, Stream, Style};
 use parking_lot::RwLock;
@@ -36,104 +40,101 @@ pub struct EventLogger {
 }
 impl EventHandler for EventLogger {
     fn handle(&self, target: &str, event: Event<'_>) {
+        let log_log = |lvl: Level, log: Log| {
+            log::logger().log(
+                &log::Record::builder()
+                    .target(target)
+                    .level(lvl)
+                    .file(log.file.as_deref())
+                    .line(log.line.map(|v| v as _))
+                    .key_values(&("kind", log.kind.as_ref()))
+                    .args(format_args!("{}", log.text))
+                    .build(),
+            )
+        };
+
         match event {
             Event::Error(err) => {
                 let e = format!("{:?}", miette::Report::new(err));
                 error!(__log__=e; "Error")
             }
             Event::Log(log) => log.log(target),
-            Event::Task(TaskEvent {
-                task_sid,
-                event_sid: _,
-                event,
-            }) => {
-                let task: EventLoggerTask = match event {
-                    TaskEventKind::Start(TaskStart { level, .. }) => {
-                        let task = EventLoggerTask {
-                            level: level.into(),
-                            started: Instant::now(),
+            Event::Build(BuildEvent { event, .. }) => match event {
+                BuildEventKind::Started => info!(target: target, "Build: Started"),
+                BuildEventKind::Stopped => info!(target: target, "Build: Stopped"),
+                BuildEventKind::Log(log) => log_log(Level::Info, log),
+                BuildEventKind::Task(TaskEvent { task_sid, event }) => {
+                    let task: EventLoggerTask =
+                        match event {
+                            TaskEventKind::Started(Task { level, .. }) => {
+                                let task = EventLoggerTask {
+                                    level: level.unwrap_or_default().into(),
+                                    started: Instant::now(),
+                                };
+                                self.tasks.write().insert(task_sid, task);
+                                task
+                            }
+                            _ => self.tasks.read().get(&task_sid).copied().unwrap_or(
+                                EventLoggerTask {
+                                    level: Level::Trace,
+                                    started: Instant::now(),
+                                },
+                            ),
                         };
-                        self.tasks.write().insert(task_sid, task);
-                        task
-                    }
-                    _ => self
-                        .tasks
-                        .read()
-                        .get(&task_sid)
-                        .copied()
-                        .unwrap_or(EventLoggerTask {
-                            level: Level::Trace,
-                            started: Instant::now(),
-                        }),
-                };
 
-                let target = "events";
-                let lvl = match event {
-                    TaskEventKind::Start(_) | TaskEventKind::Stop => task.level,
-                    TaskEventKind::Log(TaskLog { level, .. }) => {
-                        level.map(|l| l.into()).unwrap_or(task.level)
-                    }
-                    TaskEventKind::UntrustedPath | TaskEventKind::CorruptedPath => Level::Warn,
-                    TaskEventKind::FileLinked { .. } | TaskEventKind::SetPhase { .. } => {
-                        Level::Debug
-                    }
-                    TaskEventKind::Progress { .. } => Level::Trace,
-                };
-                if log_enabled!(target: target, lvl) {
-                    match event {
-                        TaskEventKind::Start(TaskStart {
-                            parent_sid: _,
-                            level,
-                            kind,
-                            name,
-                        }) => {
-                            let (level, kind) = (level.as_ref(), kind.as_ref());
-                            log!(target: target, lvl, name, level, kind; "+ Started");
+                    let lvl = match event {
+                        TaskEventKind::Started(_) | TaskEventKind::Stopped => task.level,
+                        TaskEventKind::Log(Log { level, .. }) => {
+                            level.map(|l| l.into()).unwrap_or(task.level)
                         }
-                        TaskEventKind::Stop => {
-                            let t = humantime::Duration::from(Instant::now() - task.started);
-                            log!(target: target, lvl, t:%; "- Stopped");
-                        }
-                        TaskEventKind::Log(TaskLog {
-                            level: _,
-                            kind,
-                            file,
-                            column: _,
-                            line,
-                            log,
-                        }) => log::logger().log(
-                            &log::Record::builder()
-                                .target(target)
-                                .level(lvl)
-                                .file(file.as_deref())
-                                .line(line.map(|v| v as _))
-                                .key_values(&("kind", kind.as_ref()))
-                                .args(format_args!("{log}"))
-                                .build(),
-                        ),
-                        TaskEventKind::FileLinked { bytes } => {
-                            log!(target: target, lvl, bytes; "  -> File Linked")
-                        }
-                        TaskEventKind::UntrustedPath => {
-                            log!(target: target, lvl, "  -> Untrusted Path")
-                        }
-                        TaskEventKind::CorruptedPath => {
-                            log!(target: target, lvl, "  -> Corrupted Path")
-                        }
-                        TaskEventKind::SetPhase { phase } => {
-                            log!(target: target, lvl, phase; "  -> Phase Change")
-                        }
-                        TaskEventKind::Progress {
-                            done,
-                            expected,
-                            running,
-                            failed,
-                        } => {
-                            log!(target: target, lvl, done, expected, running, failed; "  -> Progress")
-                        }
+                        TaskEventKind::Updated(ref update) => match update {
+                            TaskUpdate::UntrustedPath | TaskUpdate::CorruptedPath => Level::Warn,
+                            TaskUpdate::FileLinked { .. } | TaskUpdate::SetPhase { .. } => {
+                                Level::Debug
+                            }
+                            TaskUpdate::Progress { .. } => Level::Trace,
+                        },
                     };
+                    if log_enabled!(target: target, lvl) {
+                        match event {
+                            TaskEventKind::Started(Task {
+                                level, kind, name, ..
+                            }) => {
+                                let level: &'static str = level.unwrap_or_default().into();
+                                let kind: &'static str = kind.map(|v| v.into()).unwrap_or("???");
+                                log!(target: target, lvl, name, level, kind; "+ Started");
+                            }
+                            TaskEventKind::Stopped => {
+                                let t = humantime::Duration::from(Instant::now() - task.started);
+                                log!(target: target, lvl, t:%; "- Stopped");
+                            }
+                            TaskEventKind::Updated(update) => match update {
+                                TaskUpdate::FileLinked { bytes } => {
+                                    log!(target: target, lvl, bytes; "  -> File Linked")
+                                }
+                                TaskUpdate::UntrustedPath => {
+                                    log!(target: target, lvl, "  -> Untrusted Path")
+                                }
+                                TaskUpdate::CorruptedPath => {
+                                    log!(target: target, lvl, "  -> Corrupted Path")
+                                }
+                                TaskUpdate::SetPhase { phase } => {
+                                    log!(target: target, lvl, phase; "  -> Phase Change")
+                                }
+                                TaskUpdate::Progress {
+                                    done,
+                                    expected,
+                                    running,
+                                    failed,
+                                } => {
+                                    log!(target: target, lvl, done, expected, running, failed; "  -> Progress")
+                                }
+                            },
+                            TaskEventKind::Log(log) => log_log(lvl, log),
+                        };
+                    }
                 }
-            }
+            },
         }
     }
 }
@@ -141,7 +142,7 @@ impl EventHandler for EventLogger {
 #[derive(Default)]
 struct EventSerializer;
 impl EventHandler for EventSerializer {
-    fn handle(&self, _: &str, event: gorgon_build_helper::events::Event) {
+    fn handle(&self, _: &str, event: Event) {
         let mut stderr = std::io::stderr().lock();
         serde_json::to_writer(&mut stderr, &event).expect("Couldn't serialize event!?");
         let _ = writeln!(&mut stderr);
@@ -391,7 +392,7 @@ impl LoggerBuilder {
                 let mut stderr = std::io::stderr().lock();
                 serde_json::to_writer(
                     &mut stderr,
-                    &gorgon_build_helper::events::Event::Log(
+                    &gorgon_build_helper::Event::Log(
                         rec.try_into()
                             .expect("Couldn't turn log record into log event: {rec}"),
                     ),
@@ -435,16 +436,12 @@ pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: Outpu
 
             // SAFETY: See MAIN_CALLED.
             unsafe {
-                gorgon_build_helper::events::set_handler(Box::leak(
-                    Box::new(EventLogger::default()),
-                ))
+                gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventLogger::default())))
             };
         }
         OutputFormat::Json => {
             // SAFETY: See MAIN_CALLED.
-            unsafe {
-                gorgon_build_helper::events::set_handler(Box::leak(Box::new(EventSerializer)))
-            };
+            unsafe { gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventSerializer))) };
         }
     }
 

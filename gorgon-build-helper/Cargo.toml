@@ -9,7 +9,7 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-gorgond-client = { path = "../gorgond-client" }
+gorgond-client = { path = "../gorgond-client", features = ["log"] }
 
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }

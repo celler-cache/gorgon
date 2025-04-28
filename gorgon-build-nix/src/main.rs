@@ -2,15 +2,20 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
+use chrono::prelude::*;
 use clap::Parser;
 use clap_stdin::MaybeStdin;
 use derive_more::{Deref, DerefMut};
-use gorgon_build_helper::{
-    events::{handler, Event, TaskEvent, TaskEventKind, TaskKind, TaskLevel, TaskLog, TaskLogKind},
-    helper::Helper,
+use gorgon_build_helper::{event_handler, helper::Helper, Event};
+use gorgond_client::{
+    events::TaskUpdate,
+    models::{Build, Task, TaskKind},
+};
+use gorgond_client::{
+    events::{BuildEvent, BuildEventKind, Log, LogKind, TaskEvent, TaskEventKind},
+    models::TaskLevel,
     Uuid,
 };
-use gorgond_client::models::Build;
 use log::{info, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
@@ -172,69 +177,66 @@ impl NixCommand {
                                 parent,
                                 text,
                                 type_,
-                            }) => Event::Task(TaskEvent {
+                            }) => BuildEventKind::Task(TaskEvent {
                                 task_sid: task_sid(id),
-                                event_sid: Uuid::now_v7(),
-                                event: TaskEventKind::Start(
-                                    gorgon_build_helper::events::TaskStart {
-                                        parent_sid: Some(parent).filter(|v| *v != 0).map(task_sid),
-                                        level: task_level(level),
-                                        kind: task_kind(type_),
-                                        name: text.into(),
-                                    },
-                                ),
+                                event: TaskEventKind::Started(Task {
+                                    parent_sid: Some(parent).filter(|v| *v != 0).map(task_sid),
+                                    level: Some(task_level(level)),
+                                    kind: task_kind(type_),
+                                    name: text.into(),
+                                    start: Utc::now(),
+                                    ..Default::default()
+                                }),
                             }),
-                            Action::Stop(ActionStop { id }) => Event::Task(TaskEvent {
+                            Action::Stop(ActionStop { id }) => BuildEventKind::Task(TaskEvent {
                                 task_sid: task_sid(id),
-                                event_sid: Uuid::now_v7(),
-                                event: TaskEventKind::Stop,
+                                event: TaskEventKind::Stopped,
                             }),
                             Action::Result(ActionResult { id, data }) => {
-                                Event::Task(TaskEvent {
+                                BuildEventKind::Task(TaskEvent {
                                     task_sid: task_sid(id),
-                                    event_sid: Uuid::now_v7(),
                                     event: match data {
                                         ActionResultData::FileLinked(FileLinked {
                                             bytes_linked,
-                                        }) => TaskEventKind::FileLinked {
+                                        }) => TaskEventKind::Updated(TaskUpdate::FileLinked {
                                             bytes: bytes_linked.try_into().expect("bytes_linked"),
-                                        },
+                                        }),
                                         ActionResultData::BuildLogLine(BuildLogLine { line }) => {
-                                            TaskEventKind::Log(TaskLog {
-                                                kind: TaskLogKind::Build,
-                                                log: line.into(),
+                                            TaskEventKind::Log(Log {
+                                                kind: LogKind::Build,
+                                                text: line.into(),
                                                 ..Default::default()
                                             })
                                         }
                                         ActionResultData::PostBuildLogLine(BuildLogLine {
                                             line,
-                                        }) => TaskEventKind::Log(TaskLog {
-                                            kind: TaskLogKind::PostBuild,
-                                            log: line.into(),
+                                        }) => TaskEventKind::Log(Log {
+                                            kind: LogKind::PostBuild,
+                                            text: line.into(),
                                             ..Default::default()
                                         }),
                                         ActionResultData::UntrustedPath => {
-                                            TaskEventKind::UntrustedPath
+                                            TaskEventKind::Updated(TaskUpdate::UntrustedPath)
                                         }
                                         ActionResultData::CorruptedPath => {
-                                            TaskEventKind::CorruptedPath
+                                            TaskEventKind::Updated(TaskUpdate::CorruptedPath)
                                         }
                                         ActionResultData::SetPhase(SetPhase { phase }) => {
-                                            TaskEventKind::SetPhase {
+                                            TaskEventKind::Updated(TaskUpdate::SetPhase {
                                                 phase: phase.into(),
-                                            }
+                                            })
                                         }
                                         ActionResultData::Progress(Progress {
                                             done,
                                             expected,
                                             running,
                                             failed,
-                                        }) => TaskEventKind::Progress {
+                                        }) => TaskEventKind::Updated(TaskUpdate::Progress {
                                             done: done.try_into().expect("done"),
                                             expected: expected.try_into().expect("expected"),
                                             running: running.try_into().expect("running"),
                                             failed: failed.try_into().expect("failed"),
-                                        },
+                                        }),
                                         ActionResultData::SetExpected(SetExpected { .. }) => {
                                             continue; // Not terribly interesting.
                                         }
@@ -247,20 +249,24 @@ impl NixCommand {
                                 line,
                                 level,
                                 msg,
-                            }) => Event::Task(TaskEvent {
-                                task_sid: Uuid::nil(),
-                                event_sid: Uuid::now_v7(),
-                                event: TaskEventKind::Log(TaskLog {
-                                    level: Some(task_level(level)),
-                                    kind: TaskLogKind::Message,
-                                    file: file.map(|s| s.into()),
-                                    column: column.map(|v| v.try_into().expect("column")),
-                                    line: line.map(|v| v.try_into().expect("line")),
-                                    log: msg.into(),
-                                }),
+                            }) => BuildEventKind::Log(Log {
+                                level: Some(task_level(level)),
+                                kind: LogKind::Message,
+                                file: file.map(|s| s.into()),
+                                column: column.map(|v| v.try_into().expect("column")),
+                                line: line.map(|v| v.try_into().expect("line")),
+                                text: msg.into(),
                             }),
                         };
-                        handler().handle("nix", event);
+                        event_handler().handle(
+                            "nix",
+                            Event::Build(BuildEvent {
+                                timestamp: Utc::now(),
+                                build_id: Uuid::nil(),
+                                event_sid: Uuid::now_v7(),
+                                event,
+                            }),
+                        );
                     }
                 }
                 Ok(())
@@ -350,21 +356,21 @@ pub fn task_level(verbosity: Verbosity) -> TaskLevel {
     }
 }
 
-pub fn task_kind(type_: StderrActivityType) -> TaskKind {
+pub fn task_kind(type_: StderrActivityType) -> Option<TaskKind> {
     match type_ {
-        StderrActivityType::Unknown => TaskKind::Unknown,
-        StderrActivityType::CopyPath => TaskKind::CopyPath,
-        StderrActivityType::FileTransfer => TaskKind::FileTransfer,
-        StderrActivityType::Realise => TaskKind::Realise,
-        StderrActivityType::CopyPaths => TaskKind::CopyPaths,
-        StderrActivityType::Builds => TaskKind::Builds,
-        StderrActivityType::Build => TaskKind::Build,
-        StderrActivityType::OptimiseStore => TaskKind::OptimiseStore,
-        StderrActivityType::VerifyPaths => TaskKind::VerifyPaths,
-        StderrActivityType::Substitute => TaskKind::Substitute,
-        StderrActivityType::QueryPathInfo => TaskKind::QueryPathInfo,
-        StderrActivityType::PostBuildHook => TaskKind::PostBuildHook,
-        StderrActivityType::BuildWaiting => TaskKind::BuildWaiting,
+        StderrActivityType::Unknown => None,
+        StderrActivityType::CopyPath => Some(TaskKind::CopyPath),
+        StderrActivityType::FileTransfer => Some(TaskKind::FileTransfer),
+        StderrActivityType::Realise => Some(TaskKind::Realise),
+        StderrActivityType::CopyPaths => Some(TaskKind::CopyPaths),
+        StderrActivityType::Builds => Some(TaskKind::Builds),
+        StderrActivityType::Build => Some(TaskKind::Build),
+        StderrActivityType::OptimiseStore => Some(TaskKind::OptimiseStore),
+        StderrActivityType::VerifyPaths => Some(TaskKind::VerifyPaths),
+        StderrActivityType::Substitute => Some(TaskKind::Substitute),
+        StderrActivityType::QueryPathInfo => Some(TaskKind::QueryPathInfo),
+        StderrActivityType::PostBuildHook => Some(TaskKind::PostBuildHook),
+        StderrActivityType::BuildWaiting => Some(TaskKind::BuildWaiting),
     }
 }
 

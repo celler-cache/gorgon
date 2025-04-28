@@ -14,16 +14,12 @@ use std::{
 };
 
 use derive_more::{Deref, DerefMut, From};
-use gorgond_client::Uuid;
+use gorgond_client::{models::Task, Uuid};
 use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
 
-use crate::{
-    events::{handler, Event},
-    task::Task,
-    SerializedError,
-};
+use crate::{event_handler, Event, SerializedError};
 
 pub type Result<T, E = HelperError> = std::result::Result<T, E>;
 
@@ -109,7 +105,7 @@ pub enum TaskError {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Task failed: `{}`", .1.name)]
-pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task);
+pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task<'static>);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Error from task: `{}`", .1)]
@@ -335,13 +331,13 @@ impl Helper {
         self
     }
 
-    pub fn into_task(self, sid: Option<Uuid>) -> TaskHelper {
+    pub fn into_task(self, task: Option<Task<'static>>) -> TaskHelper {
         TaskHelper {
-            task: Task {
-                sid: sid.unwrap_or_else(Task::gen_sid),
+            task: task.unwrap_or_else(|| Task {
+                task_sid: Uuid::now_v7(),
                 name: self.name().into_owned().into(),
                 ..Default::default()
-            },
+            }),
             helper: self,
         }
     }
@@ -366,7 +362,7 @@ impl HelperChild<'_> {
 
 #[derive(Debug)]
 pub struct TaskHelper {
-    task: Task,
+    task: Task<'static>,
     helper: Helper,
 }
 
@@ -396,7 +392,7 @@ impl TaskHelper {
             let name = self.task.name.to_string();
             let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
             move || -> Result<(), StderrError> {
-                let handler = handler();
+                let handler = event_handler();
                 let mut buf = String::new();
                 loop {
                     stderr.read_line(&mut buf)?;

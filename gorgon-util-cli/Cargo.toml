@@ -10,6 +10,7 @@ license = "EUPL-1.2"
 
 [dependencies]
 gorgon-build-helper = { path = "../gorgon-build-helper" }
+gorgond-client = { path = "../gorgond-client" }
 
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 colored_json = "5.0.0"

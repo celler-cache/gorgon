@@ -15,7 +15,7 @@ use async_nats::{
 use backon::{ExponentialBuilder, RetryableWithContext};
 use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
 use futures::stream::TryStreamExt;
-use gorgon_build_helper::events::Event;
+use gorgond_client::events::BuildEvent;
 use humantime::Duration;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio_util::sync::CancellationToken;
@@ -140,7 +140,7 @@ async fn consume_batch(_pool: &Pool<AsyncPgConnection>, batch: pull::Batch) -> R
         .map_err(BatchError)
         .map_err(miette::Report::new)
         .try_for_each(async |msg| {
-            let event: Event = serde_json::from_slice(&msg.payload)
+            let event: BuildEvent = serde_json::from_slice(&msg.payload)
                 .into_diagnostic()
                 .context("Couldn't parse event")?;
             debug!(?event, "-> Event");
