@@ -20,14 +20,60 @@ use gorgond_client::{
     api::{self, ApiError},
     Uuid, Yoke, Yokeable,
 };
-use miette::Diagnostic;
+use miette::{Context, Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
-use crate::{models, schema, Args};
+use crate::{models, schema};
 
 pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
+
+#[derive(Debug, Clone, clap::Parser)]
+#[clap(next_help_heading = "HTTP Server")]
+pub struct HttpArgs {
+    /// Listen address for the HTTP server.
+    #[arg(long, short = 'H', default_value = "localhost:9999")]
+    http_addr: String,
+}
+
+#[instrument(name = "http", level = "ERROR", skip_all)]
+pub async fn run(
+    token: CancellationToken,
+    args: HttpArgs,
+    pool: Pool<AsyncPgConnection>,
+) -> miette::Result<()> {
+    let app = Router::new()
+        .route("/", get(root))
+        .route("/projects", post(project_create))
+        .route("/projects/{project}", get(project_get))
+        .route("/projects/{project}/builds", post(project_build_create))
+        .route(
+            "/workers/{worker}/internal/allocate-build",
+            put(worker_internal_allocate_build),
+        )
+        .fallback(error_not_found)
+        .method_not_allowed_fallback(error_method_not_allowed)
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .with_state(S { pool });
+
+    debug!(http_addr = args.http_addr, "Binding HTTP listener...");
+    let listener = TcpListener::bind(&args.http_addr)
+        .await
+        .into_diagnostic()
+        .context("Couldn't bind socket")?;
+    let addr = listener
+        .local_addr()
+        .into_diagnostic()
+        .context("Couldn't get local address")?;
+    info!("Running on: http://{}/", addr);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(token.cancelled_owned())
+        .await
+        .into_diagnostic()
+}
 
 #[derive(Debug, thiserror::Error, Diagnostic)]
 #[error(transparent)]
@@ -92,28 +138,6 @@ macro_rules! transaction {
             .await?
             .transaction(move |conn| Box::pin(async move { ($block)(conn).await }))
     };
-}
-
-#[instrument(level = "INFO", skip_all)]
-pub async fn run(args: &Args, pool: Pool<AsyncPgConnection>) -> crate::Result<()> {
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/projects", post(project_create))
-        .route("/projects/{project}", get(project_get))
-        .route("/projects/{project}/builds", post(project_build_create))
-        .route(
-            "/workers/{worker}/internal/allocate-build",
-            put(worker_internal_allocate_build),
-        )
-        .fallback(error_not_found)
-        .method_not_allowed_fallback(error_method_not_allowed)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(S { pool });
-
-    debug!(http_addr = args.http_addr, "Binding HTTP listener...");
-    let listener = TcpListener::bind(&args.http_addr).await?;
-    info!("Running on: http://{}/", listener.local_addr()?);
-    Ok(axum::serve(listener, app).await?)
 }
 
 async fn error_not_found(req: axum::extract::Request) -> Result<()> {

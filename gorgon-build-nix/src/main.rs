@@ -5,20 +5,22 @@
 use clap::Parser;
 use clap_stdin::MaybeStdin;
 use derive_more::{Deref, DerefMut};
-use gorgon_build_helper::{helper::Helper, task::Task, Uuid};
+use gorgon_build_helper::{
+    events::{handler, Event, TaskEvent, TaskEventKind, TaskKind, TaskLevel, TaskLog, TaskLogKind},
+    helper::Helper,
+    Uuid,
+};
 use gorgond_client::models::Build;
-use log::{info, kv::Value, warn};
+use log::{info, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
         Action, ActionMessage, ActionResult, ActionResultData, ActionStart, ActionStop,
         BuildLogLine, FileLinked, Progress, SetExpected, SetPhase,
     },
-    Verbosity,
+    StderrActivityType, Verbosity,
 };
 use std::{
-    collections::BTreeMap,
-    fmt::Write,
     io::{BufRead, BufReader},
     ops::Deref,
     path::{Path, PathBuf},
@@ -125,71 +127,6 @@ impl FetchExpr {
     }
 }
 
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
-pub enum TaskError {
-    #[error("Task not found: {0}")]
-    NotFound(Uuid),
-    #[error("Attempted to register a duplicate task:\nNew: {new:?}\nOld: {old:?}")]
-    Duplicate { new: Box<Task>, old: Box<Task> },
-}
-
-#[derive(Debug, Default)]
-struct Tasks {
-    pub tasks: BTreeMap<Uuid, Task>,
-}
-impl Tasks {
-    pub fn start(&mut self, task: Task) -> Result<&Task, TaskError> {
-        if let Some(old) = self.tasks.get(&task.sid) {
-            Err(TaskError::Duplicate {
-                new: Box::new(task.clone()),
-                old: Box::new(old.clone()),
-            })
-        } else {
-            let sid = task.sid;
-            self.tasks.insert(sid, task);
-            Ok(self
-                .tasks
-                .get(&sid)
-                .expect("can't get task we just inserted?"))
-        }
-    }
-
-    pub fn try_get(&self, sid: Uuid) -> Result<&Task, TaskError> {
-        self.tasks.get(&sid).ok_or(TaskError::NotFound(sid))
-    }
-    pub fn try_get_mut(&mut self, sid: Uuid) -> Result<&mut Task, TaskError> {
-        self.tasks.get_mut(&sid).ok_or(TaskError::NotFound(sid))
-    }
-    pub fn log_target<'a>(
-        &self,
-        buf: &'a mut String,
-        prefix: impl std::fmt::Display,
-        sid: Uuid,
-    ) -> Result<&'a str, TaskError> {
-        fn walk_log_target<'t>(
-            tasks: &'t Tasks,
-            buf: &mut String,
-            sid: Uuid,
-        ) -> Result<&'t Task, TaskError> {
-            let task = tasks.try_get(sid)?;
-            if let Some(parent_sid) = task.parent_sid {
-                walk_log_target(tasks, buf, parent_sid)?;
-            }
-            if !task.name.is_empty() {
-                write!(buf, "::{}", task.name).unwrap();
-            }
-            Ok(task)
-        }
-        buf.clear();
-        write!(buf, "{}", prefix).unwrap();
-        let task = walk_log_target(self, buf, sid)?;
-        if let Some(phase) = &task.phase {
-            write!(buf, "::{phase}").unwrap();
-        }
-        Ok(buf)
-    }
-}
-
 #[derive(Debug, Deref, DerefMut)]
 struct NixCommand(Helper);
 
@@ -218,13 +155,9 @@ impl NixCommand {
         let join_stderr = std::thread::spawn({
             let stderr = child.child.stderr.take().expect("child has no stderr");
             move || -> Result<()> {
-                let mut buf = String::new();
-                let mut tasks = Tasks::default();
-
                 let mut lines = BufReader::new(stderr).lines();
                 while let Some(line) = lines.next().transpose().into_diagnostic()? {
                     if let Some(json) = line.strip_prefix("@nix ") {
-                        let logger = log::logger();
                         let action = match serde_json::from_str::<Action>(json).into_diagnostic() {
                             Ok(action) => action,
                             Err(err) => {
@@ -232,150 +165,102 @@ impl NixCommand {
                                 continue;
                             }
                         };
-                        match action {
+                        let event = match action {
                             Action::Start(ActionStart {
                                 id,
                                 level,
                                 parent,
                                 text,
                                 type_,
-                            }) => {
-                                let sid = activity_sid(id);
-                                tasks.start(Task {
-                                    sid,
-                                    parent_sid: Some(parent)
-                                        .filter(|id| *id != 0)
-                                        .map(activity_sid),
-                                    name: text.clone().into(),
-                                    level: Some(nix_level(level)),
-                                    ..Default::default()
-                                })?;
-                                let metadata = log::Metadata::builder()
-                                    .target(tasks.log_target(&mut buf, "nix", sid)?)
-                                    .level(log::Level::Trace)
-                                    .build();
-                                if logger.enabled(&metadata) {
-                                    logger.log(
-                                        &log::Record::builder()
-                                            .metadata(metadata)
-                                            .key_values(&[
-                                                ("id", Value::from(id)),
-                                                ("type", Value::from_debug(&type_)),
-                                            ])
-                                            .args(format_args!("Started"))
-                                            .build(),
-                                    );
-                                }
-                            }
-                            Action::Stop(ActionStop { id }) => {
-                                let sid = activity_sid(id);
-                                let metadata = log::Metadata::builder()
-                                    .target(tasks.log_target(&mut buf, "nix", sid)?)
-                                    .level(log::Level::Trace)
-                                    .build();
-                                if logger.enabled(&metadata) {
-                                    logger.log(
-                                        &log::Record::builder()
-                                            .metadata(metadata)
-                                            .key_values(&[("id", Value::from(id))])
-                                            .args(format_args!("Stopped"))
-                                            .build(),
-                                    );
-                                }
-                            }
+                            }) => Event::Task(TaskEvent {
+                                task_sid: task_sid(id),
+                                event_sid: Uuid::now_v7(),
+                                event: TaskEventKind::Start(
+                                    gorgon_build_helper::events::TaskStart {
+                                        parent_sid: Some(parent).filter(|v| *v != 0).map(task_sid),
+                                        level: task_level(level),
+                                        kind: task_kind(type_),
+                                        name: text.into(),
+                                    },
+                                ),
+                            }),
+                            Action::Stop(ActionStop { id }) => Event::Task(TaskEvent {
+                                task_sid: task_sid(id),
+                                event_sid: Uuid::now_v7(),
+                                event: TaskEventKind::Stop,
+                            }),
                             Action::Result(ActionResult { id, data }) => {
-                                let sid = activity_sid(id);
-                                let target = tasks.log_target(&mut buf, "nix", sid)?;
-                                let task = tasks.try_get_mut(sid)?;
-                                let metadata = log::Metadata::builder()
-                                    .level(log::Level::Trace)
-                                    .target(target)
-                                    .build();
-                                if logger.enabled(&metadata) {
-                                    let mut kv = BTreeMap::<&'static str, Value>::from_iter([(
-                                        "id",
-                                        id.into(),
-                                    )]);
-                                    let finish = move |kv, args| {
-                                        logger.log(
-                                            &log::Record::builder()
-                                                .metadata(metadata)
-                                                .key_values(kv)
-                                                .args(args)
-                                                .build(),
-                                        )
-                                    };
-
-                                    match data {
+                                Event::Task(TaskEvent {
+                                    task_sid: task_sid(id),
+                                    event_sid: Uuid::now_v7(),
+                                    event: match data {
                                         ActionResultData::FileLinked(FileLinked {
                                             bytes_linked,
-                                        }) => {
-                                            kv.insert("bytes_linked", bytes_linked.into());
-                                            finish(&kv, format_args!("File Linked"))
+                                        }) => TaskEventKind::FileLinked {
+                                            bytes: bytes_linked.try_into().expect("bytes_linked"),
+                                        },
+                                        ActionResultData::BuildLogLine(BuildLogLine { line }) => {
+                                            TaskEventKind::Log(TaskLog {
+                                                kind: TaskLogKind::Build,
+                                                log: line.into(),
+                                                ..Default::default()
+                                            })
                                         }
-                                        ActionResultData::BuildLogLine(BuildLogLine { line })
-                                        | ActionResultData::PostBuildLogLine(BuildLogLine {
+                                        ActionResultData::PostBuildLogLine(BuildLogLine {
                                             line,
-                                        }) => finish(&kv, format_args!("{line}")),
+                                        }) => TaskEventKind::Log(TaskLog {
+                                            kind: TaskLogKind::PostBuild,
+                                            log: line.into(),
+                                            ..Default::default()
+                                        }),
                                         ActionResultData::UntrustedPath => {
-                                            finish(&kv, format_args!("Untrusted Path"))
+                                            TaskEventKind::UntrustedPath
                                         }
                                         ActionResultData::CorruptedPath => {
-                                            finish(&kv, format_args!("Corrupted Path"))
+                                            TaskEventKind::CorruptedPath
                                         }
                                         ActionResultData::SetPhase(SetPhase { phase }) => {
-                                            task.phase = Some(phase);
-                                            finish(&kv, format_args!("[ SetPhase ]"))
+                                            TaskEventKind::SetPhase {
+                                                phase: phase.into(),
+                                            }
                                         }
                                         ActionResultData::Progress(Progress {
                                             done,
                                             expected,
                                             running,
                                             failed,
-                                        }) => {
-                                            kv.insert("done", done.into());
-                                            kv.insert("expected", expected.into());
-                                            kv.insert("running", running.into());
-                                            kv.insert("failed", failed.into());
-                                            finish(&kv, format_args!("[ Progress ]"))
+                                        }) => TaskEventKind::Progress {
+                                            done: done.try_into().expect("done"),
+                                            expected: expected.try_into().expect("expected"),
+                                            running: running.try_into().expect("running"),
+                                            failed: failed.try_into().expect("failed"),
+                                        },
+                                        ActionResultData::SetExpected(SetExpected { .. }) => {
+                                            continue; // Not terribly interesting.
                                         }
-                                        ActionResultData::SetExpected(SetExpected {
-                                            activity_type,
-                                            expected,
-                                        }) => {
-                                            kv.insert(
-                                                "activity_type",
-                                                <&str>::from(activity_type).into(),
-                                            );
-                                            kv.insert("expected", expected.into());
-                                            finish(&kv, format_args!("[ Set Expected ]"))
-                                        }
-                                    };
-                                }
+                                    },
+                                })
                             }
                             Action::Message(ActionMessage {
                                 file,
-                                column: _,
+                                column,
                                 line,
                                 level,
                                 msg,
-                            }) => {
-                                let metadata = log::Metadata::builder()
-                                    .level(nix_level(level))
-                                    .target("nix")
-                                    .build();
-                                if logger.enabled(&metadata) {
-                                    logger.log(
-                                        &log::Record::builder()
-                                            .metadata(metadata)
-                                            .file(file.as_deref())
-                                            .line(line.and_then(|v| v.try_into().ok()))
-                                            .args(format_args!("{msg}"))
-                                            .build(),
-                                    )
-                                }
-                            }
-                        }
+                            }) => Event::Task(TaskEvent {
+                                task_sid: Uuid::nil(),
+                                event_sid: Uuid::now_v7(),
+                                event: TaskEventKind::Log(TaskLog {
+                                    level: Some(task_level(level)),
+                                    kind: TaskLogKind::Message,
+                                    file: file.map(|s| s.into()),
+                                    column: column.map(|v| v.try_into().expect("column")),
+                                    line: line.map(|v| v.try_into().expect("line")),
+                                    log: msg.into(),
+                                }),
+                            }),
+                        };
+                        handler().handle("nix", event);
                     }
                 }
                 Ok(())
@@ -444,7 +329,7 @@ fn main() {
 /// ```
 ///
 /// In other words, it's effectively a tuple of (pid: u32, id: u32) mashed together.
-pub fn activity_sid(id: u64) -> Uuid {
+pub fn task_sid(id: u64) -> Uuid {
     let id_bytes: [u8; 8] = id.to_be_bytes();
     let mut data = [0u8; 16];
     data[0..4].copy_from_slice(&id_bytes[0..4]);
@@ -452,13 +337,34 @@ pub fn activity_sid(id: u64) -> Uuid {
     Uuid::new_v8(data)
 }
 
-pub fn nix_level(level: Verbosity) -> log::Level {
-    match level {
-        Verbosity::Error => log::Level::Error,
-        Verbosity::Warn => log::Level::Warn,
-        Verbosity::Notice | Verbosity::Info => log::Level::Info,
-        Verbosity::Talkative | Verbosity::Chatty | Verbosity::Debug => log::Level::Debug,
-        Verbosity::Vomit => log::Level::Trace,
+pub fn task_level(verbosity: Verbosity) -> TaskLevel {
+    match verbosity {
+        Verbosity::Error => TaskLevel::Error,
+        Verbosity::Warn => TaskLevel::Warn,
+        Verbosity::Notice => TaskLevel::Notice,
+        Verbosity::Info => TaskLevel::Info,
+        Verbosity::Talkative => TaskLevel::Talkative,
+        Verbosity::Chatty => TaskLevel::Chatty,
+        Verbosity::Debug => TaskLevel::Debug,
+        Verbosity::Vomit => TaskLevel::Vomit,
+    }
+}
+
+pub fn task_kind(type_: StderrActivityType) -> TaskKind {
+    match type_ {
+        StderrActivityType::Unknown => TaskKind::Unknown,
+        StderrActivityType::CopyPath => TaskKind::CopyPath,
+        StderrActivityType::FileTransfer => TaskKind::FileTransfer,
+        StderrActivityType::Realise => TaskKind::Realise,
+        StderrActivityType::CopyPaths => TaskKind::CopyPaths,
+        StderrActivityType::Builds => TaskKind::Builds,
+        StderrActivityType::Build => TaskKind::Build,
+        StderrActivityType::OptimiseStore => TaskKind::OptimiseStore,
+        StderrActivityType::VerifyPaths => TaskKind::VerifyPaths,
+        StderrActivityType::Substitute => TaskKind::Substitute,
+        StderrActivityType::QueryPathInfo => TaskKind::QueryPathInfo,
+        StderrActivityType::PostBuildHook => TaskKind::PostBuildHook,
+        StderrActivityType::BuildWaiting => TaskKind::BuildWaiting,
     }
 }
 

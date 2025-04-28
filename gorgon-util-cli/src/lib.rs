@@ -2,17 +2,151 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{borrow::Cow, collections::BTreeMap, io::Write, path::PathBuf};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    io::Write,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 use clap::Parser;
 use colored_json::write_colored_json_with_mode;
 use gorgon_build_helper::{
+    events::{Event, EventHandler, TaskEvent, TaskEventKind, TaskLog, TaskStart},
     helper::{Helper, HelperCaller, HelperContext, HelperFinder},
-    SerializedError,
+    SerializedError, Uuid,
 };
+use log::{error, log, log_enabled, Level};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use owo_colors::{OwoColorize, Stream, Style};
+use parking_lot::RwLock;
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+
+#[derive(Clone, Copy)]
+struct EventLoggerTask {
+    level: log::Level,
+    started: Instant,
+}
+
+#[derive(Default)]
+pub struct EventLogger {
+    tasks: RwLock<BTreeMap<Uuid, EventLoggerTask>>,
+}
+impl EventHandler for EventLogger {
+    fn handle(&self, target: &str, event: Event<'_>) {
+        match event {
+            Event::Error(err) => {
+                let e = format!("{:?}", miette::Report::new(err));
+                error!(__log__=e; "Error")
+            }
+            Event::Log(log) => log.log(target),
+            Event::Task(TaskEvent {
+                task_sid,
+                event_sid: _,
+                event,
+            }) => {
+                let task: EventLoggerTask = match event {
+                    TaskEventKind::Start(TaskStart { level, .. }) => {
+                        let task = EventLoggerTask {
+                            level: level.into(),
+                            started: Instant::now(),
+                        };
+                        self.tasks.write().insert(task_sid, task);
+                        task
+                    }
+                    _ => self
+                        .tasks
+                        .read()
+                        .get(&task_sid)
+                        .copied()
+                        .unwrap_or(EventLoggerTask {
+                            level: Level::Trace,
+                            started: Instant::now(),
+                        }),
+                };
+
+                let target = "events";
+                let lvl = match event {
+                    TaskEventKind::Start(_) | TaskEventKind::Stop => task.level,
+                    TaskEventKind::Log(TaskLog { level, .. }) => {
+                        level.map(|l| l.into()).unwrap_or(task.level)
+                    }
+                    TaskEventKind::UntrustedPath | TaskEventKind::CorruptedPath => Level::Warn,
+                    TaskEventKind::FileLinked { .. } | TaskEventKind::SetPhase { .. } => {
+                        Level::Debug
+                    }
+                    TaskEventKind::Progress { .. } => Level::Trace,
+                };
+                if log_enabled!(target: target, lvl) {
+                    match event {
+                        TaskEventKind::Start(TaskStart {
+                            parent_sid: _,
+                            level,
+                            kind,
+                            name,
+                        }) => {
+                            let (level, kind) = (level.as_ref(), kind.as_ref());
+                            log!(target: target, lvl, name, level, kind; "+ Started");
+                        }
+                        TaskEventKind::Stop => {
+                            let t = humantime::Duration::from(Instant::now() - task.started);
+                            log!(target: target, lvl, t:%; "- Stopped");
+                        }
+                        TaskEventKind::Log(TaskLog {
+                            level: _,
+                            kind,
+                            file,
+                            column: _,
+                            line,
+                            log,
+                        }) => log::logger().log(
+                            &log::Record::builder()
+                                .target(target)
+                                .level(lvl)
+                                .file(file.as_deref())
+                                .line(line.map(|v| v as _))
+                                .key_values(&("kind", kind.as_ref()))
+                                .args(format_args!("{log}"))
+                                .build(),
+                        ),
+                        TaskEventKind::FileLinked { bytes } => {
+                            log!(target: target, lvl, bytes; "  -> File Linked")
+                        }
+                        TaskEventKind::UntrustedPath => {
+                            log!(target: target, lvl, "  -> Untrusted Path")
+                        }
+                        TaskEventKind::CorruptedPath => {
+                            log!(target: target, lvl, "  -> Corrupted Path")
+                        }
+                        TaskEventKind::SetPhase { phase } => {
+                            log!(target: target, lvl, phase; "  -> Phase Change")
+                        }
+                        TaskEventKind::Progress {
+                            done,
+                            expected,
+                            running,
+                            failed,
+                        } => {
+                            log!(target: target, lvl, done, expected, running, failed; "  -> Progress")
+                        }
+                    };
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventSerializer;
+impl EventHandler for EventSerializer {
+    fn handle(&self, _: &str, event: gorgon_build_helper::events::Event) {
+        let mut stderr = std::io::stderr().lock();
+        serde_json::to_writer(&mut stderr, &event).expect("Couldn't serialize event!?");
+        let _ = writeln!(&mut stderr);
+    }
+}
 
 #[derive(
     Debug,
@@ -279,17 +413,39 @@ pub fn logger(format: OutputFormat, level: log::LevelFilter) -> LoggerBuilder {
 }
 
 pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: OutputFormat, f: F) {
+    static MAIN_CALLED: AtomicBool = AtomicBool::new(false);
+    assert!(
+        !MAIN_CALLED.swap(true, Ordering::SeqCst),
+        "Please don't call main() more than once."
+    );
+
     match format {
-        OutputFormat::Default => miette::set_hook(Box::new(|_| {
-            Box::new(
-                miette::MietteHandlerOpts::new()
-                    .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
-                    .context_lines(6)
-                    .build(),
-            )
-        }))
-        .expect("Couldn't install miette hook"),
-        OutputFormat::Json => {}
+        OutputFormat::Default => {
+            miette::set_hook(Box::new(|_| {
+                Box::new(
+                    miette::MietteHandlerOpts::new()
+                        .with_syntax_highlighting(
+                            miette::highlighters::SyntectHighlighter::default(),
+                        )
+                        .context_lines(6)
+                        .build(),
+                )
+            }))
+            .expect("Couldn't install miette hook");
+
+            // SAFETY: See MAIN_CALLED.
+            unsafe {
+                gorgon_build_helper::events::set_handler(Box::leak(
+                    Box::new(EventLogger::default()),
+                ))
+            };
+        }
+        OutputFormat::Json => {
+            // SAFETY: See MAIN_CALLED.
+            unsafe {
+                gorgon_build_helper::events::set_handler(Box::leak(Box::new(EventSerializer)))
+            };
+        }
     }
 
     if let Err(err) = f().map_err(|err| err.into()) {

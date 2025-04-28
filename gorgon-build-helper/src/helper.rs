@@ -19,7 +19,11 @@ use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
 
-use crate::{events::Event, task::Task, SerializedError};
+use crate::{
+    events::{handler, Event},
+    task::Task,
+    SerializedError,
+};
 
 pub type Result<T, E = HelperError> = std::result::Result<T, E>;
 
@@ -389,9 +393,10 @@ impl TaskHelper {
 
         let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
         let join_stderr = std::thread::spawn({
-            let name = self.task.name.clone();
+            let name = self.task.name.to_string();
             let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
             move || -> Result<(), StderrError> {
+                let handler = handler();
                 let mut buf = String::new();
                 loop {
                     stderr.read_line(&mut buf)?;
@@ -410,33 +415,10 @@ impl TaskHelper {
                             ))),
                             Ok(event) => Ok(event),
                         }?;
-                        match event {
-                            Event::Error(err) => send_err.try_send(err)?,
-                            Event::Log(log) => {
-                                let target = if !log.target.is_empty() {
-                                    format!("{name}::{}", log.target)
-                                } else {
-                                    name.to_string()
-                                };
-                                let meta = log::Metadata::builder()
-                                    .level(log.level)
-                                    .target(&target)
-                                    .build();
-                                let logger = log::logger();
-                                if logger.enabled(&meta) {
-                                    logger.log(
-                                        &log::Record::builder()
-                                            .metadata(meta)
-                                            .args(format_args!("{}", log.msg))
-                                            .key_values(&log)
-                                            .module_path(log.module_path.as_deref())
-                                            .file(log.file.as_deref())
-                                            .line(log.line)
-                                            .build(),
-                                    );
-                                }
-                            }
+                        if let Event::Error(err) = &event {
+                            send_err.try_send(err.clone())?;
                         }
+                        handler.handle(&name, event);
                     } else {
                         warn!("stderr: {}", buf.trim_end());
                     }

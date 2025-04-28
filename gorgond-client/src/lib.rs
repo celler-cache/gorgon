@@ -15,6 +15,7 @@ pub use uuid::Uuid;
 pub use yoke::Yokeable;
 
 pub mod api;
+pub mod events;
 pub mod models;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

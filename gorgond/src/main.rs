@@ -12,27 +12,23 @@ use diesel_async::{
     pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
     AsyncConnection,
 };
-use miette::Diagnostic;
-use std::{cmp::min, error::Error as StdError};
-use tracing::{debug, debug_span, info, instrument};
+use miette::{Context, IntoDiagnostic, Result};
+use std::{cmp::min, collections::HashMap, error::Error as StdError, future::Future};
+use tokio::task::{AbortHandle, Id, JoinSet};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, debug_span, enabled, info, instrument, Level};
 
 pub mod http;
 pub mod models;
+pub mod nats;
 pub mod schema;
 
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[derive(Debug, thiserror::Error, Diagnostic)]
-pub enum Error {
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-
-    #[error("Database connection pool error")]
-    Deadpool(#[from] diesel_async::pooled_connection::deadpool::PoolError),
-    #[error("Failed to build database connection pool")]
-    DeadpoolBuild(#[from] diesel_async::pooled_connection::deadpool::BuildError),
-    #[error("Migrations failed")]
-    MigrationError(#[source] Box<dyn StdError + Send + Sync>),
+#[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Database Connection")]
+struct DatabaseArgs {
+    /// Database URL.
+    #[arg(long, short = 'D', env = "GORGOND_DATABASE_URL")]
+    db_url: String,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -40,18 +36,21 @@ struct Args {
     /// Increase log level.
     #[arg(long, short, action=clap::ArgAction::Count)]
     verbose: u8,
-
     /// Decrease log level.
     #[arg(long, short, action=clap::ArgAction::Count)]
     quiet: u8,
 
-    /// Database URL.
-    #[arg(long, short = 'D', env = "GORGOND_DATABASE_URL")]
-    db_url: String,
-
-    #[arg(long, short = 'H', default_value = "localhost:9999")]
-    http_addr: String,
+    #[command(flatten)]
+    db: DatabaseArgs,
+    #[command(flatten)]
+    http: http::HttpArgs,
+    #[command(flatten)]
+    nats: nats::NatsArgs,
 }
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error(transparent)]
+struct MigrationError(#[from] Box<dyn StdError + Send + Sync>);
 
 #[instrument(name = "migrate", level = "DEBUG", skip_all)]
 async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Result<()> {
@@ -73,6 +72,7 @@ async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Resu
                     let name = migration.name();
                     let _enter = debug_span!("migration", %name).entered();
                     info!(%name, "⏩ Applying migration...");
+
                     conn.run_migration(&migration)?;
                 }
                 info!("▶️ Database successfully migrated!");
@@ -80,15 +80,24 @@ async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Resu
         }
         Ok(())
     })
-    .map_err(Error::MigrationError)
+    .map_err(MigrationError)
+    .context("Migrations Failed")
 }
 
 #[instrument(name = "db", level = "DEBUG", skip_all)]
 async fn init_db(args: &Args) -> Result<Pool<AsyncPgConnection>> {
-    debug!(db_url = args.db_url, "Connecting to database...");
-    let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&args.db_url);
-    let pool = Pool::builder(cfg).build()?;
-    db_migrate(pool.get().await?).await?;
+    debug!(db_url = args.db.db_url, "Connecting to database...");
+    let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&args.db.db_url);
+    let pool = Pool::builder(cfg)
+        .build()
+        .into_diagnostic()
+        .context("Couldn't build database connection pool")?;
+    let conn = pool
+        .get()
+        .await
+        .into_diagnostic()
+        .context("Couldn't get connection from pool")?;
+    db_migrate(conn).await?;
     Ok(pool)
 }
 
@@ -115,9 +124,88 @@ fn init_logging(args: &Args) {
         .init();
 }
 
-async fn run(args: Args) -> Result<()> {
+#[instrument(name = "ctrl_c", skip_all)]
+async fn wait_for_ctrlc(token: CancellationToken) -> Result<()> {
+    debug!("Waiting for Ctrl+C...");
+    token
+        .run_until_cancelled(tokio::signal::ctrl_c())
+        .await
+        .transpose()
+        .into_diagnostic()
+        .context("Couldn't wait for Ctrl+C")?;
+    info!("Ctrl+C pressed; shutting down...");
+    token.cancel();
+    Ok(())
+}
+
+#[derive(Default)]
+pub(crate) struct Tasks {
+    pub set: JoinSet<Result<()>>,
+    pub names: HashMap<Id, &'static str>,
+}
+impl Tasks {
+    pub(crate) fn spawn_named(
+        &mut self,
+        name: &'static str,
+        f: impl Future<Output = Result<()>> + Send + 'static,
+    ) -> AbortHandle {
+        let handle = self.set.spawn(f);
+        self.names.insert(handle.id(), name);
+        handle
+    }
+    fn name(&self, id: Id) -> &'static str {
+        self.names.get(&id).copied().unwrap_or("[???]")
+    }
+
+    async fn join_next_with_name(&mut self) -> Option<(&'static str, Result<()>)> {
+        self.set
+            .join_next_with_id()
+            .await
+            .map(|r| match r {
+                Ok((id, r)) => (id, r),
+                Err(err) => (err.id(), Err(err).into_diagnostic()),
+            })
+            .map(|(id, r)| (self.name(id), r))
+            .map(|(name, r)| (name, r.context(name)))
+    }
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("Tasks Failed")]
+struct TaskErrors(#[related] Vec<miette::Report>);
+
+async fn run(args: Args) -> miette::Result<()> {
     init_logging(&args);
-    http::run(&args, init_db(&args).await?).await
+
+    let pool = init_db(&args).await?;
+    let token = CancellationToken::new();
+    let mut tasks = Tasks::default();
+    tasks.spawn_named("Ctrl+C", wait_for_ctrlc(token.clone()));
+    tasks.spawn_named(
+        "HTTP Server",
+        http::run(token.child_token(), args.http, pool.clone()),
+    );
+    tasks.spawn_named(
+        "NATS Consumer",
+        nats::run(token.child_token(), args.nats, pool.clone()),
+    );
+
+    let mut errs = None::<Vec<miette::Report>>;
+    while let Some((name, r)) = tasks.join_next_with_name().await {
+        match r {
+            Ok(()) => debug!(name, "Task exited"),
+            Err(err) => {
+                if enabled!(Level::DEBUG) {
+                    debug!(name, err = format!("\n{err:?}"), "Task failed");
+                }
+                token.cancel();
+                errs.get_or_insert_with(|| Vec::with_capacity(tasks.set.len()))
+                    .push(err);
+            }
+        }
+    }
+    errs.map(|errs| Err(TaskErrors(errs).into()))
+        .unwrap_or(Ok(()))
 }
 
 #[tokio::main]
@@ -132,7 +220,7 @@ async fn main() {
     }))
     .expect("Couldn't install miette hook");
 
-    if let Err(err) = run(Args::parse()).await.map_err(miette::Report::from) {
+    if let Err(err) = run(Args::parse()).await {
         eprintln!("\n{err:?}");
         std::process::exit(1);
     }
