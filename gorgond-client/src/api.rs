@@ -356,7 +356,9 @@ macro_rules! mkmodelrequest {
 }
 
 macro_rules! gen_endpoints {
-    ($path:expr, ($($arg:ident),*), { fn $($ident:ident($req:ty) -> ($method:ident, $endpoint:literal);),* }) => {
+    ($path:expr, ($($arg:ident),*), {
+        $(fn $ident:ident($req:ty) -> ($method:ident, $endpoint:literal);)*
+    }) => {
         fn _path(&self, endpoint: &str) -> String {
             match endpoint {
                 "" => format!($path, $($arg = self.$arg),*),
@@ -417,6 +419,18 @@ mkmodelrequest!(
     ProjectBuildCreateResponse<Build>
 );
 
+mkrequest!(ProjectBuildsRequest, ProjectBuildsResponse<'static>, {
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct ProjectBuildsRequest {}
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct ProjectBuildsResponse<'a> {
+        #[serde(borrow)]
+        pub project: models::Project<'a>,
+        #[serde(borrow)]
+        pub builds: Vec<models::Build<'a>>,
+    }
+});
+
 #[derive(Debug, Constructor)]
 pub struct ProjectsBuildsClient<'a> {
     client: &'a Client,
@@ -424,6 +438,7 @@ pub struct ProjectsBuildsClient<'a> {
 }
 impl ProjectsBuildsClient<'_> {
     gen_endpoints!("projects/{project_slug}/builds", (project_slug), {
+        fn list(ProjectBuildsRequest) -> (GET, "");
         fn create(ProjectBuildCreateRequest<'_>) -> (POST, "");
     });
 }

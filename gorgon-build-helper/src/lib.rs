@@ -4,7 +4,7 @@
 
 use std::{borrow::Cow, collections::BTreeMap, fmt};
 
-use gorgond_client::events::BuildEvent;
+use gorgond_client::events;
 use log::kv::ToKey;
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ impl EventHandler for () {
 #[serde(rename_all = "snake_case")]
 pub enum Event<'a> {
     #[serde(borrow)]
-    Build(BuildEvent<'a>),
+    Build(events::BuildEvent<'a>),
     #[serde(borrow)]
     Log(LogEvent<'a>),
     Error(SerializedError),

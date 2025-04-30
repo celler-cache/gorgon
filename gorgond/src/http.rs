@@ -48,6 +48,7 @@ pub async fn run(
         .route("/", get(root))
         .route("/projects", post(project_create))
         .route("/projects/{project}", get(project_get))
+        .route("/projects/{project}/builds", get(project_builds_list))
         .route("/projects/{project}/builds", post(project_build_create))
         .route(
             "/workers/{worker}/internal/allocate-build",
@@ -186,6 +187,31 @@ async fn project_get(
     transaction!(state, async |conn: &mut _| {
         Ok(JsonResponse(api::ProjectGetResponse {
             project: models::Project::get(conn, &project).await?.to_client(),
+        }))
+    })
+    .await
+}
+
+async fn project_builds_list(
+    State(state): State<S>,
+    Path(project): Path<String>,
+) -> Result<JsonResponse<api::ProjectBuildsResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let project = models::Project::get(conn, &project).await?;
+        let builds = models::Build::belonging_to(&project)
+            .load::<models::Build>(conn)
+            .await?;
+        let build_inputs = models::BuildInput::belonging_to(&builds)
+            .load::<models::BuildInput>(conn)
+            .await?
+            .grouped_by(&builds);
+        Ok(JsonResponse(api::ProjectBuildsResponse {
+            project: project.to_client(),
+            builds: builds
+                .into_iter()
+                .zip(build_inputs)
+                .map(|(b, bi)| b.to_client(bi))
+                .collect(),
         }))
     })
     .await

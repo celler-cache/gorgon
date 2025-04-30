@@ -60,7 +60,9 @@ macro_rules! slugged {
 slugged!(Project, projects);
 slugged!(Worker, workers);
 
-#[derive(Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable)]
+#[derive(
+    Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable, Identifiable,
+)]
 #[diesel(table_name = crate::schema::projects, check_for_backend(diesel::pg::Pg))]
 pub struct Project {
     pub id: Uuid,
@@ -102,6 +104,7 @@ impl Project {
     QueryableByName,
     Selectable,
     Insertable,
+    Identifiable,
     AsChangeset,
 )]
 #[diesel(table_name = crate::schema::workers, check_for_backend(diesel::pg::Pg))]
@@ -140,8 +143,19 @@ impl From<BuildResult> for client::BuildResult {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
 #[diesel(table_name = crate::schema::build_inputs, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Build))]
 pub struct BuildInput {
     pub id: Uuid,
     pub build_id: Uuid,
@@ -149,8 +163,19 @@ pub struct BuildInput {
     pub source: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
 #[diesel(table_name = crate::schema::builds, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Project), belongs_to(Worker))]
 pub struct Build {
     pub id: Uuid,
     pub project_id: Uuid,

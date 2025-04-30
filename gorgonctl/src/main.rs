@@ -174,6 +174,8 @@ impl From<BuildArgs> for models::BuildSpec<'static> {
 
 #[derive(Debug, Clone, Subcommand)]
 enum ProjectBuildCommand {
+    /// List builds.
+    List,
     /// Create a new (unallocated) job for this project.
     Create {
         #[command(flatten)]
@@ -183,6 +185,7 @@ enum ProjectBuildCommand {
 impl ProjectBuildCommand {
     pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
         match self {
+            Self::List => args.dump(builds.list(api::ProjectBuildsRequest {}).await?.get()),
             Self::Create { build } => args.dump(
                 builds
                     .create(api::ProjectBuildCreateRequest {

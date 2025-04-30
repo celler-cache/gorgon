@@ -11,7 +11,7 @@ use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 use uuid::Uuid;
 use yoke::Yokeable;
 
-use crate::models::{self, TaskLevel};
+use crate::models;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct BuildEvent<'a> {
@@ -107,7 +107,7 @@ impl LogKind {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Log<'a> {
-    pub level: Option<TaskLevel>,
+    pub level: Option<models::TaskLevel>,
     #[serde(skip_serializing_if = "LogKind::is_default", default)]
     pub kind: LogKind,
     #[serde(skip_serializing_if = "Option::is_none", default)]
