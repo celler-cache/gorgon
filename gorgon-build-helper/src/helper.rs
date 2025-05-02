@@ -14,7 +14,7 @@ use std::{
 };
 
 use derive_more::{Deref, DerefMut, From};
-use gorgond_client::{models::Task, Uuid};
+use gorgond_client::{models::BuildTask, Uuid};
 use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
@@ -105,7 +105,7 @@ pub enum TaskError {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Task failed: `{}`", .1.name)]
-pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, Task<'static>);
+pub struct TaskExitError(#[related] Vec<TaskExitErrorCause>, BuildTask<'static>);
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error("Error from task: `{}`", .1)]
@@ -331,10 +331,10 @@ impl Helper {
         self
     }
 
-    pub fn into_task(self, task: Option<Task<'static>>) -> TaskHelper {
+    pub fn into_task(self, task: Option<BuildTask<'static>>) -> TaskHelper {
         TaskHelper {
-            task: task.unwrap_or_else(|| Task {
-                task_sid: Uuid::now_v7(),
+            task: task.unwrap_or_else(|| BuildTask {
+                id: Uuid::now_v7(),
                 name: self.name().into_owned().into(),
                 ..Default::default()
             }),
@@ -362,7 +362,7 @@ impl HelperChild<'_> {
 
 #[derive(Debug)]
 pub struct TaskHelper {
-    task: Task<'static>,
+    task: BuildTask<'static>,
     helper: Helper,
 }
 

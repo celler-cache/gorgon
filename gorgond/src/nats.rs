@@ -5,28 +5,34 @@
 use std::error::Error as StdError;
 
 use async_nats::{
-    jetstream::{
-        self,
-        consumer::{self, pull},
-        stream,
-    },
+    jetstream::{self, consumer, stream},
     ServerAddr,
 };
-use backon::{ExponentialBuilder, RetryableWithContext};
-use diesel_async::{pooled_connection::deadpool::Pool, AsyncPgConnection};
+use backon::{ExponentialBuilder, Retryable};
+use diesel_async::{
+    pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
+};
+use either::Either;
 use futures::stream::TryStreamExt;
-use gorgond_client::events::BuildEvent;
+use gorgond_client::events;
 use humantime::Duration;
 use miette::{Context, IntoDiagnostic, Result};
+use scoped_futures::ScopedFutureExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace};
+
+use crate::{models, schema};
 
 #[derive(Debug, Clone, clap::Parser)]
 #[command(next_help_heading = "Events")]
 struct EventsArgs {
     /// How often to request a batch of events.
-    #[arg(long, default_value = "10s")]
+    #[arg(long, default_value = "20s")]
     event_batch_interval: Duration,
+
+    /// How many messages to acknowledge concurrently.
+    #[arg(long, default_value = "4")]
+    event_ack_concurrency: usize,
 }
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -47,8 +53,11 @@ pub struct NatsArgs {
     #[arg(long, default_value = "gorgond")]
     nats_events_consumer: String,
     /// Maximum number of events to be consumed in one batch.
-    #[arg(long, default_value = "250")]
+    #[arg(long, default_value = "50")]
     nats_events_max_messages: usize,
+    /// Heartbeat interval while waiting for events.
+    #[arg(long, default_value = "5s")]
+    nats_events_heartbeat: Duration,
 
     #[command(flatten)]
     events: EventsArgs,
@@ -103,28 +112,56 @@ pub async fn run(
         );
     }
 
-    debug!("-> Creating sequence...");
-    let batches = consumer
-        .sequence(args.nats_events_max_messages)
-        .into_diagnostic()
-        .context("Couldn't create sequence!?")?;
     token
         .run_until_cancelled_owned(async move {
-            let (_, r) = (async |mut batches: pull::Sequence| {
-                let r = (&mut batches)
-                    .map_err(miette::Report::from_err)
-                    .try_for_each(|batch| consume_batch(&pool, batch))
-                    .await;
-                (batches, r)
-            })
-            .retry(ExponentialBuilder::default())
-            .notify(|err, d| {
-                let d = Duration::from(d);
-                error!("Failed to consume batch - retrying in: {d}\n\n{err:?}");
-            })
-            .context(batches)
-            .await;
-            r
+            // Tick every <interval>. If a tick is missed, tick immediately and maintain
+            // time between ticks rather than doing intervals since the first tick.
+            let mut ticker = tokio::time::interval(*args.events.event_batch_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            let mut last_tick = tokio::time::Instant::now();
+            loop {
+                let tick = ticker.tick().await;
+                let delay = Duration::from(tick.duration_since(last_tick));
+                debug!(%delay, "-> Requesting batch...");
+                last_tick = tick;
+
+                // Request a batch of NATS messages.
+                let got_batch = (async || -> Result<bool> {
+                    let batch = consumer
+                        .fetch()
+                        .max_messages(args.nats_events_max_messages)
+                        .messages()
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't request batch")?;
+                    let msgs: Vec<_> = batch
+                        .map_err(|err| miette::Report::new(BoxedError(err)))
+                        .try_collect()
+                        .await
+                        .context("Couldn't collect messages")?;
+                    if !msgs.is_empty() {
+                        consume_batch(&pool, msgs).await?;
+                        Ok(true)
+                    } else {
+                        trace!("-> No pending messages");
+                        Ok(false)
+                    }
+                })
+                .retry(ExponentialBuilder::default())
+                .notify(|err, d| {
+                    let d = Duration::from(d);
+                    error!("Failed to consume batch - retrying in: {d}\n\n{err:?}");
+                })
+                .await?;
+
+                // If we got a batch of messages, there's probably an in-progress build
+                // producing more. Don't wait before requesting another batch.
+                if got_batch {
+                    trace!("-> Requesting next batch immediately");
+                    ticker.reset_immediately();
+                }
+            }
         })
         .await
         .unwrap_or(Ok(()))
@@ -132,22 +169,86 @@ pub async fn run(
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 #[error(transparent)]
-struct BatchError(Box<dyn StdError + Sync + Send>);
+struct BoxedError(Box<dyn StdError + Sync + Send>);
 
-#[instrument(name = "consume_batch", skip_all)]
-async fn consume_batch(_pool: &Pool<AsyncPgConnection>, batch: pull::Batch) -> Result<()> {
-    batch
-        .map_err(BatchError)
-        .map_err(miette::Report::new)
-        .try_for_each(async |msg| {
-            let event: BuildEvent = serde_json::from_slice(&msg.payload)
-                .into_diagnostic()
-                .context("Couldn't parse event")?;
-            debug!(?event, "-> Event");
-            msg.ack()
-                .await
-                .map_err(BatchError)
-                .context("Couldn't acknowledge message")
+#[instrument(name = "batch", skip_all)]
+async fn consume_batch(
+    pool: &Pool<AsyncPgConnection>,
+    msgs: Vec<jetstream::Message>,
+) -> Result<()> {
+    // Parse messages.
+    let num_msgs = msgs.len();
+    debug!(num_msgs, "Consuming batch...");
+    let (mut tasks, mut events, mut logs) = (Vec::new(), Vec::new(), Vec::new());
+    for msg in msgs.iter() {
+        let event: events::BuildEvent = serde_json::from_slice(&msg.payload)
+            .into_diagnostic()
+            .context("Couldn't parse event")?;
+        trace!(?event, "-> Event");
+        match models::BuildEvent::from_client(event) {
+            Either::Left((event, task)) => {
+                tasks.extend(task);
+                events.push(event);
+            }
+            Either::Right(log) => logs.push(log),
+        }
+    }
+
+    // Shove events into the database.
+    let (num_tasks, num_events, num_logs) = (tasks.len(), events.len(), logs.len());
+    debug!(num_tasks, num_events, num_logs, "-> Inserting events...");
+    pool.get()
+        .await
+        .into_diagnostic()
+        .context("Couldn't get database connection")?
+        .transaction::<_, diesel::result::Error, _>(move |conn| {
+            async move {
+                if !tasks.is_empty() {
+                    diesel::insert_into(schema::build_tasks::table)
+                        .values(&tasks)
+                        .on_conflict(schema::build_tasks::id)
+                        .do_nothing()
+                        .execute(conn)
+                        .await?;
+                }
+                if !events.is_empty() {
+                    diesel::insert_into(schema::build_events::table)
+                        .values(&events)
+                        .on_conflict(schema::build_events::id)
+                        .do_nothing()
+                        .execute(conn)
+                        .await?;
+                }
+                if !logs.is_empty() {
+                    diesel::insert_into(schema::build_logs::table)
+                        .values(&logs)
+                        .on_conflict(schema::build_logs::id)
+                        .do_nothing()
+                        .execute(conn)
+                        .await?;
+                }
+                Ok(())
+            }
+            .scope_boxed()
         })
         .await
+        .into_diagnostic()
+        .context("Couldn't insert events!")?;
+
+    // Acknowledge messages, or they'll be redelivered.
+    debug!(num_msgs, "-> Acknowledging messages...");
+    futures::stream::iter(msgs.into_iter().map(Ok))
+        .try_for_each_concurrent(4, async |msg| {
+            msg.ack()
+                .await
+                .map_err(BoxedError)
+                .with_context(|| format!("Couldn't acknowledge message: {msg:?}"))
+        })
+        .await?;
+
+    info!(
+        num_msgs,
+        num_tasks, num_events, num_logs, "Processed Events"
+    );
+    Ok(())
 }

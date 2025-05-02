@@ -18,8 +18,10 @@ use gorgon_build_helper::{
     Event, EventHandler, SerializedError,
 };
 use gorgond_client::{
-    events::{BuildEvent, BuildEventKind, Log, TaskEvent, TaskEventKind, TaskUpdate},
-    models::Task,
+    events::{
+        BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind, BuildTaskUpdate, Log,
+    },
+    models::BuildTask,
     Uuid,
 };
 use log::{error, info, log, log_enabled, Level};
@@ -63,18 +65,18 @@ impl EventHandler for EventLogger {
                 BuildEventKind::Started => info!(target: target, "Build: Started"),
                 BuildEventKind::Stopped => info!(target: target, "Build: Stopped"),
                 BuildEventKind::Log(log) => log_log(Level::Info, log),
-                BuildEventKind::Task(TaskEvent { task_sid, event }) => {
+                BuildEventKind::Task(BuildTaskEvent { task_id, event }) => {
                     let task: EventLoggerTask =
                         match event {
-                            TaskEventKind::Started(Task { level, .. }) => {
+                            BuildTaskEventKind::Started(BuildTask { level, .. }) => {
                                 let task = EventLoggerTask {
-                                    level: level.unwrap_or_default().into(),
+                                    level: level.into(),
                                     started: Instant::now(),
                                 };
-                                self.tasks.write().insert(task_sid, task);
+                                self.tasks.write().insert(task_id, task);
                                 task
                             }
-                            _ => self.tasks.read().get(&task_sid).copied().unwrap_or(
+                            _ => self.tasks.read().get(&task_id).copied().unwrap_or(
                                 EventLoggerTask {
                                     level: Level::Trace,
                                     started: Instant::now(),
@@ -83,45 +85,44 @@ impl EventHandler for EventLogger {
                         };
 
                     let lvl = match event {
-                        TaskEventKind::Started(_) | TaskEventKind::Stopped => task.level,
-                        TaskEventKind::Log(Log { level, .. }) => {
-                            level.map(|l| l.into()).unwrap_or(task.level)
-                        }
-                        TaskEventKind::Updated(ref update) => match update {
-                            TaskUpdate::UntrustedPath | TaskUpdate::CorruptedPath => Level::Warn,
-                            TaskUpdate::FileLinked { .. } | TaskUpdate::SetPhase { .. } => {
-                                Level::Debug
+                        BuildTaskEventKind::Started(_) | BuildTaskEventKind::Stopped => task.level,
+                        BuildTaskEventKind::Log(Log { level, .. }) => level.into(),
+                        BuildTaskEventKind::Updated(ref update) => match update {
+                            BuildTaskUpdate::UntrustedPath | BuildTaskUpdate::CorruptedPath => {
+                                Level::Warn
                             }
-                            TaskUpdate::Progress { .. } => Level::Trace,
+                            BuildTaskUpdate::FileLinked { .. }
+                            | BuildTaskUpdate::SetPhase { .. } => Level::Debug,
+                            BuildTaskUpdate::Progress { .. } => Level::Trace,
                         },
                     };
                     if log_enabled!(target: target, lvl) {
                         match event {
-                            TaskEventKind::Started(Task {
+                            BuildTaskEventKind::Started(BuildTask {
                                 level, kind, name, ..
                             }) => {
-                                let level: &'static str = level.unwrap_or_default().into();
+                                let level: &'static str = level.into();
                                 let kind: &'static str = kind.map(|v| v.into()).unwrap_or("???");
                                 log!(target: target, lvl, name, level, kind; "+ Started");
                             }
-                            TaskEventKind::Stopped => {
+                            BuildTaskEventKind::Stopped => {
                                 let t = humantime::Duration::from(Instant::now() - task.started);
                                 log!(target: target, lvl, t:%; "- Stopped");
                             }
-                            TaskEventKind::Updated(update) => match update {
-                                TaskUpdate::FileLinked { bytes } => {
+                            BuildTaskEventKind::Updated(update) => match update {
+                                BuildTaskUpdate::FileLinked { bytes } => {
                                     log!(target: target, lvl, bytes; "  -> File Linked")
                                 }
-                                TaskUpdate::UntrustedPath => {
+                                BuildTaskUpdate::UntrustedPath => {
                                     log!(target: target, lvl, "  -> Untrusted Path")
                                 }
-                                TaskUpdate::CorruptedPath => {
+                                BuildTaskUpdate::CorruptedPath => {
                                     log!(target: target, lvl, "  -> Corrupted Path")
                                 }
-                                TaskUpdate::SetPhase { phase } => {
+                                BuildTaskUpdate::SetPhase { phase } => {
                                     log!(target: target, lvl, phase; "  -> Phase Change")
                                 }
-                                TaskUpdate::Progress {
+                                BuildTaskUpdate::Progress {
                                     done,
                                     expected,
                                     running,
@@ -130,7 +131,7 @@ impl EventHandler for EventLogger {
                                     log!(target: target, lvl, done, expected, running, failed; "  -> Progress")
                                 }
                             },
-                            TaskEventKind::Log(log) => log_log(lvl, log),
+                            BuildTaskEventKind::Log(log) => log_log(lvl, log),
                         };
                     }
                 }

@@ -33,13 +33,13 @@ pub struct NatsArgs {
     )]
     nats_addr: ServerAddr,
 
-    /// NATS subject to publish events to.
+    /// NATS subject to publish events to. '*' is replaced with -i/--id.
     #[arg(
         long,
         env = "GORGON_NATS_SUBJECT",
-        default_value = "gorgon.events.build"
+        default_value = "gorgon.events.build.*"
     )]
-    nats_events_subject: Subject,
+    nats_events_subject: String,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -68,21 +68,6 @@ pub struct Args {
     helpers: gorgon_util_cli::HelperArgs,
     #[command(flatten)]
     common: gorgon_util_cli::Args,
-}
-
-fn init_client(args: &Args) -> Result<Client> {
-    Ok(Client::new(args.base_url.clone())?)
-}
-
-async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'static>>> {
-    info!("Requesting something to build...");
-    Ok(client
-        .workers()
-        .slug(&args.id)
-        .internal()
-        .allocate_build(api::WorkerInternalAllocateBuildRequest {})
-        .await?
-        .map_project(|rsp, _| rsp.build))
 }
 
 async fn run_nats_publisher(
@@ -151,6 +136,21 @@ impl EventHandler for NatsEventHandler {
     }
 }
 
+fn init_client(args: &Args) -> Result<Client> {
+    Ok(Client::new(args.base_url.clone())?)
+}
+
+async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'static>>> {
+    info!("Requesting something to build...");
+    Ok(client
+        .workers()
+        .slug(&args.id)
+        .internal()
+        .allocate_build(api::WorkerInternalAllocateBuildRequest {})
+        .await?
+        .map_project(|rsp, _| rsp.build))
+}
+
 pub fn run(args: Args) -> miette::Result<()> {
     let (event_tx, event_rx) =
         mpsc::with_recycle::<Vec<u8>, WithCapacity>(args.event_buffers, WithCapacity::default());
@@ -174,7 +174,7 @@ pub fn run(args: Args) -> miette::Result<()> {
         .context("Couldn't connect to NATS")?;
     let jetstream = jetstream::new(nats);
 
-    let subject = args.nats.nats_events_subject.clone();
+    let subject = Subject::from(args.nats.nats_events_subject.clone().replace("*", &args.id));
     let stream = main_rt
         .block_on(jetstream.stream_by_subject(&*subject))
         .into_diagnostic()
@@ -185,7 +185,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     let join_nats = main_rt.spawn(run_nats_publisher(
         token.child_token(),
         jetstream,
-        args.nats.nats_events_subject.clone(),
+        subject,
         event_rx,
     ));
 

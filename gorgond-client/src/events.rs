@@ -20,7 +20,7 @@ pub struct BuildEvent<'a> {
     #[ownable(clone)]
     pub build_id: Uuid,
     #[ownable(clone)]
-    pub event_sid: Uuid,
+    pub event_id: Uuid,
     #[serde(borrow)]
     pub event: BuildEventKind<'a>,
 }
@@ -31,33 +31,33 @@ pub enum BuildEventKind<'a> {
     Started,
     Stopped,
     #[serde(borrow)]
-    Task(TaskEvent<'a>),
+    Task(BuildTaskEvent<'a>),
     #[serde(borrow)]
     Log(Log<'a>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-pub struct TaskEvent<'a> {
+pub struct BuildTaskEvent<'a> {
     #[ownable(clone)]
-    pub task_sid: Uuid,
+    pub task_id: Uuid,
     #[serde(borrow)]
-    pub event: TaskEventKind<'a>,
+    pub event: BuildTaskEventKind<'a>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToOwned, IntoOwned)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskEventKind<'a> {
-    Started(models::Task<'a>),
+pub enum BuildTaskEventKind<'a> {
+    Started(models::BuildTask<'a>),
     Stopped,
     #[serde(borrow)]
-    Updated(TaskUpdate<'a>),
+    Updated(BuildTaskUpdate<'a>),
     #[serde(borrow)]
     Log(Log<'a>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToOwned, IntoOwned)]
 #[serde(rename_all = "snake_case")]
-pub enum TaskUpdate<'a> {
+pub enum BuildTaskUpdate<'a> {
     FileLinked {
         bytes: u32,
     },
@@ -107,7 +107,7 @@ impl LogKind {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Log<'a> {
-    pub level: Option<models::TaskLevel>,
+    pub level: models::BuildTaskLevel,
     #[serde(skip_serializing_if = "LogKind::is_default", default)]
     pub kind: LogKind,
     #[serde(skip_serializing_if = "Option::is_none", default)]

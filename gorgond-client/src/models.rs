@@ -118,7 +118,7 @@ pub struct Build<'a> {
     ToOwned,
     IntoOwned,
 )]
-pub enum TaskLevel {
+pub enum BuildTaskLevel {
     #[serde(rename = "E")]
     #[strum(serialize = "E")]
     Error,
@@ -146,14 +146,16 @@ pub enum TaskLevel {
     Vomit,
 }
 #[cfg(feature = "log")]
-impl From<TaskLevel> for log::Level {
-    fn from(level: TaskLevel) -> Self {
+impl From<BuildTaskLevel> for log::Level {
+    fn from(level: BuildTaskLevel) -> Self {
         match level {
-            TaskLevel::Error => log::Level::Error,
-            TaskLevel::Warn => log::Level::Warn,
-            TaskLevel::Notice | TaskLevel::Info => log::Level::Info,
-            TaskLevel::Talkative | TaskLevel::Chatty | TaskLevel::Debug => log::Level::Debug,
-            TaskLevel::Vomit => log::Level::Trace,
+            BuildTaskLevel::Error => log::Level::Error,
+            BuildTaskLevel::Warn => log::Level::Warn,
+            BuildTaskLevel::Notice | BuildTaskLevel::Info => log::Level::Info,
+            BuildTaskLevel::Talkative | BuildTaskLevel::Chatty | BuildTaskLevel::Debug => {
+                log::Level::Debug
+            }
+            BuildTaskLevel::Vomit => log::Level::Trace,
         }
     }
 }
@@ -177,7 +179,7 @@ impl From<TaskLevel> for log::Level {
     IntoOwned,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum TaskKind {
+pub enum BuildTaskKind {
     Realise,
     Builds,
     Build,
@@ -194,25 +196,25 @@ pub enum TaskKind {
 
 /// A task performed as part of a Build.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-pub struct Task<'a> {
-    /// ID of the parent Build.
+pub struct BuildTask<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub parent_id: Option<Uuid>,
     #[ownable(clone)]
     pub build_id: Uuid,
-    /// Sub-ID of this task. Unique together with build_id, but may be reused between builds.
-    /// This may be a UUIDv8 with a build system specific ID unceremoniously shoved into it.
-    #[ownable(clone)]
-    pub task_sid: Uuid,
-    /// Sub-ID of the parent task, if any. The parent task must have the same build_id.
-    #[ownable(clone)]
-    pub parent_sid: Option<Uuid>,
 
     #[serde(borrow)]
     pub name: Cow<'a, str>,
-    pub kind: Option<TaskKind>,
-    pub level: Option<TaskLevel>,
+    pub kind: Option<BuildTaskKind>,
+    pub level: BuildTaskLevel,
 
     #[ownable(clone)]
-    pub start: DateTime<Utc>,
+    pub created_at: Option<DateTime<Utc>>,
     #[ownable(clone)]
-    pub end: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    #[ownable(clone)]
+    pub started_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub ended_at: Option<DateTime<Utc>>,
 }

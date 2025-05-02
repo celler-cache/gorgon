@@ -13,7 +13,7 @@ use diesel_async::{
     AsyncConnection,
 };
 use miette::{Context, IntoDiagnostic, Result};
-use std::{cmp::min, collections::HashMap, error::Error as StdError, future::Future};
+use std::{collections::HashMap, error::Error as StdError, future::Future};
 use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, enabled, info, instrument, Level};
@@ -115,9 +115,10 @@ fn init_logging(args: &Args) {
     tracing_subscriber::Registry::default()
         .with(
             tracing_subscriber::filter::Targets::new()
-                // tokio_postgres TRACEs every connection poll event, that's just tmi.
-                .with_target("tokio_postgres::connection", min(level, Level::DEBUG))
                 .with_target("axum::rejections", Level::TRACE)
+                // These log way too much internal information. Comment out if debugging them.
+                .with_target("tokio_postgres", Level::INFO)
+                .with_target("async_nats", Level::INFO)
                 .with_default(level),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))

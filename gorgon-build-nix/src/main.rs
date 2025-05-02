@@ -8,12 +8,12 @@ use clap_stdin::MaybeStdin;
 use derive_more::{Deref, DerefMut};
 use gorgon_build_helper::{event_handler, helper::Helper, Event};
 use gorgond_client::{
-    events::TaskUpdate,
-    models::{Build, Task, TaskKind},
+    events::BuildTaskUpdate,
+    models::{Build, BuildTask, BuildTaskKind},
 };
 use gorgond_client::{
-    events::{BuildEvent, BuildEventKind, Log, LogKind, TaskEvent, TaskEventKind},
-    models::TaskLevel,
+    events::{BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind, Log, LogKind},
+    models::BuildTaskLevel,
     Uuid,
 };
 use log::{info, warn};
@@ -26,6 +26,7 @@ use nix_daemon::{
     StderrActivityType, Verbosity,
 };
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader},
     ops::Deref,
     path::{Path, PathBuf},
@@ -161,6 +162,15 @@ impl NixCommand {
             let stderr = child.child.stderr.take().expect("child has no stderr");
             move || -> Result<()> {
                 let mut lines = BufReader::new(stderr).lines();
+                let mut tasks = BTreeMap::<u64, BuildTask>::new();
+
+                fn get_task<'a>(
+                    tasks: &'a mut BTreeMap<u64, BuildTask>,
+                    id: u64,
+                ) -> &'a BuildTask<'a> {
+                    tasks.entry(id).or_default()
+                }
+
                 while let Some(line) = lines.next().transpose().into_diagnostic()? {
                     if let Some(json) = line.strip_prefix("@nix ") {
                         let action = match serde_json::from_str::<Action>(json).into_diagnostic() {
@@ -177,32 +187,48 @@ impl NixCommand {
                                 parent,
                                 text,
                                 type_,
-                            }) => BuildEventKind::Task(TaskEvent {
-                                task_sid: task_sid(id),
-                                event: TaskEventKind::Started(Task {
-                                    parent_sid: Some(parent).filter(|v| *v != 0).map(task_sid),
-                                    level: Some(task_level(level)),
+                            }) => {
+                                let task = BuildTask {
+                                    id: Uuid::now_v7(),
+                                    parent_id: Some(parent)
+                                        .filter(|id| *id != 0)
+                                        .and_then(|id| tasks.get(&id).map(|t| t.id)),
+                                    level: task_level(level),
                                     kind: task_kind(type_),
                                     name: text.into(),
-                                    start: Utc::now(),
+                                    started_at: Utc::now(),
                                     ..Default::default()
-                                }),
-                            }),
-                            Action::Stop(ActionStop { id }) => BuildEventKind::Task(TaskEvent {
-                                task_sid: task_sid(id),
-                                event: TaskEventKind::Stopped,
-                            }),
+                                };
+                                let event = BuildEventKind::Task(BuildTaskEvent {
+                                    task_id: task.id,
+                                    event: BuildTaskEventKind::Started(task.clone()),
+                                });
+
+                                tasks.insert(id, task);
+                                event
+                            }
+                            Action::Stop(ActionStop { id }) => {
+                                BuildEventKind::Task(BuildTaskEvent {
+                                    task_id: get_task(&mut tasks, id).id,
+                                    event: BuildTaskEventKind::Stopped,
+                                })
+                            }
                             Action::Result(ActionResult { id, data }) => {
-                                BuildEventKind::Task(TaskEvent {
-                                    task_sid: task_sid(id),
+                                let task = get_task(&mut tasks, id);
+                                BuildEventKind::Task(BuildTaskEvent {
+                                    task_id: task.id,
                                     event: match data {
                                         ActionResultData::FileLinked(FileLinked {
                                             bytes_linked,
-                                        }) => TaskEventKind::Updated(TaskUpdate::FileLinked {
-                                            bytes: bytes_linked.try_into().expect("bytes_linked"),
-                                        }),
+                                        }) => BuildTaskEventKind::Updated(
+                                            BuildTaskUpdate::FileLinked {
+                                                bytes: bytes_linked
+                                                    .try_into()
+                                                    .expect("bytes_linked"),
+                                            },
+                                        ),
                                         ActionResultData::BuildLogLine(BuildLogLine { line }) => {
-                                            TaskEventKind::Log(Log {
+                                            BuildTaskEventKind::Log(Log {
                                                 kind: LogKind::Build,
                                                 text: line.into(),
                                                 ..Default::default()
@@ -210,19 +236,24 @@ impl NixCommand {
                                         }
                                         ActionResultData::PostBuildLogLine(BuildLogLine {
                                             line,
-                                        }) => TaskEventKind::Log(Log {
+                                        }) => BuildTaskEventKind::Log(Log {
+                                            level: task.level,
                                             kind: LogKind::PostBuild,
                                             text: line.into(),
                                             ..Default::default()
                                         }),
                                         ActionResultData::UntrustedPath => {
-                                            TaskEventKind::Updated(TaskUpdate::UntrustedPath)
+                                            BuildTaskEventKind::Updated(
+                                                BuildTaskUpdate::UntrustedPath,
+                                            )
                                         }
                                         ActionResultData::CorruptedPath => {
-                                            TaskEventKind::Updated(TaskUpdate::CorruptedPath)
+                                            BuildTaskEventKind::Updated(
+                                                BuildTaskUpdate::CorruptedPath,
+                                            )
                                         }
                                         ActionResultData::SetPhase(SetPhase { phase }) => {
-                                            TaskEventKind::Updated(TaskUpdate::SetPhase {
+                                            BuildTaskEventKind::Updated(BuildTaskUpdate::SetPhase {
                                                 phase: phase.into(),
                                             })
                                         }
@@ -231,12 +262,14 @@ impl NixCommand {
                                             expected,
                                             running,
                                             failed,
-                                        }) => TaskEventKind::Updated(TaskUpdate::Progress {
-                                            done: done.try_into().expect("done"),
-                                            expected: expected.try_into().expect("expected"),
-                                            running: running.try_into().expect("running"),
-                                            failed: failed.try_into().expect("failed"),
-                                        }),
+                                        }) => {
+                                            BuildTaskEventKind::Updated(BuildTaskUpdate::Progress {
+                                                done: done.try_into().expect("done"),
+                                                expected: expected.try_into().expect("expected"),
+                                                running: running.try_into().expect("running"),
+                                                failed: failed.try_into().expect("failed"),
+                                            })
+                                        }
                                         ActionResultData::SetExpected(SetExpected { .. }) => {
                                             continue; // Not terribly interesting.
                                         }
@@ -250,7 +283,7 @@ impl NixCommand {
                                 level,
                                 msg,
                             }) => BuildEventKind::Log(Log {
-                                level: Some(task_level(level)),
+                                level: task_level(level),
                                 kind: LogKind::Message,
                                 file: file.map(|s| s.into()),
                                 column: column.map(|v| v.try_into().expect("column")),
@@ -263,7 +296,7 @@ impl NixCommand {
                             Event::Build(BuildEvent {
                                 timestamp: Utc::now(),
                                 build_id: Uuid::nil(),
-                                event_sid: Uuid::now_v7(),
+                                event_id: Uuid::now_v7(),
                                 event,
                             }),
                         );
@@ -325,52 +358,34 @@ fn main() {
     gorgon_util_cli::main(args.common.output_format, || run(args));
 }
 
-/// Casts a Nix Activity ID into a UUIDv8.
-///
-/// Nix (as of Lix 2.92) generates Activity IDs using:
-///
-/// ```cpp
-/// std::atomic<uint64_t> nextId{0};
-/// Activity::Activity(...): id(nextId++ + (((uint64_t) getpid()) << 32)) { ... }
-/// ```
-///
-/// In other words, it's effectively a tuple of (pid: u32, id: u32) mashed together.
-pub fn task_sid(id: u64) -> Uuid {
-    let id_bytes: [u8; 8] = id.to_be_bytes();
-    let mut data = [0u8; 16];
-    data[0..4].copy_from_slice(&id_bytes[0..4]);
-    data[12..16].copy_from_slice(&id_bytes[4..8]);
-    Uuid::new_v8(data)
-}
-
-pub fn task_level(verbosity: Verbosity) -> TaskLevel {
+pub fn task_level(verbosity: Verbosity) -> BuildTaskLevel {
     match verbosity {
-        Verbosity::Error => TaskLevel::Error,
-        Verbosity::Warn => TaskLevel::Warn,
-        Verbosity::Notice => TaskLevel::Notice,
-        Verbosity::Info => TaskLevel::Info,
-        Verbosity::Talkative => TaskLevel::Talkative,
-        Verbosity::Chatty => TaskLevel::Chatty,
-        Verbosity::Debug => TaskLevel::Debug,
-        Verbosity::Vomit => TaskLevel::Vomit,
+        Verbosity::Error => BuildTaskLevel::Error,
+        Verbosity::Warn => BuildTaskLevel::Warn,
+        Verbosity::Notice => BuildTaskLevel::Notice,
+        Verbosity::Info => BuildTaskLevel::Info,
+        Verbosity::Talkative => BuildTaskLevel::Talkative,
+        Verbosity::Chatty => BuildTaskLevel::Chatty,
+        Verbosity::Debug => BuildTaskLevel::Debug,
+        Verbosity::Vomit => BuildTaskLevel::Vomit,
     }
 }
 
-pub fn task_kind(type_: StderrActivityType) -> Option<TaskKind> {
+pub fn task_kind(type_: StderrActivityType) -> Option<BuildTaskKind> {
     match type_ {
         StderrActivityType::Unknown => None,
-        StderrActivityType::CopyPath => Some(TaskKind::CopyPath),
-        StderrActivityType::FileTransfer => Some(TaskKind::FileTransfer),
-        StderrActivityType::Realise => Some(TaskKind::Realise),
-        StderrActivityType::CopyPaths => Some(TaskKind::CopyPaths),
-        StderrActivityType::Builds => Some(TaskKind::Builds),
-        StderrActivityType::Build => Some(TaskKind::Build),
-        StderrActivityType::OptimiseStore => Some(TaskKind::OptimiseStore),
-        StderrActivityType::VerifyPaths => Some(TaskKind::VerifyPaths),
-        StderrActivityType::Substitute => Some(TaskKind::Substitute),
-        StderrActivityType::QueryPathInfo => Some(TaskKind::QueryPathInfo),
-        StderrActivityType::PostBuildHook => Some(TaskKind::PostBuildHook),
-        StderrActivityType::BuildWaiting => Some(TaskKind::BuildWaiting),
+        StderrActivityType::CopyPath => Some(BuildTaskKind::CopyPath),
+        StderrActivityType::FileTransfer => Some(BuildTaskKind::FileTransfer),
+        StderrActivityType::Realise => Some(BuildTaskKind::Realise),
+        StderrActivityType::CopyPaths => Some(BuildTaskKind::CopyPaths),
+        StderrActivityType::Builds => Some(BuildTaskKind::Builds),
+        StderrActivityType::Build => Some(BuildTaskKind::Build),
+        StderrActivityType::OptimiseStore => Some(BuildTaskKind::OptimiseStore),
+        StderrActivityType::VerifyPaths => Some(BuildTaskKind::VerifyPaths),
+        StderrActivityType::Substitute => Some(BuildTaskKind::Substitute),
+        StderrActivityType::QueryPathInfo => Some(BuildTaskKind::QueryPathInfo),
+        StderrActivityType::PostBuildHook => Some(BuildTaskKind::PostBuildHook),
+        StderrActivityType::BuildWaiting => Some(BuildTaskKind::BuildWaiting),
     }
 }
 
