@@ -47,8 +47,8 @@ pub async fn run(
     let app = Router::new()
         .route("/", get(root))
         .route("/projects", post(project_create))
-        .route("/projects/{project}", get(project_get))
-        .route("/projects/{project}/builds", get(project_builds_list))
+        .route("/projects/{project}", get(project))
+        .route("/projects/{project}/builds", get(project_builds))
         .route("/projects/{project}/builds", post(project_build_create))
         .route(
             "/workers/{worker}/internal/allocate-build",
@@ -180,7 +180,7 @@ async fn project_create(
     .await
 }
 
-async fn project_get(
+async fn project(
     State(state): State<S>,
     Path(project): Path<String>,
 ) -> Result<JsonResponse<api::ProjectGetResponse<'static>>> {
@@ -192,7 +192,7 @@ async fn project_get(
     .await
 }
 
-async fn project_builds_list(
+async fn project_builds(
     State(state): State<S>,
     Path(project): Path<String>,
 ) -> Result<JsonResponse<api::ProjectBuildsResponse<'static>>> {
