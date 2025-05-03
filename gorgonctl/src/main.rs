@@ -7,7 +7,7 @@
 #![allow(clippy::result_large_err)]
 
 use clap::{Parser, Subcommand};
-use gorgond_client::{api, models, Client};
+use gorgond_client::{api, models, Client, Uuid};
 use miette::{IntoDiagnostic, NamedSource, Result};
 use std::{borrow::Cow, fmt::Debug, io::Write};
 
@@ -84,12 +84,18 @@ enum Command {
         #[command(subcommand)]
         cmd: ProjectCommand,
     },
+    /// Manage Builds.
+    Build {
+        #[command(subcommand)]
+        cmd: BuildCommand,
+    },
 }
 impl Command {
     pub async fn run(self, args: &Args, client: Client) -> Result<()> {
         match self {
             Command::Ping(cmd) => cmd.run(args, client).await,
             Command::Project { cmd } => cmd.run(args, client.projects()).await,
+            Command::Build { cmd } => cmd.run(args, client.builds()).await,
         }
     }
 }
@@ -194,6 +200,22 @@ impl ProjectBuildCommand {
                     .await?
                     .get(),
             ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum BuildCommand {
+    /// List builds.
+    List,
+    /// Get a build.
+    Get { id: Uuid },
+}
+impl BuildCommand {
+    pub async fn run(self, args: &Args, builds: api::BuildsClient<'_>) -> Result<()> {
+        match self {
+            Self::List => args.dump(builds.list(api::BuildsRequest {}).await?.get()),
+            Self::Get { id } => args.dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
         }
     }
 }

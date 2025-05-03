@@ -170,6 +170,9 @@ impl Client {
     pub fn projects(&self) -> api::ProjectsClient {
         api::ProjectsClient::new(self)
     }
+    pub fn builds(&self) -> api::BuildsClient {
+        api::BuildsClient::new(self)
+    }
     pub fn workers(&self) -> api::WorkersClient {
         api::WorkersClient::new(self)
     }

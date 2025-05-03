@@ -5,8 +5,13 @@
 use std::collections::BTreeMap;
 
 use chrono::prelude::*;
-use diesel::{prelude::*, Selectable};
-use diesel_async::RunQueryDsl;
+use diesel::{
+    dsl::{self, auto_type},
+    pg::Pg,
+    prelude::*,
+    Selectable,
+};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
 use either::Either;
 use gorgond_client::{api, events, models as client};
@@ -14,52 +19,79 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use yoke::Yokeable;
 
-macro_rules! slugged {
+use crate::schema;
+
+macro_rules! impl_model {
     ($model:ident, $schema:ident) => {
         impl $model {
-            pub async fn get<C: diesel_async::AsyncConnection<Backend = diesel::pg::Pg>>(
-                conn: &mut C,
-                ident: &str,
-            ) -> Result<Self, api::ApiError> {
-                use crate::schema::$schema;
-                let q = $schema::table.select($model::as_select());
-                if let Ok(id) = Uuid::parse_str(ident) {
-                    q.filter($schema::id.eq(id)).first::<Self>(conn).await
-                } else {
-                    q.filter($schema::slug.eq(ident)).first::<Self>(conn).await
-                }
-                .optional()?
-                .ok_or_else(|| api::ApiError::NotFoundByKey {
-                    model: api::Model::$model,
-                    key: ident.to_string(),
-                })
+            pub fn all() -> dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> {
+                schema::$schema::table.select(Self::as_select())
             }
 
-            pub async fn get_id<C: diesel_async::AsyncConnection<Backend = diesel::pg::Pg>>(
-                conn: &mut C,
-                ident: &str,
-            ) -> Result<Uuid, api::ApiError> {
-                if let Ok(id) = Uuid::parse_str(ident) {
-                    Ok(id)
-                } else {
-                    use crate::schema::$schema;
-                    $schema::table
-                        .select($schema::id)
-                        .filter($schema::slug.eq(&ident))
-                        .first::<Uuid>(conn)
-                        .await
-                        .optional()?
-                        .ok_or_else(|| api::ApiError::NotFoundByKey {
-                            model: api::Model::$model,
-                            key: ident.to_string(),
-                        })
-                }
+            #[auto_type(no_type_alias)]
+            pub fn ids<I: IntoIterator<Item = Uuid>>(ids: I) -> _ {
+                let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
+                let it: I::IntoIter = ids.into_iter();
+                q.filter(schema::$schema::id.eq_any(it))
+            }
+
+            pub async fn get(
+                conn: &mut AsyncPgConnection,
+                id: Uuid,
+            ) -> Result<Self, api::ApiError> {
+                Self::all()
+                    .find(id)
+                    .first(conn)
+                    .await
+                    .optional()?
+                    .ok_or_else(|| api::ApiError::ModelNotFound {
+                        model: api::Model::$model,
+                        key: Some(id.to_string()),
+                    })
             }
         }
     };
 }
-slugged!(Project, projects);
-slugged!(Worker, workers);
+macro_rules! impl_model_slug {
+    ($model:ident, $schema:ident) => {
+        impl $model {
+            #[auto_type(no_type_alias)]
+            pub fn with_ident(ident: &str) -> _ {
+                let id: Uuid = Uuid::parse_str(&ident).unwrap_or_default();
+                let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
+                q.find(id).or_filter(schema::$schema::slug.eq(ident))
+            }
+
+            pub async fn get_ident(
+                conn: &mut AsyncPgConnection,
+                ident: &str,
+            ) -> Result<Self, api::ApiError> {
+                Self::with_ident(ident)
+                    .first(conn)
+                    .await
+                    .optional()?
+                    .ok_or_else(|| api::ApiError::ModelNotFound {
+                        model: api::Model::$model,
+                        key: Some(ident.into()),
+                    })
+            }
+            pub async fn get_id(
+                conn: &mut AsyncPgConnection,
+                ident: &str,
+            ) -> Result<Uuid, api::ApiError> {
+                Self::with_ident(ident)
+                    .select(schema::$schema::id)
+                    .first(conn)
+                    .await
+                    .optional()?
+                    .ok_or_else(|| api::ApiError::ModelNotFound {
+                        model: api::Model::$model,
+                        key: Some(ident.into()),
+                    })
+            }
+        }
+    };
+}
 
 #[derive(
     Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable, Identifiable,
@@ -73,6 +105,9 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+impl_model!(Project, projects);
+impl_model_slug!(Project, projects);
+
 impl Project {
     pub fn from_spec(v: client::ProjectSpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
         Self {
@@ -116,6 +151,22 @@ pub struct Worker {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+impl_model!(Worker, workers);
+impl_model_slug!(Worker, workers);
+
+impl Worker {
+    pub fn to_client(self) -> client::Worker<'static> {
+        client::Worker {
+            id: self.id,
+            spec: client::WorkerSpec {
+                slug: self.slug.into(),
+                name: self.name.into(),
+            },
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, DbEnum)]
@@ -163,6 +214,7 @@ pub struct BuildInput {
     pub key: String,
     pub source: String,
 }
+impl_model!(BuildInput, build_inputs);
 
 #[derive(
     Debug,
@@ -194,6 +246,8 @@ pub struct Build {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
 }
+impl_model!(Build, builds);
+
 impl Build {
     pub fn from_spec(
         v: client::BuildSpec<'static>,
@@ -372,6 +426,8 @@ pub struct BuildTask {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
 }
+impl_model!(BuildTask, build_tasks);
+
 impl BuildTask {
     pub fn from_client(task: client::BuildTask) -> Self {
         let now = Utc::now();
@@ -431,6 +487,7 @@ pub struct BuildEvent {
     pub created_at: DateTime<Utc>,
     pub timestamp: DateTime<Utc>,
 }
+impl_model!(BuildEvent, build_events);
 
 impl BuildEvent {
     pub fn from_client(e: events::BuildEvent) -> Either<(Self, Option<BuildTask>), BuildLog> {
@@ -555,6 +612,8 @@ pub struct BuildLog {
     pub created_at: DateTime<Utc>,
     pub timestamp: DateTime<Utc>,
 }
+impl_model!(BuildLog, build_logs);
+
 impl BuildLog {
     fn from_partial_event(event: BuildEvent, log: events::Log) -> Self {
         Self {

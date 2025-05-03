@@ -16,6 +16,7 @@ use diesel::prelude::*;
 use diesel_async::{
     pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
+use futures::stream::TryStreamExt;
 use gorgond_client::{
     api::{self, ApiError},
     Uuid, Yoke, Yokeable,
@@ -50,6 +51,8 @@ pub async fn run(
         .route("/projects/{project}", get(project))
         .route("/projects/{project}/builds", get(project_builds))
         .route("/projects/{project}/builds", post(project_build_create))
+        .route("/builds", get(builds))
+        .route("/builds/{build_id}", get(build))
         .route(
             "/workers/{worker}/internal/allocate-build",
             put(worker_internal_allocate_build),
@@ -186,7 +189,9 @@ async fn project(
 ) -> Result<JsonResponse<api::ProjectGetResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
         Ok(JsonResponse(api::ProjectGetResponse {
-            project: models::Project::get(conn, &project).await?.to_client(),
+            project: models::Project::get_ident(conn, &project)
+                .await?
+                .to_client(),
         }))
     })
     .await
@@ -197,7 +202,7 @@ async fn project_builds(
     Path(project): Path<String>,
 ) -> Result<JsonResponse<api::ProjectBuildsResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
-        let project = models::Project::get(conn, &project).await?;
+        let project = models::Project::get_ident(conn, &project).await?;
         let builds = models::Build::belonging_to(&project)
             .load::<models::Build>(conn)
             .await?;
@@ -244,6 +249,61 @@ async fn project_build_create(
         };
         Ok(JsonResponse(api::ProjectBuildCreateResponse {
             build: build.to_client(inputs),
+        }))
+    })
+    .await
+}
+
+async fn builds(State(state): State<S>) -> Result<JsonResponse<api::BuildsResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let builds = models::Build::all().get_results(conn).await?;
+        let build_inputs = models::BuildInput::belonging_to(&builds)
+            .load::<models::BuildInput>(conn)
+            .await?
+            .grouped_by(&builds);
+
+        Ok(JsonResponse(api::BuildsResponse {
+            workers: models::Worker::ids(builds.iter().filter_map(|b| b.worker_id))
+                .load_stream(conn)
+                .await?
+                .map_ok(|w| (w.id, w.to_client()))
+                .try_collect()
+                .await?,
+            projects: models::Project::ids(builds.iter().map(|b| b.project_id))
+                .load_stream(conn)
+                .await?
+                .map_ok(|p| (p.id, p.to_client()))
+                .try_collect()
+                .await?,
+            builds: builds
+                .into_iter()
+                .zip(build_inputs)
+                .map(|(b, bi)| b.to_client(bi))
+                .collect(),
+        }))
+    })
+    .await
+}
+
+async fn build(
+    State(state): State<S>,
+    Path(build_id): Path<Uuid>,
+) -> Result<JsonResponse<api::BuildResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let build = models::Build::get(conn, build_id).await?;
+        let build_inputs = models::BuildInput::belonging_to(&build)
+            .load::<models::BuildInput>(conn)
+            .await?;
+
+        Ok(JsonResponse(api::BuildResponse {
+            worker: match build.worker_id {
+                Some(worker_id) => Some(models::Worker::get(conn, worker_id).await?.to_client()),
+                None => None,
+            },
+            project: models::Project::get(conn, build.project_id)
+                .await?
+                .to_client(),
+            build: build.to_client(build_inputs),
         }))
     })
     .await

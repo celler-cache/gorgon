@@ -2,14 +2,18 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::fmt::Display;
+use std::{collections::BTreeMap, fmt::Display};
 
-use derive_more::Constructor;
+use derive_more::{Constructor, Deref, DerefMut};
 use miette::Diagnostic;
-use ownable::{IntoOwned, ToOwned};
+use ownable::{
+    traits::{IntoOwned, ToOwned},
+    IntoOwned, ToOwned,
+};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display as EnumDisplay, IntoStaticStr};
+use uuid::Uuid;
 use yoke::Yokeable;
 
 use crate::{models, Client, Request, Result, Yoke};
@@ -19,6 +23,10 @@ pub enum Model {
     Project,
     Worker,
     Build,
+    BuildInput,
+    BuildTask,
+    BuildEvent,
+    BuildLog,
     #[serde(untagged)]
     Unknown(String),
 }
@@ -107,9 +115,13 @@ pub enum ApiError {
         error: ApiErrorSource,
     },
 
-    #[serde(rename = "tag:NotFoundByKey")]
-    #[error("{model} not found: '{key}'")]
-    NotFoundByKey { model: Model, key: String },
+    #[serde(rename = "tag:ModelNotFound")]
+    #[error(fmt=Self::format_model_not_found)]
+    ModelNotFound {
+        model: Model,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        key: Option<String>,
+    },
     #[serde(rename = "tag:NoWorkAvailable")]
     #[error("No work available")]
     #[diagnostic(
@@ -123,6 +135,18 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    fn format_model_not_found(
+        model: &Model,
+        key: &Option<String>,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        write!(f, "{model} not found")?;
+        if let Some(key) = key {
+            write!(f, ": {key}")?;
+        }
+        Ok(())
+    }
+
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
@@ -135,7 +159,7 @@ impl ApiError {
             Self::DatabaseConnection { .. } | Self::DatabaseQueryError { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            Self::NotFoundByKey { .. } => StatusCode::NOT_FOUND,
+            Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::NoWorkAvailable => StatusCode::NOT_FOUND,
             Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -315,6 +339,50 @@ impl Diagnostic for ApiErrorSource {
     }
 }
 
+/// Workaround for BTreeMap<Uuid, V> not being ToOwned/IntoOwned.
+#[derive(Debug, Clone, Serialize, Deserialize, Deref, DerefMut)]
+pub struct OwnableMap<K: Copy + Ord, V: Clone>(BTreeMap<K, V>);
+
+impl<K: Copy + Ord, V: Clone> Default for OwnableMap<K, V> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<K: Copy + Ord, V: Clone> Extend<(K, V)> for OwnableMap<K, V> {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        self.0.extend(iter)
+    }
+}
+
+impl<K: Copy + Ord, V: Clone + ToOwned> ToOwned for OwnableMap<K, V>
+where
+    V::Owned: Clone,
+{
+    type Owned = OwnableMap<K, <V as ToOwned>::Owned>;
+    #[inline]
+    fn to_owned(&self) -> Self::Owned {
+        OwnableMap::<K, <V as ToOwned>::Owned>(
+            self.0.iter().map(|(k, v)| (*k, v.to_owned())).collect(),
+        )
+    }
+}
+impl<K: Copy + Ord, V: Clone + IntoOwned> IntoOwned for OwnableMap<K, V>
+where
+    V::Owned: Clone,
+{
+    type Owned = OwnableMap<K, <V as IntoOwned>::Owned>;
+    #[inline]
+    fn into_owned(self) -> Self::Owned {
+        OwnableMap::<K, <V as IntoOwned>::Owned>(
+            self.0
+                .into_iter()
+                .map(|(k, v)| (k, v.into_owned()))
+                .collect(),
+        )
+    }
+}
+
 // The block is only included here for readability. If it starts causing problems, just yeet it and
 // just use the macro to implement Request, like it did before I got fancy with it.
 macro_rules! mkrequest {
@@ -440,6 +508,58 @@ impl ProjectsBuildsClient<'_> {
     gen_endpoints!("projects/{project_slug}/builds", (project_slug), {
         fn list(ProjectBuildsRequest) -> (GET, "");
         fn create(ProjectBuildCreateRequest<'_>) -> (POST, "");
+    });
+}
+
+mkrequest!(BuildsRequest, BuildsResponse<'static>, {
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildsRequest {}
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildsResponse<'a> {
+        #[serde(borrow)]
+        pub workers: OwnableMap<Uuid, models::Worker<'a>>,
+        #[serde(borrow)]
+        pub projects: OwnableMap<Uuid, models::Project<'a>>,
+        #[serde(borrow)]
+        pub builds: Vec<models::Build<'a>>,
+    }
+});
+
+#[derive(Debug, Constructor)]
+pub struct BuildsClient<'a> {
+    client: &'a Client,
+}
+impl<'a> BuildsClient<'a> {
+    pub fn id(&self, id: Uuid) -> BuildClient<'a> {
+        BuildClient::new(self.client, id)
+    }
+    gen_endpoints!("builds", (), {
+        fn list(BuildsRequest) -> (GET, "");
+    });
+}
+
+mkrequest!(BuildRequest, BuildResponse<'static>, {
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildRequest {}
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildResponse<'a> {
+        #[serde(borrow)]
+        pub worker: Option<models::Worker<'a>>,
+        #[serde(borrow)]
+        pub project: models::Project<'a>,
+        #[serde(borrow)]
+        pub build: models::Build<'a>,
+    }
+});
+
+#[derive(Debug, Constructor)]
+pub struct BuildClient<'a> {
+    client: &'a Client,
+    build_id: Uuid,
+}
+impl BuildClient<'_> {
+    gen_endpoints!("builds/{build_id}", (build_id), {
+        fn get(BuildRequest) -> (GET, "");
     });
 }
 
