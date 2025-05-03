@@ -16,7 +16,7 @@ use strum::{AsRefStr, Display as EnumDisplay, IntoStaticStr};
 use uuid::Uuid;
 use yoke::Yokeable;
 
-use crate::{models, Client, Request, Result, Yoke};
+use crate::{events, models, Client, Request, Result, Yoke};
 
 #[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
@@ -551,6 +551,15 @@ mkrequest!(BuildRequest, BuildResponse<'static>, {
         pub build: models::Build<'a>,
     }
 });
+mkrequest!(BuildEventsRequest, BuildEventsResponse<'static>, {
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildEventsRequest {}
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildEventsResponse<'a> {
+        #[serde(borrow)]
+        pub events: Vec<events::BuildEvent<'a>>,
+    }
+});
 
 #[derive(Debug, Constructor)]
 pub struct BuildClient<'a> {
@@ -560,6 +569,7 @@ pub struct BuildClient<'a> {
 impl BuildClient<'_> {
     gen_endpoints!("builds/{build_id}", (build_id), {
         fn get(BuildRequest) -> (GET, "");
+        fn events(BuildEventsRequest) -> (GET, "events");
     });
 }
 

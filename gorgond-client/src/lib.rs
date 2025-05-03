@@ -55,6 +55,8 @@ pub enum RequestErrorKind {
         #[source_code] NamedSource<String>,
         #[source] serde_json::Error,
     ),
+    #[error("Error serializing query string")]
+    SerializeQuery(#[from] serde_urlencoded::ser::Error),
 }
 
 pub trait Request: Serialize + Debug {
@@ -64,31 +66,41 @@ pub trait Request: Serialize + Debug {
 fn call<R: Request>(
     client: &reqwest::Client,
     method: Method,
-    url: Url,
+    mut url: Url,
     req: R,
 ) -> impl Future<Output = Result<Yoke<R::Response>, Error>> + Send {
     // reqwest::Client already has an internal Arc.
     let client = client.clone();
 
     // Serialize outside the future, avoiding the need to send references across threads.
-    let body_r = serde_json::to_string_pretty(&req).map_err(|err| {
-        let src = format!("{req:#?}");
-        RequestErrorKind::Json(
-            SourceSpan::new(0.into(), src.len()),
-            NamedSource::new(std::any::type_name_of_val(&req), src),
-            err,
-        )
-    });
+    // For GET requests, we serialize req into a query string, else a JSON body.
+    let body_r = match method {
+        Method::GET => serde_urlencoded::to_string(&req).map_err(RequestErrorKind::SerializeQuery),
+        _ => serde_json::to_string_pretty(&req).map_err(|err| {
+            let src = format!("{req:#?}");
+            RequestErrorKind::Json(
+                SourceSpan::new(0.into(), src.len()),
+                NamedSource::new(std::any::type_name_of_val(&req), src),
+                err,
+            )
+        }),
+    };
 
     // Then go async.
     async move {
         // Inner closure returns a RequestErrorKind, outer makes it a proper RequestError.
         async {
-            let req = client
-                .request(method.clone(), url.clone())
-                .body(body_r?)
-                .header(header::CONTENT_TYPE, "application/json")
-                .build()?;
+            let req = match method {
+                Method::GET => {
+                    url.set_query(Some(&body_r?));
+                    client.request(method.clone(), url.clone())
+                }
+                _ => client
+                    .request(method.clone(), url.clone())
+                    .body(body_r?)
+                    .header(header::CONTENT_TYPE, "application/json"),
+            }
+            .build()?;
             let rsp = client.execute(req).await?;
             let status = rsp.status();
             let body = rsp.text().await?;

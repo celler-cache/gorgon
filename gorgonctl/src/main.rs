@@ -210,12 +210,21 @@ enum BuildCommand {
     List,
     /// Get a build.
     Get { id: Uuid },
+    /// Get build events.
+    Events { id: Uuid },
 }
 impl BuildCommand {
     pub async fn run(self, args: &Args, builds: api::BuildsClient<'_>) -> Result<()> {
         match self {
             Self::List => args.dump(builds.list(api::BuildsRequest {}).await?.get()),
             Self::Get { id } => args.dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
+            Self::Events { id } => args.dump(
+                builds
+                    .id(id)
+                    .events(api::BuildEventsRequest {})
+                    .await?
+                    .get(),
+            ),
         }
     }
 }

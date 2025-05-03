@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use chrono::prelude::*;
 use diesel::{
@@ -444,6 +444,20 @@ impl BuildTask {
             ended_at: task.ended_at,
         }
     }
+    pub fn to_client(self) -> client::BuildTask<'static> {
+        client::BuildTask {
+            id: self.id,
+            parent_id: self.parent_id,
+            build_id: self.build_id,
+            name: self.name.into(),
+            kind: self.kind.map(|v| v.into()),
+            level: self.level.into(),
+            created_at: Some(self.created_at),
+            updated_at: Some(self.updated_at),
+            started_at: self.started_at.unwrap_or(self.created_at),
+            ended_at: self.ended_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, DbEnum)]
@@ -556,6 +570,47 @@ impl BuildEvent {
         };
         Either::Left((slf, task))
     }
+    pub fn to_client(
+        self,
+        task: Option<&client::BuildTask<'static>>,
+    ) -> events::BuildEvent<'static> {
+        let for_task = |event| {
+            events::BuildEventKind::Task(events::BuildTaskEvent {
+                task_id: self.task_id.unwrap_or_default(),
+                event,
+            })
+        };
+        let update = |update| for_task(events::BuildTaskEventKind::Updated(update));
+        events::BuildEvent {
+            timestamp: self.timestamp,
+            build_id: self.build_id,
+            event_id: self.id,
+            event: match self.kind {
+                BuildEventKind::Started => match task {
+                    Some(task) => for_task(events::BuildTaskEventKind::Started(task.clone())),
+                    None => events::BuildEventKind::Started,
+                },
+                BuildEventKind::Stopped => match task {
+                    Some(_) => for_task(events::BuildTaskEventKind::Stopped),
+                    None => events::BuildEventKind::Stopped,
+                },
+                BuildEventKind::FileLinked => update(events::BuildTaskUpdate::FileLinked {
+                    bytes: self.i0.unwrap_or_default() as _,
+                }),
+                BuildEventKind::UntrustedPath => update(events::BuildTaskUpdate::UntrustedPath),
+                BuildEventKind::CorruptedPath => update(events::BuildTaskUpdate::CorruptedPath),
+                BuildEventKind::SetPhase => update(events::BuildTaskUpdate::SetPhase {
+                    phase: self.s0.into(),
+                }),
+                BuildEventKind::Progress => update(events::BuildTaskUpdate::Progress {
+                    done: self.i0.unwrap_or_default() as _,
+                    expected: self.i1.unwrap_or_default() as _,
+                    running: self.i2.unwrap_or_default() as _,
+                    failed: self.i3.unwrap_or_default() as _,
+                }),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, DbEnum)]
@@ -628,6 +683,21 @@ impl BuildLog {
             txt: log.text.into(),
             created_at: event.created_at,
             timestamp: event.timestamp,
+        }
+    }
+    pub fn to_client(self) -> events::BuildEvent<'static> {
+        events::BuildEvent {
+            timestamp: self.timestamp,
+            build_id: self.build_id,
+            event_id: self.id,
+            event: events::BuildEventKind::Log(events::Log {
+                level: self.level.into(),
+                kind: self.kind.into(),
+                file: Some(Cow::<str>::Owned(self.file)).filter(|s| !s.is_empty()),
+                column: self.col.map(|v| v as _),
+                line: self.line.map(|v| v as _),
+                text: self.txt.into(),
+            }),
         }
     }
 }

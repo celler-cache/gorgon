@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::fmt::Debug;
+use std::{collections::BTreeMap, fmt::Debug};
 
 use axum::{
     extract::{FromRequest, Path, State},
@@ -19,7 +19,7 @@ use diesel_async::{
 use futures::stream::TryStreamExt;
 use gorgond_client::{
     api::{self, ApiError},
-    Uuid, Yoke, Yokeable,
+    events, models as client, Uuid, Yoke, Yokeable,
 };
 use miette::{Context, Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,7 @@ pub async fn run(
         .route("/projects/{project}/builds", post(project_build_create))
         .route("/builds", get(builds))
         .route("/builds/{build_id}", get(build))
+        .route("/builds/{build_id}/events", get(build_events))
         .route(
             "/workers/{worker}/internal/allocate-build",
             put(worker_internal_allocate_build),
@@ -305,6 +306,47 @@ async fn build(
                 .to_client(),
             build: build.to_client(build_inputs),
         }))
+    })
+    .await
+}
+
+async fn build_events(
+    State(state): State<S>,
+    Path(build_id): Path<Uuid>,
+) -> Result<JsonResponse<api::BuildEventsResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let build = models::Build::get(conn, build_id).await?;
+
+        // Events are split up across two tables - fetch both.
+        let build_events = models::BuildEvent::belonging_to(&build)
+            .load::<models::BuildEvent>(conn)
+            .await?;
+        let build_logs = models::BuildLog::belonging_to(&build)
+            .load::<models::BuildLog>(conn)
+            .await?;
+
+        // Then tasks mentioned in them; we need these to reconstruct 'task started' events.
+        let task_ids = build_events
+            .iter()
+            .filter_map(|e| e.task_id)
+            .chain(build_logs.iter().filter_map(|l| l.task_id));
+        let tasks: BTreeMap<Uuid, client::BuildTask> = models::BuildTask::ids(task_ids)
+            .load_stream(conn)
+            .await?
+            .map_ok(|t| (t.id, t.to_client()))
+            .try_collect()
+            .await?;
+
+        // Merge both kinds of events into one list of client events, sorted by timestamp.
+        let mut events =
+            Vec::<events::BuildEvent>::with_capacity(build_events.len() + build_logs.len());
+        events.extend(build_events.into_iter().map(|e| {
+            let task = e.task_id.and_then(|tid| tasks.get(&tid));
+            e.to_client(task)
+        }));
+        events.sort_unstable_by_key(|e| e.timestamp);
+
+        Ok(JsonResponse(api::BuildEventsResponse { events }))
     })
     .await
 }
