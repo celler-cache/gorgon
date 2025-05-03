@@ -52,7 +52,7 @@ pub struct Worker<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToOwned, IntoOwned)]
+#[derive(Debug, Display, Clone, Copy, Serialize, Deserialize, ToOwned, IntoOwned)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildResult {
     Success,

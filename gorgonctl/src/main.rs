@@ -6,10 +6,13 @@
 // returning Error if it's not silenced like this.
 #![allow(clippy::result_large_err)]
 
+use std::{borrow::Cow, fmt::Debug};
+
 use clap::{Parser, Subcommand};
 use gorgond_client::{api, models, Client, Uuid};
-use miette::{IntoDiagnostic, NamedSource, Result};
-use std::{borrow::Cow, fmt::Debug, io::Write};
+use miette::Result;
+
+pub mod output;
 
 fn parse_key_value(s: &str) -> Result<(Cow<'static, str>, Cow<'static, str>), clap::Error> {
     s.split_once("=")
@@ -44,6 +47,9 @@ struct Args {
         default_value = "http://localhost:9999/"
     )]
     base_url: url::Url,
+
+    #[clap(flatten)]
+    out: output::OutputArgs,
 }
 
 impl Args {
@@ -59,19 +65,6 @@ impl Args {
 
     fn new_client(&self) -> Result<Client> {
         Ok(Client::new(self.base_url.clone())?)
-    }
-
-    fn dump<V: serde::Serialize + Debug>(&self, v: V) -> Result<()> {
-        #[derive(Debug, thiserror::Error, miette::Diagnostic)]
-        #[error("Serializing output failed")]
-        struct DumpJsonError(
-            #[source] serde_json::Error,
-            #[source_code] NamedSource<String>,
-        );
-        let mut stdout = std::io::stdout();
-        colored_json::write_colored_json(&v, &mut stdout)
-            .map_err(|err| DumpJsonError(err, NamedSource::new("", format!("{v:#?}"))))?;
-        stdout.write_all(b"\n").into_diagnostic()
     }
 }
 
@@ -104,7 +97,7 @@ impl Command {
 struct Ping;
 impl Ping {
     pub async fn run(self, args: &Args, client: Client) -> Result<()> {
-        args.dump(client.root(api::RootRequest {}).await?.get())
+        args.out.dump(client.root(api::RootRequest {}).await?.get())
     }
 }
 
@@ -127,7 +120,7 @@ enum ProjectCommand {
 impl ProjectCommand {
     pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
         match self {
-            Self::Create { project } => args.dump(
+            Self::Create { project } => args.out.dump(
                 projects
                     .create(api::ProjectCreateRequest {
                         project: models::ProjectSpec {
@@ -138,7 +131,7 @@ impl ProjectCommand {
                     .await?
                     .get(),
             ),
-            Self::Get { slug } => args.dump(
+            Self::Get { slug } => args.out.dump(
                 projects
                     .slug(&slug)
                     .get(api::ProjectGetRequest {})
@@ -191,8 +184,11 @@ enum ProjectBuildCommand {
 impl ProjectBuildCommand {
     pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
         match self {
-            Self::List => args.dump(builds.list(api::ProjectBuildsRequest {}).await?.get()),
-            Self::Create { build } => args.dump(
+            Self::List => args.out.with(
+                |r| output::build_table(r.builds.iter().map(|b| (b, Some(&r.project), None))),
+                builds.list(api::ProjectBuildsRequest {}).await?.get(),
+            ),
+            Self::Create { build } => args.out.dump(
                 builds
                     .create(api::ProjectBuildCreateRequest {
                         build: build.into(),
@@ -216,9 +212,22 @@ enum BuildCommand {
 impl BuildCommand {
     pub async fn run(self, args: &Args, builds: api::BuildsClient<'_>) -> Result<()> {
         match self {
-            Self::List => args.dump(builds.list(api::BuildsRequest {}).await?.get()),
-            Self::Get { id } => args.dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
-            Self::Events { id } => args.dump(
+            Self::List => args.out.with(
+                |r| {
+                    output::build_table(r.builds.iter().map(|b| {
+                        (
+                            b,
+                            r.projects.get(&b.project_id),
+                            b.worker_id.and_then(|id| r.workers.get(&id)),
+                        )
+                    }))
+                },
+                builds.list(api::BuildsRequest {}).await?.get(),
+            ),
+            Self::Get { id } => args
+                .out
+                .dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
+            Self::Events { id } => args.out.dump(
                 builds
                     .id(id)
                     .events(api::BuildEventsRequest {})
