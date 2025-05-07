@@ -3,6 +3,7 @@
 -- SPDX-License-Identifier: EUPL-1.2
 
 CREATE TYPE build_task_kind AS ENUM (
+    'helper',
     'realise',
     'builds',
     'build',

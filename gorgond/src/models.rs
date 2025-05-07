@@ -349,6 +349,7 @@ impl From<BuildTaskLevel> for client::BuildTaskLevel {
 #[derive(Debug, Serialize, Deserialize, DbEnum)]
 #[db_enum(existing_type_path = "crate::schema::sql_types::BuildTaskKind")]
 pub enum BuildTaskKind {
+    Helper,
     Realise,
     Builds,
     Build,
@@ -365,6 +366,7 @@ pub enum BuildTaskKind {
 impl From<client::BuildTaskKind> for BuildTaskKind {
     fn from(kind: client::BuildTaskKind) -> Self {
         match kind {
+            client::BuildTaskKind::Helper => Self::Helper,
             client::BuildTaskKind::Realise => Self::Realise,
             client::BuildTaskKind::Builds => Self::Builds,
             client::BuildTaskKind::Build => Self::Build,
@@ -383,6 +385,7 @@ impl From<client::BuildTaskKind> for BuildTaskKind {
 impl From<BuildTaskKind> for client::BuildTaskKind {
     fn from(kind: BuildTaskKind) -> Self {
         match kind {
+            BuildTaskKind::Helper => Self::Helper,
             BuildTaskKind::Realise => Self::Realise,
             BuildTaskKind::Builds => Self::Builds,
             BuildTaskKind::Build => Self::Build,

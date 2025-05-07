@@ -376,6 +376,7 @@ fn task_name<'a>(task: &'a BuildTask<'a>) -> &'a str {
         "" => match task.kind {
             None => "???",
             Some(kind) => match kind {
+                models::BuildTaskKind::Helper => "Invoking Helper...",
                 models::BuildTaskKind::Realise => "Realising...",
                 models::BuildTaskKind::Builds => "Running builds...",
                 models::BuildTaskKind::Build => "Building...",
@@ -397,6 +398,7 @@ fn task_icon(task: &BuildTask) -> &'static str {
     match task.kind {
         None => "❔",
         Some(kind) => match kind {
+            models::BuildTaskKind::Helper => "📞",
             models::BuildTaskKind::Realise => "🐶",
             models::BuildTaskKind::Builds => "🛠️",
             models::BuildTaskKind::Build => "🔨",

@@ -180,6 +180,7 @@ impl From<BuildTaskLevel> for log::Level {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BuildTaskKind {
+    Helper,
     Realise,
     Builds,
     Build,

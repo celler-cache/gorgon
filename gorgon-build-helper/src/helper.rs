@@ -16,7 +16,7 @@ use std::{
 use derive_more::{Deref, DerefMut, From};
 use gorgond_client::{
     events::{BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind},
-    models::BuildTask,
+    models::{BuildTask, BuildTaskKind},
     Uuid,
 };
 use log::{debug, error, info, log_enabled, trace, warn};
@@ -340,6 +340,7 @@ impl Helper {
             task: task.unwrap_or_else(|| BuildTask {
                 id: Uuid::now_v7(),
                 name: self.name().into_owned().into(),
+                kind: Some(BuildTaskKind::Helper),
                 ..Default::default()
             }),
             helper: self,
