@@ -406,6 +406,7 @@ impl TaskHelper {
         let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
         let join_stderr = std::thread::spawn({
             let name = self.task.name.to_string();
+            let task_id = self.task.id;
             let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
             move || -> Result<(), StderrError> {
                 let handler = event_handler();
@@ -416,7 +417,7 @@ impl TaskHelper {
                         return Ok(());
                     }
                     if buf.starts_with('{') {
-                        let event: Event = match serde_json::from_str(&buf) {
+                        let mut event: Event = match serde_json::from_str(&buf) {
                             Err(err) if err.is_eof() => {
                                 // Keep reading lines until we've got a complete JSON payload.
                                 continue;
@@ -427,9 +428,28 @@ impl TaskHelper {
                             ))),
                             Ok(event) => Ok(event),
                         }?;
+
+                        // Assign top-level child tasks the correct parent.
+                        if let Event::Build(BuildEvent {
+                            event:
+                                BuildEventKind::Task(BuildTaskEvent {
+                                    event:
+                                        BuildTaskEventKind::Started(BuildTask {
+                                            ref mut parent_id, ..
+                                        }),
+                                    ..
+                                }),
+                            ..
+                        }) = &mut event
+                        {
+                            parent_id.get_or_insert(task_id);
+                        }
+
+                        // Send errors back through the error channel.
                         if let Event::Error(err) = &event {
                             send_err.try_send(err.clone())?;
                         }
+
                         handler.handle(&name, event);
                     } else {
                         warn!("stderr: {}", buf.trim_end());
