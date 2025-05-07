@@ -1713,6 +1713,7 @@ dependencies = [
 name = "gorgonctl"
 version = "0.1.0"
 dependencies = [
+ "bytesize",
  "chrono",
  "clap",
  "colored_json",
@@ -1720,6 +1721,7 @@ dependencies = [
  "derive_more",
  "gorgond-client",
  "miette",
+ "owo-colors",
  "serde",
  "serde_json",
  "syntect",

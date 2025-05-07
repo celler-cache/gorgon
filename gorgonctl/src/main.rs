@@ -32,11 +32,11 @@ struct AllArgs {
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// Increase log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
+    #[arg(long, short, action=clap::ArgAction::Count, global=true)]
     verbose: u8,
 
     /// Decrease log level.
-    #[arg(long, short, action=clap::ArgAction::Count)]
+    #[arg(long, short, action=clap::ArgAction::Count, global=true)]
     quiet: u8,
 
     /// Base URL for the Gorgon API to talk to.
@@ -227,7 +227,8 @@ impl BuildCommand {
             Self::Get { id } => args
                 .out
                 .dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
-            Self::Events { id } => args.out.dump(
+            Self::Events { id } => args.out.with(
+                |r| output::event_tree(&r.events),
                 builds
                     .id(id)
                     .events(api::BuildEventsRequest {})

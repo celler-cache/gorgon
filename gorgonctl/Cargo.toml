@@ -11,12 +11,14 @@ license = "EUPL-1.2"
 [dependencies]
 gorgond-client = { path = "../gorgond-client" }
 
+bytesize = "2.0.1"
 chrono = { version = "0.4.40", features = ["serde"] }
 clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 colored_json = "5.0.0"
 comfy-table = "7.1.4"
 derive_more = { version = "2.0.1", features = ["full"] }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
+owo-colors = { version = "4.2.0", features = ["supports-colors"] }
 serde_json = "1.0.138"
 serde = { version = "1.0.217", features = ["derive"] }
 syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
