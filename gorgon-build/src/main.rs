@@ -15,7 +15,12 @@ use clap::Parser;
 use gorgon_build_helper::{
     event_handler, helper::HelperCaller, set_event_handler, Event, EventHandler,
 };
-use gorgond_client::{api, models::Build, Client, Uuid, Yoke};
+use gorgond_client::{
+    api,
+    events::{BuildEvent, BuildEventKind},
+    models::Build,
+    Client, Uuid, Yoke,
+};
 use log::{error, info};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use thingbuf::{mpsc, recycling::WithCapacity};
@@ -210,6 +215,12 @@ pub fn run(args: Args) -> miette::Result<()> {
     let caller = args.helpers.caller()?;
     let builder = caller.helper(format!("gorgon-build-{}", build.spec.kind))?;
 
+    // Events!
+    events_handler.handle(
+        "gorgon-build",
+        Event::Build(BuildEvent::from(BuildEventKind::Started)),
+    );
+
     // Run the builder, send it the build spec over stdin.
     info!("Starting build...");
     let mut build_task = builder
@@ -227,6 +238,11 @@ pub fn run(args: Args) -> miette::Result<()> {
     };
     build_child.wait_checked()?;
     info!("Build finished!");
+
+    events_handler.handle(
+        "gorgon-build",
+        Event::Build(BuildEvent::from(BuildEventKind::Stopped)),
+    );
 
     // Shut down the events handler, which will cause the publisher to shut down once all
     // outstanding events have been processed. The handler will panic if any more events

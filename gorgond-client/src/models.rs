@@ -218,3 +218,19 @@ pub struct BuildTask<'a> {
     #[ownable(clone)]
     pub ended_at: Option<DateTime<Utc>>,
 }
+impl<'a> BuildTask<'a> {
+    pub fn borrowed(&'a self) -> Self {
+        Self {
+            id: self.id,
+            parent_id: self.parent_id,
+            build_id: self.build_id,
+            name: Cow::Borrowed(&self.name),
+            kind: self.kind,
+            level: self.level,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            started_at: self.started_at,
+            ended_at: self.ended_at,
+        }
+    }
+}

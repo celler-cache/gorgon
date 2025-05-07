@@ -14,7 +14,11 @@ use std::{
 };
 
 use derive_more::{Deref, DerefMut, From};
-use gorgond_client::{models::BuildTask, Uuid};
+use gorgond_client::{
+    events::{BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind},
+    models::BuildTask,
+    Uuid,
+};
 use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
@@ -372,10 +376,22 @@ pub struct TaskChild<'a> {
     pub child: Child,
     join_stderr: JoinHandle<Result<(), StderrError>>,
     recv_err: crossbeam::channel::Receiver<SerializedError>,
+    _stop_on_drop: StopTaskOnDrop<'a>,
 }
 
 impl TaskHelper {
     pub fn start(&mut self) -> Result<TaskChild, TaskError> {
+        event_handler().handle(
+            &self.task.name,
+            Event::Build(
+                BuildTaskEvent {
+                    task_id: self.task.id,
+                    event: BuildTaskEventKind::Started(self.task.borrowed()),
+                }
+                .into(),
+            ),
+        );
+
         self.helper
             .env("GORGON_VERBOSE", "100")
             .env("GORGON_OUTPUT_FORMAT", "json")
@@ -429,6 +445,10 @@ impl TaskHelper {
             child,
             join_stderr,
             recv_err,
+            _stop_on_drop: StopTaskOnDrop {
+                target: &self.task.name,
+                task_id: self.task.id,
+            },
         })
     }
 }
@@ -474,5 +494,27 @@ impl TaskChild<'_> {
                 Ok(output)
             }
         }
+    }
+}
+
+/// Dropping this value will emit a "task stopped" event. TaskChild holds an instance.
+/// (We're not implementing Drop directly on TaskChild, as then we can't move out of it.)
+#[derive(Debug)]
+pub struct StopTaskOnDrop<'a> {
+    target: &'a str,
+    task_id: Uuid,
+}
+impl Drop for StopTaskOnDrop<'_> {
+    fn drop(&mut self) {
+        event_handler().handle(
+            self.target,
+            Event::Build(
+                BuildTaskEvent {
+                    task_id: self.task_id,
+                    event: BuildTaskEventKind::Stopped,
+                }
+                .into(),
+            ),
+        )
     }
 }

@@ -24,6 +24,26 @@ pub struct BuildEvent<'a> {
     #[serde(borrow)]
     pub event: BuildEventKind<'a>,
 }
+impl<'a> From<BuildEventKind<'a>> for BuildEvent<'a> {
+    fn from(event: BuildEventKind<'a>) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            build_id: Uuid::nil(),
+            event_id: Uuid::now_v7(),
+            event,
+        }
+    }
+}
+impl<'a> From<BuildTaskEvent<'a>> for BuildEvent<'a> {
+    fn from(event: BuildTaskEvent<'a>) -> Self {
+        Self {
+            timestamp: Utc::now(),
+            build_id: Uuid::nil(),
+            event_id: Uuid::now_v7(),
+            event: BuildEventKind::Task(event),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToOwned, IntoOwned)]
 #[serde(rename_all = "snake_case")]
