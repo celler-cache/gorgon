@@ -75,7 +75,11 @@ fn run_nats_publisher(
     subject: Subject,
     event_rx: Receiver<BuildEvent<'static>>,
 ) -> Result<()> {
-    let handle = tokio::runtime::Handle::current();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .into_diagnostic()
+        .context("Couldn't create async runtime")?;
 
     // Pre-allocate 10kb; this will grow as needed.
     let mut buf = BytesMut::with_capacity(10 * 1024);
@@ -87,26 +91,25 @@ fn run_nats_publisher(
             .context("Couldn't serialize event")?;
         buf = w.into_inner();
 
-        handle
-            .block_on(
-                async || -> Result<()> {
-                    jetstream
-                        .publish(subject.clone(), buf.clone().into())
-                        .await
-                        .into_diagnostic()
-                        .context("Couldn't publish message")?
-                        .await
-                        .into_diagnostic()
-                        .context("Couldn't confirm message acknowledgement")?;
-                    Ok(())
-                }
-                .retry(ExponentialBuilder::new())
-                .notify(|err, d| {
-                    let d = humantime::Duration::from(d);
-                    error!("Couldn't publish event, retrying in {d}...\n\n{err:?}");
-                }),
-            )
-            .expect("Publish not retried?!");
+        rt.block_on(
+            async || -> Result<()> {
+                jetstream
+                    .publish(subject.clone(), buf.clone().into())
+                    .await
+                    .into_diagnostic()
+                    .context("Couldn't publish message")?
+                    .await
+                    .into_diagnostic()
+                    .context("Couldn't confirm message acknowledgement")?;
+                Ok(())
+            }
+            .retry(ExponentialBuilder::new())
+            .notify(|err, d| {
+                let d = humantime::Duration::from(d);
+                error!("Couldn't publish event, retrying in {d}...\n\n{err:?}");
+            }),
+        )
+        .expect("Publish not retried?!");
     }
     Ok(())
 }
@@ -160,8 +163,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     // sync-shaped. So instead of this being an async program that spends most of its
     // runtime doing `block_in_place` or `spawn_blocking`, just make a runtime on the
     // current thread and `block_on` the occasional async block.
-    let main_rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+    let main_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .into_diagnostic()
@@ -182,8 +184,11 @@ pub fn run(args: Args) -> miette::Result<()> {
         .with_context(|| format!("Couldn't look up NATS Stream for subject: {subject}"))?;
     info!(subject=subject.as_str(), stream; "-> Publishing to NATS Stream");
 
-    let join_nats =
-        main_rt.spawn_blocking(move || run_nats_publisher(jetstream, subject, event_rx));
+    let join_nats = std::thread::Builder::new()
+        .name("gorgon-build-nats-publisher".to_string())
+        .spawn(move || run_nats_publisher(jetstream, subject, event_rx))
+        .into_diagnostic()
+        .context("Couldn't spawn NATS publisher thread")?;
 
     // Ask gorgond for something to do.
     let client = init_client(&args).context("Couldn't build gorgond client")?;
@@ -253,10 +258,9 @@ pub fn run(args: Args) -> miette::Result<()> {
     events_handler.stop();
 
     info!("Waiting for outstanding events to be delivered...");
-    main_rt
-        .block_on(join_nats)
-        .into_diagnostic()
-        .context("NATS Publisher Panicked!")?
+    join_nats
+        .join()
+        .expect("NATS Publisher Panicked!")
         .context("NATS Publisher Error")?;
 
     info!("All done - goodbye!");
