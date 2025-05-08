@@ -6,7 +6,14 @@
 // returning one if it's not silenced like this.
 #![allow(clippy::result_large_err)]
 
-use std::{cell::RefCell, process::Stdio};
+use std::{
+    cell::RefCell,
+    process::Stdio,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use async_nats::{jetstream, ServerAddr, Subject};
 use backon::{ExponentialBuilder, Retryable};
@@ -24,6 +31,7 @@ use gorgond_client::{
 };
 use log::{error, info};
 use miette::{miette, Context, IntoDiagnostic, Result};
+use tokio::runtime::Runtime;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[command(next_help_heading = "NATS Producer")]
@@ -71,25 +79,22 @@ pub struct Args {
 }
 
 fn run_nats_publisher(
+    rt: Arc<Runtime>,
     jetstream: jetstream::Context,
     subject: Subject,
     event_rx: Receiver<BuildEvent<'static>>,
 ) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .into_diagnostic()
-        .context("Couldn't create async runtime")?;
-
     // Pre-allocate 10kb; this will grow as needed.
     let mut buf = BytesMut::with_capacity(10 * 1024);
     for event in event_rx.iter() {
         buf.clear();
-        let mut w = buf.writer();
-        serde_json::to_writer_pretty(&mut w, &event)
-            .into_diagnostic()
-            .context("Couldn't serialize event")?;
-        buf = w.into_inner();
+        buf = {
+            let mut w = buf.writer();
+            serde_json::to_writer_pretty(&mut w, &event)
+                .into_diagnostic()
+                .context("Couldn't serialize event")?;
+            w.into_inner()
+        };
 
         rt.block_on(
             async || -> Result<()> {
@@ -163,22 +168,29 @@ pub fn run(args: Args) -> miette::Result<()> {
     // sync-shaped. So instead of this being an async program that spends most of its
     // runtime doing `block_in_place` or `spawn_blocking`, just make a runtime on the
     // current thread and `block_on` the occasional async block.
-    let main_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .into_diagnostic()
-        .context("Couldn't create async runtime")?;
+    let rt = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name_fn(|| {
+                static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+                let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
+                format!("gorgon-build-tokio-{id}")
+            })
+            .build()
+            .into_diagnostic()
+            .context("Couldn't create async runtime")?,
+    );
 
     // Connect to NATS first.
     info!("Connecting to NATS...");
-    let nats = main_rt
+    let nats = rt
         .block_on(async_nats::connect(&args.nats.nats_addr))
         .into_diagnostic()
         .context("Couldn't connect to NATS")?;
     let jetstream = jetstream::new(nats);
 
     let subject = Subject::from(args.nats.nats_events_subject.clone().replace("*", &args.id));
-    let stream = main_rt
+    let stream = rt
         .block_on(jetstream.stream_by_subject(&*subject))
         .into_diagnostic()
         .with_context(|| format!("Couldn't look up NATS Stream for subject: {subject}"))?;
@@ -186,13 +198,16 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     let join_nats = std::thread::Builder::new()
         .name("gorgon-build-nats-publisher".to_string())
-        .spawn(move || run_nats_publisher(jetstream, subject, event_rx))
+        .spawn({
+            let rt = rt.clone();
+            move || run_nats_publisher(rt, jetstream, subject, event_rx)
+        })
         .into_diagnostic()
         .context("Couldn't spawn NATS publisher thread")?;
 
     // Ask gorgond for something to do.
     let client = init_client(&args).context("Couldn't build gorgond client")?;
-    let build_ = main_rt
+    let build_ = rt
         .block_on(request_build(&args, &client))
         .context("Couldn't get something to build; lost and without purpose")?;
     let build = build_.get();

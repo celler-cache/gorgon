@@ -13,7 +13,12 @@ use diesel_async::{
     AsyncConnection,
 };
 use miette::{Context, IntoDiagnostic, Result};
-use std::{collections::HashMap, error::Error as StdError, future::Future};
+use std::{
+    collections::HashMap,
+    error::Error as StdError,
+    future::Future,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, debug_span, enabled, info, instrument, Level};
@@ -209,8 +214,7 @@ async fn run(args: Args) -> miette::Result<()> {
         .unwrap_or(Ok(()))
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     miette::set_hook(Box::new(|_| {
         Box::new(
             miette::MietteHandlerOpts::new()
@@ -221,7 +225,17 @@ async fn main() {
     }))
     .expect("Couldn't install miette hook");
 
-    if let Err(err) = run(Args::parse()).await {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn(|| {
+            static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+            let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
+            format!("gorgond-tokio-{id}")
+        })
+        .build()
+        .expect("Couldn't build tokio runtime");
+
+    if let Err(err) = rt.block_on(run(Args::parse())) {
         eprintln!("\n{err:?}");
         std::process::exit(1);
     }
