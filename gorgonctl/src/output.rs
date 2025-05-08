@@ -287,7 +287,7 @@ pub fn event_tree<'a>(events: impl IntoIterator<Item = &'a BuildEvent<'a>>) {
 
                     match event {
                         BuildEventKind::Started => {
-                            write!(w, "┌╴Build")?;
+                            write!(w, "┌╴🏗️ Build Started")?;
                         }
                         BuildEventKind::Log(log) => {
                             write!(w, "│ ")?;
