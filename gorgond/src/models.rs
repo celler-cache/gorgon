@@ -505,9 +505,7 @@ pub struct BuildEvent {
 impl_model!(BuildEvent, build_events);
 
 impl BuildEvent {
-    pub fn from_client(
-        e: events::BuildEvent,
-    ) -> Either<(Self, Option<BuildTask>, Option<BuildResult>), BuildLog> {
+    pub fn from_client(e: events::BuildEvent) -> Either<(Self, Option<BuildTask>), BuildLog> {
         let mut slf = Self {
             id: e.event_id,
             build_id: e.build_id,
@@ -521,13 +519,10 @@ impl BuildEvent {
             created_at: Utc::now(),
             timestamp: e.timestamp,
         };
-        let (mut task, mut result) = (None, None);
+        let mut task = None;
         slf.kind = match e.event {
             events::BuildEventKind::Started => BuildEventKind::Started,
-            events::BuildEventKind::Stopped(r) => {
-                result = Some(r.into());
-                BuildEventKind::Stopped
-            }
+            events::BuildEventKind::Stopped(_) => BuildEventKind::Stopped,
             events::BuildEventKind::Task(events::BuildTaskEvent { task_id, event }) => {
                 slf.task_id = Some(task_id);
                 match event {
@@ -574,7 +569,7 @@ impl BuildEvent {
                 return Either::Right(BuildLog::from_partial_event(slf, log))
             }
         };
-        Either::Left((slf, task, result))
+        Either::Left((slf, task))
     }
     pub fn to_client(
         self,

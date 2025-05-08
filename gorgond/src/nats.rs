@@ -2,17 +2,15 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error as StdError,
-};
+use std::{collections::BTreeMap, error::Error as StdError};
 
 use async_nats::{
     jetstream::{self, consumer, stream},
     ServerAddr,
 };
 use backon::{ExponentialBuilder, Retryable};
-use diesel::ExpressionMethods;
+use chrono::prelude::*;
+use diesel::prelude::*;
 use diesel_async::{
     pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
@@ -181,21 +179,41 @@ async fn consume_batch(
     pool: &Pool<AsyncPgConnection>,
     msgs: Vec<jetstream::Message>,
 ) -> Result<()> {
+    #[derive(Debug, Default, AsChangeset)]
+    #[diesel(table_name = crate::schema::builds, check_for_backend(diesel::pg::Pg))]
+    struct BatchBuildUpdate {
+        pub result: Option<models::BuildResult>,
+        pub heartbeat_at: Option<DateTime<Utc>>,
+        pub started_at: Option<DateTime<Utc>>,
+        pub ended_at: Option<DateTime<Utc>>,
+    }
+
     // Parse messages.
     let num_msgs = msgs.len();
     debug!(num_msgs, "Consuming batch...");
     let (mut tasks, mut events, mut logs) = (Vec::new(), Vec::new(), Vec::new());
-    let mut build_results = BTreeMap::<models::BuildResult, BTreeSet<Uuid>>::new();
+    let mut builds = BTreeMap::<Uuid, BatchBuildUpdate>::new();
     for msg in msgs.iter() {
         let event: events::BuildEvent = serde_json::from_slice(&msg.payload)
             .into_diagnostic()
             .context("Couldn't parse event")?;
         trace!(?event, "-> Event");
+
+        let ts = event.timestamp;
+        let build_update = builds.entry(event.build_id).or_default();
+        if build_update.heartbeat_at.is_none_or(|v| v < ts) {
+            build_update.heartbeat_at = Some(event.timestamp);
+        }
+        match event.event {
+            events::BuildEventKind::Started => build_update.started_at = Some(ts),
+            events::BuildEventKind::Stopped(result) => {
+                build_update.ended_at = Some(ts);
+                build_update.result = Some(result.into());
+            }
+            _ => {}
+        }
         match models::BuildEvent::from_client(event) {
-            Either::Left((event, task, result)) => {
-                if let Some(r) = result {
-                    build_results.entry(r).or_default().insert(event.build_id);
-                }
+            Either::Left((event, task)) => {
                 events.push(event);
                 tasks.extend(task);
             }
@@ -204,16 +222,11 @@ async fn consume_batch(
     }
 
     // Shove events into the database.
-    let (num_tasks, num_events, num_logs) = (tasks.len(), events.len(), logs.len());
-    let [num_succ, num_fail, num_unknown] = [
-        models::BuildResult::Success,
-        models::BuildResult::Failure,
-        models::BuildResult::Unknown,
-    ]
-    .map(|r| build_results.get(&r).map(|v| v.len()).unwrap_or(0));
+    let (num_builds, num_tasks, num_events, num_logs) =
+        (builds.len(), tasks.len(), events.len(), logs.len());
     debug!(
-        num_tasks,
-        num_events, num_logs, num_succ, num_fail, num_unknown, "-> Inserting events..."
+        num_builds,
+        num_tasks, num_events, num_logs, "-> Inserting events..."
     );
     pool.get()
         .await
@@ -221,13 +234,6 @@ async fn consume_batch(
         .context("Couldn't get database connection")?
         .transaction::<_, diesel::result::Error, _>(move |conn| {
             async move {
-                for (result, ids) in build_results {
-                    diesel::update(schema::builds::table)
-                        .filter(schema::builds::id.eq_any(ids))
-                        .set(schema::builds::result.eq(result))
-                        .execute(conn)
-                        .await?;
-                }
                 if !tasks.is_empty() {
                     diesel::insert_into(schema::build_tasks::table)
                         .values(&tasks)
@@ -249,6 +255,13 @@ async fn consume_batch(
                         .values(&logs)
                         .on_conflict(schema::build_logs::id)
                         .do_nothing()
+                        .execute(conn)
+                        .await?;
+                }
+                for (build_id, update) in builds {
+                    diesel::update(schema::builds::table)
+                        .filter(schema::builds::id.eq(build_id))
+                        .set(&update)
                         .execute(conn)
                         .await?;
                 }
