@@ -32,15 +32,15 @@ pub struct NatsArgs {
     #[arg(
         long,
         short = 'N',
-        env = "GORGON_NATS_ADDR",
-        default_value = "localhost:4222"
+        env = "NATS_URL",
+        default_value = "nats://localhost:4222"
     )]
     nats_addr: ServerAddr,
 
     /// NATS subject to publish events to. '*' is replaced with -i/--id.
     #[arg(
         long,
-        env = "GORGON_NATS_SUBJECT",
+        env = "GORGON_BUILD_NATS_SUBJECT",
         default_value = "gorgon.events.build.*"
     )]
     nats_events_subject: String,

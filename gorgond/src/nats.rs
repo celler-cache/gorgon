@@ -30,11 +30,11 @@ use crate::{models, schema};
 #[command(next_help_heading = "Events")]
 struct EventsArgs {
     /// How often to request a batch of events.
-    #[arg(long, default_value = "20s")]
+    #[arg(long, default_value = "20s", env = "GORGOND_EVENT_BATCH_INTERVAL")]
     event_batch_interval: Duration,
 
     /// How many messages to acknowledge concurrently.
-    #[arg(long, default_value = "4")]
+    #[arg(long, default_value = "4", env = "GORGOND_EVENT_ACK_CONCURRENCY")]
     event_ack_concurrency: usize,
 }
 
@@ -42,25 +42,36 @@ struct EventsArgs {
 #[command(next_help_heading = "NATS Consumer")]
 pub struct NatsArgs {
     /// NATS server to connect to.
-    #[arg(long, short = 'N', default_value = "localhost:4222")]
-    nats_addr: ServerAddr,
+    #[arg(
+        long,
+        short = 'N',
+        default_value = "nats://localhost:4222",
+        env = "NATS_URL"
+    )]
+    nats_url: ServerAddr,
+
     /// Name of the events stream. Created if not present.
-    #[arg(long, default_value = "gorgon-events")]
+    #[arg(
+        long,
+        default_value = "gorgon-events",
+        env = "GORGOND_NATS_EVENTS_STREAM"
+    )]
     nats_events_stream: String,
     /// Subjects the events stream consumes, set during creation.
     ///
     /// Has no effect if changed after the stream is already created.
-    #[arg(long, default_values = ["gorgon.events", "gorgon.events.>"])]
+    #[arg(
+        long,
+        default_values = ["gorgon.events", "gorgon.events.>"],
+        env = "GORGOND_NATS_EVENTS_SUBJECTS",
+    )]
     nats_events_subjects: Vec<String>,
     /// Name of the durable events consumer.
-    #[arg(long, default_value = "gorgond")]
+    #[arg(long, default_value = "gorgond", env = "GORGOND_NATS_EVENTS_CONSUMER")]
     nats_events_consumer: String,
     /// Maximum number of events to be consumed in one batch.
-    #[arg(long, default_value = "50")]
+    #[arg(long, default_value = "50", env = "GORGOND_NATS_EVENTS_MAX_MESSAGES")]
     nats_events_max_messages: usize,
-    /// Heartbeat interval while waiting for events.
-    #[arg(long, default_value = "5s")]
-    nats_events_heartbeat: Duration,
 
     #[command(flatten)]
     events: EventsArgs,
@@ -73,7 +84,7 @@ pub async fn run(
     pool: Pool<AsyncPgConnection>,
 ) -> Result<()> {
     info!("Connecting to NATS...");
-    let client = async_nats::connect(args.nats_addr.clone())
+    let client = async_nats::connect(args.nats_url.clone())
         .await
         .into_diagnostic()
         .context("Couldn't connect to NATS")?;

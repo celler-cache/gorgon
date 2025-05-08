@@ -21,7 +21,12 @@ pkgs.mkShell {
     cacert
 
     # script dependencies
+    bashInteractive
     fish
+
+    # other tools
+    jq
+    cargo-expand
 
     # repo tools
     reuse # check license compliance
@@ -35,7 +40,10 @@ pkgs.mkShell {
     git # gorgon-fetch-git
     nix # gorgon-build-nix
 
-    cargo-expand
+    # other processes
+    process-compose
+    postgresql
+    nats-server
   ] ++ (lib.optionals stdenv.isDarwin [
     iconv
     darwin.apple_sdk.frameworks.SystemConfiguration

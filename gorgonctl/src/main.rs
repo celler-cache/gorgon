@@ -237,6 +237,7 @@ impl BuildCommand {
 }
 
 async fn run(args: AllArgs) -> Result<()> {
+    owo_colors::set_override(args.args.out.stdout_color());
     args.command
         .run(&args.args, args.args.new_client()?)
         .await?;
