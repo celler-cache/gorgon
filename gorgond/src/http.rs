@@ -368,15 +368,15 @@ async fn worker_internal_allocate_build(
                 name: worker.clone(),
                 created_at: now,
                 updated_at: now,
+                seen_at: Some(now),
             };
             // Without *a lot* of persuading, Postgres returns nothing to a query with
-            // ON CONFLICT DO NOTHING and no changes, so we bump updated_at here instead.
-            // TODO: There should be a `seen_at` column or somesuch instead.
+            // ON CONFLICT DO NOTHING and no changes, so we bump seen_at here instead.
             let worker_id = diesel::insert_into(workers::table)
                 .values(&default_worker)
                 .on_conflict(workers::slug)
                 .do_update()
-                .set(workers::updated_at.eq(now))
+                .set(workers::seen_at.eq(now))
                 .returning(workers::id)
                 .get_result::<Uuid>(conn)
                 .await?;

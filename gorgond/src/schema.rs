@@ -101,7 +101,6 @@ diesel::table! {
         id -> Uuid,
         project_id -> Uuid,
         kind -> Text,
-        source -> Text,
         expr -> Text,
         worker_id -> Nullable<Uuid>,
         result -> Nullable<BuildResult>,
@@ -131,6 +130,7 @@ diesel::table! {
         name -> Text,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
+        seen_at -> Nullable<Timestamptz>,
     }
 }
 

@@ -55,9 +55,9 @@ pub struct Worker<'a> {
 #[derive(Debug, Display, Clone, Copy, Serialize, Deserialize, ToOwned, IntoOwned)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildResult {
+    Unknown,
     Success,
     Failure,
-    WorkerLost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
@@ -66,8 +66,6 @@ pub struct BuildSpec<'a> {
     pub kind: Cow<'a, str>,
     #[serde(borrow)]
     pub inputs: BTreeMap<Cow<'a, str>, Cow<'a, str>>,
-    #[serde(borrow)]
-    pub source: Cow<'a, str>,
     #[serde(borrow)]
     pub expr: Cow<'a, str>,
 }

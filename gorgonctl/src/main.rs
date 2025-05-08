@@ -156,8 +156,6 @@ struct BuildArgs {
     #[arg(short, long, value_parser = parse_key_value)]
     pub inputs: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     #[arg(short, long)]
-    pub source: Cow<'static, str>,
-    #[arg(short, long)]
     pub expr: Cow<'static, str>,
 }
 impl From<BuildArgs> for models::BuildSpec<'static> {
@@ -165,7 +163,6 @@ impl From<BuildArgs> for models::BuildSpec<'static> {
         Self {
             kind: args.kind,
             inputs: args.inputs.into_iter().collect(),
-            source: args.source,
             expr: args.expr,
         }
     }

@@ -155,7 +155,7 @@ pub fn build_table<'a>(
     let mut table = table();
     table
         .set_header([
-            "ID", "Project", "Kind", "Source", "Worker", "Result", "Started", "Ended",
+            "ID", "Project", "Kind", "Worker", "Result", "Started", "Ended",
         ])
         .set_constraints([ColumnConstraint::ContentWidth])
         .add_rows(builds.into_iter().map(|(b, p, w)| {
@@ -163,7 +163,6 @@ pub fn build_table<'a>(
                 cell(&b.id),
                 cell_or(&b.project_id, &p, |p| p.spec.slug.cell()),
                 cell(&b.spec.kind),
-                cell(&b.spec.source),
                 cell_or(&b.worker_id, &w, |w| w.spec.slug.cell()),
                 cell(&b.result),
                 cell(&b.started_at),
@@ -296,9 +295,9 @@ pub fn event_tree<'a>(events: impl IntoIterator<Item = &'a BuildEvent<'a>>) {
                         BuildEventKind::Stopped(result) => {
                             write!(w, "└╴")?;
                             match result {
+                                models::BuildResult::Unknown => write!(w, "⁉️ Unknown")?,
                                 models::BuildResult::Success => write!(w, "✅ Build Succeeded")?,
                                 models::BuildResult::Failure => write!(w, "❌ Build Failed")?,
-                                models::BuildResult::WorkerLost => write!(w, "⁉️ Worker Lost")?,
                             }
                         }
                         BuildEventKind::Task(BuildTaskEvent { event, .. }) => match event {

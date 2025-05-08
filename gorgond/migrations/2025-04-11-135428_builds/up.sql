@@ -21,20 +21,20 @@ CREATE TABLE workers (
     name        TEXT NOT NULL CHECK (name <> ''),
 
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    seen_at     TIMESTAMPTZ
 );
 
 SELECT diesel_manage_updated_at('workers');
 
 ---
 
-CREATE TYPE build_result AS ENUM ('success', 'failure', 'worker_lost');
+CREATE TYPE build_result AS ENUM ('unknown', 'success', 'failure');
 
 CREATE TABLE builds (
     id              UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     project_id      UUID NOT NULL REFERENCES projects (id),
     kind            TEXT NOT NULL CHECK (kind <> ''),
-    source          TEXT NOT NULL CHECK (source <> ''),
     expr            TEXT NOT NULL CHECK (expr <> ''),
 
     worker_id       UUID REFERENCES workers (id),

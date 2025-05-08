@@ -205,15 +205,15 @@ async fn consume_batch(
 
     // Shove events into the database.
     let (num_tasks, num_events, num_logs) = (tasks.len(), events.len(), logs.len());
-    let [num_succ, num_fail, num_lost] = [
+    let [num_succ, num_fail, num_unknown] = [
         models::BuildResult::Success,
         models::BuildResult::Failure,
-        models::BuildResult::WorkerLost,
+        models::BuildResult::Unknown,
     ]
     .map(|r| build_results.get(&r).map(|v| v.len()).unwrap_or(0));
     debug!(
         num_tasks,
-        num_events, num_logs, num_succ, num_fail, num_lost, "-> Inserting events..."
+        num_events, num_logs, num_succ, num_fail, num_unknown, "-> Inserting events..."
     );
     pool.get()
         .await

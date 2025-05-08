@@ -151,6 +151,7 @@ pub struct Worker {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub seen_at: Option<DateTime<Utc>>,
 }
 impl_model!(Worker, workers);
 impl_model_slug!(Worker, workers);
@@ -172,25 +173,25 @@ impl Worker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, DbEnum)]
 #[db_enum(existing_type_path = "crate::schema::sql_types::BuildResult")]
 pub enum BuildResult {
+    Unknown,
     Success,
     Failure,
-    WorkerLost,
 }
 impl From<client::BuildResult> for BuildResult {
     fn from(v: client::BuildResult) -> Self {
         match v {
+            client::BuildResult::Unknown => Self::Unknown,
             client::BuildResult::Success => Self::Success,
             client::BuildResult::Failure => Self::Failure,
-            client::BuildResult::WorkerLost => Self::WorkerLost,
         }
     }
 }
 impl From<BuildResult> for client::BuildResult {
     fn from(v: BuildResult) -> Self {
         match v {
+            BuildResult::Unknown => Self::Unknown,
             BuildResult::Success => Self::Success,
             BuildResult::Failure => Self::Failure,
-            BuildResult::WorkerLost => Self::WorkerLost,
         }
     }
 }
@@ -233,7 +234,6 @@ pub struct Build {
     pub id: Uuid,
     pub project_id: Uuid,
     pub kind: String,
-    pub source: String,
     pub expr: String,
 
     pub worker_id: Option<Uuid>,
@@ -260,7 +260,6 @@ impl Build {
                 id,
                 project_id,
                 kind: v.kind.into(),
-                source: v.source.into(),
                 expr: v.expr.into(),
                 worker_id: None,
                 result: None,
@@ -290,7 +289,6 @@ impl Build {
                         .into_iter()
                         .map(|input| (input.key.into(), input.source.into())),
                 ),
-                source: self.source.into(),
                 expr: self.expr.into(),
             },
             worker_id: self.worker_id,
@@ -602,7 +600,7 @@ impl BuildEvent {
                 BuildEventKind::Stopped => match task {
                     Some(_) => for_task(events::BuildTaskEventKind::Stopped),
                     None => events::BuildEventKind::Stopped(
-                        result.unwrap_or(client::BuildResult::WorkerLost), // Should never happen.
+                        result.unwrap_or(client::BuildResult::Unknown), // Should never happen.
                     ),
                 },
                 BuildEventKind::FileLinked => update(events::BuildTaskUpdate::FileLinked {

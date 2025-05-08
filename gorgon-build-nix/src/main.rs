@@ -336,8 +336,6 @@ fn run(args: Args) -> Result<()> {
         inst.input_url(name, s)
             .with_context(|| format!("build.inputs[{i}]"))?;
     }
-    inst.input_url("source", &build.spec.source)
-        .context("build.source")?;
     inst.args(["--expr", &build.spec.expr]);
     info!(inst:?; "Instantiating derivation...");
     let drv = inst.call().context("nix-instantiate failed")?;
