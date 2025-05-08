@@ -461,6 +461,11 @@ pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: Outpu
                 println!();
             }
         }
-        std::process::exit(1);
+
+        if err.severity().unwrap_or(miette::Severity::Error) >= miette::Severity::Error {
+            std::process::exit(1);
+        } else {
+            std::process::exit(0);
+        }
     }
 }

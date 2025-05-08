@@ -64,20 +64,24 @@ impl From<ApiErrorWrapper> for ApiError {
 #[strum(serialize_all = "title_case")]
 pub enum ApiError {
     #[serde(rename = "tag:NoSuchRoute")]
+    #[diagnostic(code("gorgond:NoSuchRoute"))]
     #[error("No such route: {route}")]
     NoSuchRoute { method: String, route: String },
 
     #[serde(rename = "tag:MethodNotAllowed")]
+    #[diagnostic(code("gorgond:MethodNotAllowed"))]
     #[error("Method not allowed: {method} {route}")]
     MethodNotAllowed { method: String, route: String },
 
     #[serde(rename = "tag:BadRequestBody")]
+    #[diagnostic(code("gorgond::BadRequestBody"))]
     #[error("Bad request body")]
     BadRequestBody {
         #[source]
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:BadRequestJson")]
+    #[diagnostic(code("gorgond::BadRequestJson"))]
     #[error("Bad request JSON")]
     BadRequestJson {
         #[source]
@@ -85,30 +89,35 @@ pub enum ApiError {
     },
 
     #[serde(rename = "tag:DatabaseNotFound")]
+    #[diagnostic(code("gorgond::DatabaseNotFound"))]
     #[error("Database returned no rows")]
     DatabaseNotFound {
         #[source]
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:DatabaseDuplicate")]
+    #[diagnostic(code("gorgond::DatabaseDuplicate"))]
     #[error("Attempted to insert duplicate record")]
     DatabaseDuplicate {
         #[source]
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:DatabaseConstraints")]
+    #[diagnostic(code("gorgond::DatabaseConstraints"))]
     #[error("Database constraints violated")]
     DatabaseConstraints {
         #[source]
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:DatabaseConnection")]
+    #[diagnostic(code("gorgond::DatabaseQueryError"))]
     #[error("Database connection error")]
     DatabaseConnection {
         #[source]
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:DatabaseQuery")]
+    #[diagnostic(code("gorgond::DatabaseQueryError"))]
     #[error("Database query failed")]
     DatabaseQueryError {
         #[source]
@@ -116,6 +125,7 @@ pub enum ApiError {
     },
 
     #[serde(rename = "tag:ModelNotFound")]
+    #[diagnostic(code("gorgond::ModelNotFound"))]
     #[error(fmt=Self::format_model_not_found)]
     ModelNotFound {
         model: Model,
@@ -123,30 +133,21 @@ pub enum ApiError {
         key: Option<String>,
     },
     #[serde(rename = "tag:NoWorkAvailable")]
+    #[diagnostic(code("gorgond::NoWorkAvailable"))]
     #[error("No work available")]
     #[diagnostic(
+        severity = "Warning",
         help = "Until automatic build creation is implemented, you have to create builds manually with `gorgonctl builds <project_slug> create`."
     )]
     NoWorkAvailable,
 
     #[serde(untagged)]
+    #[diagnostic(code("gorgond::Unknown"))]
     #[error("unknown error type: {0}")]
     Unknown(String),
 }
 
 impl ApiError {
-    fn format_model_not_found(
-        model: &Model,
-        key: &Option<String>,
-        f: &mut std::fmt::Formatter,
-    ) -> std::fmt::Result {
-        write!(f, "{model} not found")?;
-        if let Some(key) = key {
-            write!(f, ": {key}")?;
-        }
-        Ok(())
-    }
-
     pub fn status(&self) -> StatusCode {
         match self {
             Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
@@ -160,7 +161,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
-            Self::NoWorkAvailable => StatusCode::NOT_FOUND,
+            Self::NoWorkAvailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -191,6 +192,18 @@ impl ApiError {
             labels: err.labels().map(|it| it.collect()),
             related: err.related().map(|it| it.map(Self::wrap).collect()),
         }
+    }
+
+    fn format_model_not_found(
+        model: &Model,
+        key: &Option<String>,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        write!(f, "{model} not found")?;
+        if let Some(key) = key {
+            write!(f, ": {key}")?;
+        }
+        Ok(())
     }
 }
 

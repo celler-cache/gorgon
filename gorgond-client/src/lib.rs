@@ -29,6 +29,7 @@ pub enum Error {
     #[error("Failed to build HTTP client")]
     BuildClient(#[source] reqwest::Error),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Request(RequestError),
 }
 
