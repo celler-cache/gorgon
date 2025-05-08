@@ -293,8 +293,13 @@ pub fn event_tree<'a>(events: impl IntoIterator<Item = &'a BuildEvent<'a>>) {
                             write!(w, "│ ")?;
                             log_log(w, log)?;
                         }
-                        BuildEventKind::Stopped => {
-                            write!(w, "╵")?;
+                        BuildEventKind::Stopped(result) => {
+                            write!(w, "└╴")?;
+                            match result {
+                                models::BuildResult::Success => write!(w, "✅ Build Succeeded")?,
+                                models::BuildResult::Failure => write!(w, "❌ Build Failed")?,
+                                models::BuildResult::WorkerLost => write!(w, "⁉️ Worker Lost")?,
+                            }
                         }
                         BuildEventKind::Task(BuildTaskEvent { event, .. }) => match event {
                             BuildTaskEventKind::Started(task) => {

@@ -18,7 +18,7 @@ use gorgon_build_helper::{
 use gorgond_client::{
     api,
     events::{BuildEvent, BuildEventKind},
-    models::Build,
+    models::{Build, BuildResult},
     Client, Uuid, Yoke,
 };
 use log::{error, info};
@@ -202,6 +202,15 @@ pub fn run(args: Args) -> miette::Result<()> {
     let build = build_.get();
     info!(id:% = build.id, __log__=build_.backing_cart(); " -> Got a task!");
 
+    // Find builder.
+    let caller = args.helpers.caller()?;
+    let builder = caller.helper(format!("gorgon-build-{}", build.spec.kind))?;
+    let mut build_task = builder
+        .with(&args.helpers)
+        .with_arg("-")
+        .with_stdin(Stdio::piped())
+        .into_task(None);
+
     // Before we start the build, we need to install an event handler.
     // SAFETY: This is only safe to do before any events start being emitted.
     let events_handler = Box::leak(Box::new(NatsEventHandler {
@@ -211,37 +220,40 @@ pub fn run(args: Args) -> miette::Result<()> {
     }));
     unsafe { set_event_handler(events_handler) };
 
-    // Find builder.
-    let caller = args.helpers.caller()?;
-    let builder = caller.helper(format!("gorgon-build-{}", build.spec.kind))?;
-
-    // Events!
+    // Start the builder process...
+    info!("Starting build...");
     events_handler.handle(
         "gorgon-build",
         Event::Build(BuildEvent::from(BuildEventKind::Started)),
     );
-
-    // Run the builder, send it the build spec over stdin.
-    info!("Starting build...");
-    let mut build_task = builder
-        .with(&args.helpers)
-        .with_arg("-")
-        .with_stdin(Stdio::piped())
-        .into_task(None);
     let mut build_child = build_task.start().context("Couldn't start build")?;
-    if let Some(mut stdin) = build_child.child.stdin.as_mut() {
-        serde_json::to_writer_pretty(&mut stdin, &build)
-            .into_diagnostic()
-            .context("Couldn't write Build to builder's stdin")?;
-    } else {
-        return Err(miette!("Builder process has no stdin?"));
-    };
-    build_child.wait_checked()?;
-    info!("Build finished!");
 
+    // ...feed it the build context over stdin...
+    serde_json::to_writer_pretty(
+        build_child
+            .child
+            .stdin
+            .as_mut()
+            .ok_or(miette!("Builder process has no stdin!?"))?,
+        &build,
+    )
+    .into_diagnostic()
+    .context("Couldn't write Build to builder's stdin")?;
+
+    // ...and wait for it to finish - note that the build failing does not mean we fail.
+    let result = match build_child.wait_checked().context("Build Failed") {
+        Err(err) => {
+            error!(__log__:debug=err; "Build Failed");
+            BuildResult::Failure
+        }
+        Ok(_) => {
+            info!("Build Succeeded!");
+            BuildResult::Success
+        }
+    };
     events_handler.handle(
         "gorgon-build",
-        Event::Build(BuildEvent::from(BuildEventKind::Stopped)),
+        Event::Build(BuildEvent::from(BuildEventKind::Stopped(result))),
     );
 
     // Shut down the events handler, which will cause the publisher to shut down once all

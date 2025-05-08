@@ -63,7 +63,9 @@ impl EventHandler for EventLogger {
             Event::Log(log) => log.log(target),
             Event::Build(BuildEvent { event, .. }) => match event {
                 BuildEventKind::Started => info!(target: target, "Build: Started"),
-                BuildEventKind::Stopped => info!(target: target, "Build: Stopped"),
+                BuildEventKind::Stopped(result) => {
+                    info!(target: target, result:?; "Build: Stopped")
+                }
                 BuildEventKind::Log(log) => log_log(Level::Info, log),
                 BuildEventKind::Task(BuildTaskEvent { task_id, event }) => {
                     let task: EventLoggerTask =

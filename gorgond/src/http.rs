@@ -342,7 +342,7 @@ async fn build_events(
             Vec::<events::BuildEvent>::with_capacity(build_events.len() + build_logs.len());
         events.extend(build_events.into_iter().map(|e| {
             let task = e.task_id.and_then(|tid| tasks.get(&tid));
-            e.to_client(task)
+            e.to_client(task, build.result.map(|v| v.into()))
         }));
         events.sort_unstable_by_key(|e| e.timestamp);
 

@@ -2,13 +2,17 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::error::Error as StdError;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error as StdError,
+};
 
 use async_nats::{
     jetstream::{self, consumer, stream},
     ServerAddr,
 };
 use backon::{ExponentialBuilder, Retryable};
+use diesel::ExpressionMethods;
 use diesel_async::{
     pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
@@ -20,6 +24,7 @@ use miette::{Context, IntoDiagnostic, Result};
 use scoped_futures::ScopedFutureExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, trace};
+use uuid::Uuid;
 
 use crate::{models, schema};
 
@@ -180,15 +185,19 @@ async fn consume_batch(
     let num_msgs = msgs.len();
     debug!(num_msgs, "Consuming batch...");
     let (mut tasks, mut events, mut logs) = (Vec::new(), Vec::new(), Vec::new());
+    let mut build_results = BTreeMap::<models::BuildResult, BTreeSet<Uuid>>::new();
     for msg in msgs.iter() {
         let event: events::BuildEvent = serde_json::from_slice(&msg.payload)
             .into_diagnostic()
             .context("Couldn't parse event")?;
         trace!(?event, "-> Event");
         match models::BuildEvent::from_client(event) {
-            Either::Left((event, task)) => {
-                tasks.extend(task);
+            Either::Left((event, task, result)) => {
+                if let Some(r) = result {
+                    build_results.entry(r).or_default().insert(event.build_id);
+                }
                 events.push(event);
+                tasks.extend(task);
             }
             Either::Right(log) => logs.push(log),
         }
@@ -196,13 +205,29 @@ async fn consume_batch(
 
     // Shove events into the database.
     let (num_tasks, num_events, num_logs) = (tasks.len(), events.len(), logs.len());
-    debug!(num_tasks, num_events, num_logs, "-> Inserting events...");
+    let [num_succ, num_fail, num_lost] = [
+        models::BuildResult::Success,
+        models::BuildResult::Failure,
+        models::BuildResult::WorkerLost,
+    ]
+    .map(|r| build_results.get(&r).map(|v| v.len()).unwrap_or(0));
+    debug!(
+        num_tasks,
+        num_events, num_logs, num_succ, num_fail, num_lost, "-> Inserting events..."
+    );
     pool.get()
         .await
         .into_diagnostic()
         .context("Couldn't get database connection")?
         .transaction::<_, diesel::result::Error, _>(move |conn| {
             async move {
+                for (result, ids) in build_results {
+                    diesel::update(schema::builds::table)
+                        .filter(schema::builds::id.eq_any(ids))
+                        .set(schema::builds::result.eq(result))
+                        .execute(conn)
+                        .await?;
+                }
                 if !tasks.is_empty() {
                     diesel::insert_into(schema::build_tasks::table)
                         .values(&tasks)

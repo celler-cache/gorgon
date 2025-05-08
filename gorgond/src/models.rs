@@ -169,7 +169,7 @@ impl Worker {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, DbEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, DbEnum)]
 #[db_enum(existing_type_path = "crate::schema::sql_types::BuildResult")]
 pub enum BuildResult {
     Success,
@@ -507,7 +507,9 @@ pub struct BuildEvent {
 impl_model!(BuildEvent, build_events);
 
 impl BuildEvent {
-    pub fn from_client(e: events::BuildEvent) -> Either<(Self, Option<BuildTask>), BuildLog> {
+    pub fn from_client(
+        e: events::BuildEvent,
+    ) -> Either<(Self, Option<BuildTask>, Option<BuildResult>), BuildLog> {
         let mut slf = Self {
             id: e.event_id,
             build_id: e.build_id,
@@ -521,10 +523,13 @@ impl BuildEvent {
             created_at: Utc::now(),
             timestamp: e.timestamp,
         };
-        let mut task = None;
+        let (mut task, mut result) = (None, None);
         slf.kind = match e.event {
             events::BuildEventKind::Started => BuildEventKind::Started,
-            events::BuildEventKind::Stopped => BuildEventKind::Stopped,
+            events::BuildEventKind::Stopped(r) => {
+                result = Some(r.into());
+                BuildEventKind::Stopped
+            }
             events::BuildEventKind::Task(events::BuildTaskEvent { task_id, event }) => {
                 slf.task_id = Some(task_id);
                 match event {
@@ -571,11 +576,12 @@ impl BuildEvent {
                 return Either::Right(BuildLog::from_partial_event(slf, log))
             }
         };
-        Either::Left((slf, task))
+        Either::Left((slf, task, result))
     }
     pub fn to_client(
         self,
         task: Option<&client::BuildTask<'static>>,
+        result: Option<client::BuildResult>,
     ) -> events::BuildEvent<'static> {
         let for_task = |event| {
             events::BuildEventKind::Task(events::BuildTaskEvent {
@@ -595,7 +601,9 @@ impl BuildEvent {
                 },
                 BuildEventKind::Stopped => match task {
                     Some(_) => for_task(events::BuildTaskEventKind::Stopped),
-                    None => events::BuildEventKind::Stopped,
+                    None => events::BuildEventKind::Stopped(
+                        result.unwrap_or(client::BuildResult::WorkerLost), // Should never happen.
+                    ),
                 },
                 BuildEventKind::FileLinked => update(events::BuildTaskUpdate::FileLinked {
                     bytes: self.i0.unwrap_or_default() as _,

@@ -49,7 +49,7 @@ impl<'a> From<BuildTaskEvent<'a>> for BuildEvent<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum BuildEventKind<'a> {
     Started,
-    Stopped,
+    Stopped(models::BuildResult),
     #[serde(borrow)]
     Task(BuildTaskEvent<'a>),
     #[serde(borrow)]
