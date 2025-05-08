@@ -369,26 +369,28 @@ async fn worker_internal_allocate_build(
                 created_at: now,
                 updated_at: now,
             };
-            let worker = diesel::insert_into(workers::table)
+            // Without *a lot* of persuading, Postgres returns nothing to a query with
+            // ON CONFLICT DO NOTHING and no changes, so we bump updated_at here instead.
+            // TODO: There should be a `seen_at` column or somesuch instead.
+            let worker_id = diesel::insert_into(workers::table)
                 .values(&default_worker)
-                .returning(models::Worker::as_returning())
                 .on_conflict(workers::slug)
                 .do_update()
-                .set(&default_worker)
-                .get_result::<models::Worker>(conn)
+                .set(workers::updated_at.eq(now))
+                .returning(workers::id)
+                .get_result::<Uuid>(conn)
                 .await?;
-            if worker.id == default_worker.id {
+            if worker_id == default_worker.id {
                 info!("New worker node registered!");
             }
-            worker.id
+            worker_id
         };
 
         // If worker has an unfinished task, remind it to get back on it.
         // This is also our idempotency mechanism for this endpoint.
-        let build = if let Some(build) = builds::table
-            .limit(1)
+        let build = if let Some(build) = models::Build::all()
             .filter(builds::worker_id.eq(worker_id))
-            .get_result::<models::Build>(conn)
+            .first::<models::Build>(conn)
             .await
             .optional()?
         {
