@@ -1598,6 +1598,7 @@ dependencies = [
  "backon",
  "bytes",
  "clap",
+ "crossbeam",
  "gorgon-build-helper",
  "gorgon-util-cli",
  "gorgond-client",
@@ -1608,10 +1609,8 @@ dependencies = [
  "reqwest 0.12.15",
  "serde_json",
  "tempfile",
- "thingbuf",
  "thiserror 2.0.11",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

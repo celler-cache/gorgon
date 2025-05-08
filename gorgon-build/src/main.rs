@@ -9,9 +9,10 @@
 use std::{cell::RefCell, process::Stdio};
 
 use async_nats::{jetstream, ServerAddr, Subject};
-use backon::{BlockingRetryable, ExponentialBuilder, Retryable};
-use bytes::Bytes;
+use backon::{ExponentialBuilder, Retryable};
+use bytes::{BufMut, BytesMut};
 use clap::Parser;
+use crossbeam::channel::{self, Receiver, Sender};
 use gorgon_build_helper::{
     event_handler, helper::HelperCaller, set_event_handler, Event, EventHandler,
 };
@@ -23,8 +24,6 @@ use gorgond_client::{
 };
 use log::{error, info};
 use miette::{miette, Context, IntoDiagnostic, Result};
-use thingbuf::{mpsc, recycling::WithCapacity};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[command(next_help_heading = "NATS Producer")]
@@ -62,10 +61,6 @@ pub struct Args {
     #[arg(short, long, env = "GORGON_BUILD_ID")]
     id: String,
 
-    /// Number of buffers to allocate for in-flight events.
-    #[arg(long, env = "GORGON_BUILD_EVENT_BUFFERS", default_value = "50")]
-    event_buffers: usize,
-
     #[command(flatten)]
     nats: NatsArgs,
 
@@ -75,32 +70,43 @@ pub struct Args {
     common: gorgon_util_cli::Args,
 }
 
-async fn run_nats_publisher(
-    token: CancellationToken,
+fn run_nats_publisher(
     jetstream: jetstream::Context,
     subject: Subject,
-    event_rx: mpsc::Receiver<Vec<u8>, WithCapacity>,
+    event_rx: Receiver<BuildEvent<'static>>,
 ) -> Result<()> {
-    while let Some(Some(buf)) = token.run_until_cancelled(event_rx.recv_ref()).await {
-        let bytes = Bytes::copy_from_slice(&buf);
-        (async || -> Result<()> {
-            jetstream
-                .publish(subject.clone(), bytes.clone())
-                .await
-                .into_diagnostic()
-                .context("Couldn't publish message")?
-                .await
-                .into_diagnostic()
-                .context("Couldn't confirm message acknowledgement")?;
-            Ok(())
-        })
-        .retry(ExponentialBuilder::new())
-        .notify(|err, d| {
-            let d = humantime::Duration::from(d);
-            error!("Couldn't publish event, retrying in {d}...\n\n{err:?}");
-        })
-        .await
-        .unwrap();
+    let handle = tokio::runtime::Handle::current();
+
+    // Pre-allocate 10kb; this will grow as needed.
+    let mut buf = BytesMut::with_capacity(10 * 1024);
+    for event in event_rx.iter() {
+        buf.clear();
+        let mut w = buf.writer();
+        serde_json::to_writer_pretty(&mut w, &event)
+            .into_diagnostic()
+            .context("Couldn't serialize event")?;
+        buf = w.into_inner();
+
+        handle
+            .block_on(
+                async || -> Result<()> {
+                    jetstream
+                        .publish(subject.clone(), buf.clone().into())
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't publish message")?
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't confirm message acknowledgement")?;
+                    Ok(())
+                }
+                .retry(ExponentialBuilder::new())
+                .notify(|err, d| {
+                    let d = humantime::Duration::from(d);
+                    error!("Couldn't publish event, retrying in {d}...\n\n{err:?}");
+                }),
+            )
+            .expect("Publish not retried?!");
     }
     Ok(())
 }
@@ -108,7 +114,7 @@ async fn run_nats_publisher(
 struct NatsEventHandler {
     next: &'static dyn EventHandler,
     build_id: Uuid,
-    sender: RefCell<Option<mpsc::Sender<Vec<u8>, WithCapacity>>>,
+    sender: RefCell<Option<Sender<BuildEvent<'static>>>>,
 }
 impl NatsEventHandler {
     fn stop(&self) {
@@ -124,18 +130,9 @@ impl EventHandler for NatsEventHandler {
             let sender = sender
                 .as_ref()
                 .expect("Event received after sender was dropped");
-            (|| -> Result<()> {
-                let mut buf = sender.try_send_ref().into_diagnostic()?;
-                serde_json::to_writer_pretty(&mut *buf, &event).into_diagnostic()?;
-                Ok(())
-            })
-            .retry(ExponentialBuilder::new())
-            .notify(|err, d| {
-                let d = humantime::Duration::from(d);
-                error!("Couldn't enqueue event, retrying in {d}...\n\n{err:?}")
-            })
-            .call()
-            .unwrap();
+            sender
+                .send(event.to_owned())
+                .expect("Couldn't send event!?");
         }
         self.next.handle(target, event);
     }
@@ -157,8 +154,7 @@ async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'stati
 }
 
 pub fn run(args: Args) -> miette::Result<()> {
-    let (event_tx, event_rx) =
-        mpsc::with_recycle::<Vec<u8>, WithCapacity>(args.event_buffers, WithCapacity::default());
+    let (event_tx, event_rx) = channel::unbounded();
 
     // We need to make some async API calls, but most of what this program does is very
     // sync-shaped. So instead of this being an async program that spends most of its
@@ -186,13 +182,8 @@ pub fn run(args: Args) -> miette::Result<()> {
         .with_context(|| format!("Couldn't look up NATS Stream for subject: {subject}"))?;
     info!(subject=subject.as_str(), stream; "-> Publishing to NATS Stream");
 
-    let token = CancellationToken::new();
-    let join_nats = main_rt.spawn(run_nats_publisher(
-        token.child_token(),
-        jetstream,
-        subject,
-        event_rx,
-    ));
+    let join_nats =
+        main_rt.spawn_blocking(move || run_nats_publisher(jetstream, subject, event_rx));
 
     // Ask gorgond for something to do.
     let client = init_client(&args).context("Couldn't build gorgond client")?;
