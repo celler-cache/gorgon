@@ -389,6 +389,7 @@ async fn worker_internal_allocate_build(
         // If worker has an unfinished task, remind it to get back on it.
         // This is also our idempotency mechanism for this endpoint.
         let build = if let Some(build) = models::Build::all()
+            .filter(builds::result.is_null())
             .filter(builds::worker_id.eq(worker_id))
             .first::<models::Build>(conn)
             .await
