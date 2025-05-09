@@ -70,7 +70,7 @@ pub struct NatsArgs {
     #[arg(long, default_value = "gorgond", env = "GORGOND_NATS_EVENTS_CONSUMER")]
     nats_events_consumer: String,
     /// Maximum number of events to be consumed in one batch.
-    #[arg(long, default_value = "50", env = "GORGOND_NATS_EVENTS_MAX_MESSAGES")]
+    #[arg(long, default_value = "1000", env = "GORGOND_NATS_EVENTS_MAX_MESSAGES")]
     nats_events_max_messages: usize,
 
     #[command(flatten)]
