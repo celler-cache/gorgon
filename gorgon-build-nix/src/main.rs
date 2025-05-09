@@ -16,7 +16,7 @@ use gorgond_client::{
     models::BuildTaskLevel,
     Uuid,
 };
-use log::{info, warn};
+use log::{info, trace, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
@@ -163,6 +163,7 @@ impl NixCommand {
             move || -> Result<()> {
                 let mut lines = BufReader::new(stderr).lines();
                 let mut tasks = BTreeMap::<u64, BuildTask>::new();
+                let mut progress_dedup = BTreeMap::<u64, (u64, u64, u64, u64)>::new();
 
                 fn get_task<'a>(
                     tasks: &'a mut BTreeMap<u64, BuildTask>,
@@ -263,6 +264,10 @@ impl NixCommand {
                                             running,
                                             failed,
                                         }) => {
+                                            let dedup = (done, expected, running, failed);
+                                            if progress_dedup.insert(id, dedup) == Some(dedup) {
+                                                trace!(id, done, expected, running, failed; "Skipping duplicate Progress");
+                                            }
                                             BuildTaskEventKind::Updated(BuildTaskUpdate::Progress {
                                                 done: done.try_into().expect("done"),
                                                 expected: expected.try_into().expect("expected"),
