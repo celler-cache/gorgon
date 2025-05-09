@@ -83,7 +83,7 @@ CREATE TABLE build_logs (
     file       TEXT             NOT NULL,
     col        BIGINT,
     line       BIGINT,
-    txt        TEXT             NOT NULL CHECK (txt <> ''),
+    txt        TEXT             NOT NULL,
 
     created_at TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
     timestamp  TIMESTAMPTZ      NOT NULL
