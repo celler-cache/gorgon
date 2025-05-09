@@ -204,7 +204,14 @@ enum BuildCommand {
     /// Get a build.
     Get { id: Uuid },
     /// Get build events.
-    Events { id: Uuid },
+    Events {
+        /// Include "Progress" events.
+        /// Disabled by default as they make the output very long and hard-to-read.
+        #[arg(long, short, default_value = "false")]
+        progress: bool,
+
+        id: Uuid,
+    },
 }
 impl BuildCommand {
     pub async fn run(self, args: &Args, builds: api::BuildsClient<'_>) -> Result<()> {
@@ -224,11 +231,13 @@ impl BuildCommand {
             Self::Get { id } => args
                 .out
                 .dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
-            Self::Events { id } => args.out.with(
+            Self::Events { progress, id } => args.out.with(
                 |r| output::event_tree(&r.events),
                 builds
                     .id(id)
-                    .events(api::BuildEventsRequest {})
+                    .events(api::BuildEventsRequest {
+                        no_progress: (!progress).then_some(true),
+                    })
                     .await?
                     .get(),
             ),

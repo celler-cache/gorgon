@@ -566,7 +566,9 @@ mkrequest!(BuildRequest, BuildResponse<'static>, {
 });
 mkrequest!(BuildEventsRequest, BuildEventsResponse<'static>, {
     #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildEventsRequest {}
+    pub struct BuildEventsRequest {
+        pub no_progress: Option<bool>,
+    }
     #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
     pub struct BuildEventsResponse<'a> {
         #[serde(borrow)]

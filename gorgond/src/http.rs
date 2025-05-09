@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
 use axum::{
-    extract::{FromRequest, Path, State},
+    extract::{FromRequest, Path, Query, State},
     response::IntoResponse,
     routing::{get, post, put},
     Router,
@@ -313,12 +313,21 @@ async fn build(
 async fn build_events(
     State(state): State<S>,
     Path(build_id): Path<Uuid>,
+    Query(req): Query<api::BuildEventsRequest>,
 ) -> Result<JsonResponse<api::BuildEventsResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
         let build = models::Build::get(conn, build_id).await?;
 
+        let exclude_kinds = [req
+            .no_progress
+            .unwrap_or(false)
+            .then_some(models::BuildEventKind::Progress)]
+        .into_iter()
+        .flatten();
+
         // Events are split up across two tables - fetch both.
         let build_events = models::BuildEvent::belonging_to(&build)
+            .filter(schema::build_events::kind.ne_all(exclude_kinds))
             .load::<models::BuildEvent>(conn)
             .await?;
         let build_logs = models::BuildLog::belonging_to(&build)
