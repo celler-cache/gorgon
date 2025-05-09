@@ -453,7 +453,9 @@ pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: Outpu
             OutputFormat::Default => eprintln!("\n{err:?}"),
             OutputFormat::Json => {
                 write_colored_json_with_mode(
-                    &SerializedError::new(AsRef::<dyn miette::Diagnostic>::as_ref(&err)),
+                    &Event::Error(SerializedError::new(
+                        AsRef::<dyn miette::Diagnostic>::as_ref(&err),
+                    )),
                     &mut std::io::stderr(),
                     colored_json::ColorMode::Auto(colored_json::Output::StdErr),
                 )
