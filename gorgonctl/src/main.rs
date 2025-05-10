@@ -6,11 +6,17 @@
 // returning Error if it's not silenced like this.
 #![allow(clippy::result_large_err)]
 
-use std::{borrow::Cow, fmt::Debug};
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    io::{BufRead, BufReader, Read},
+};
 
 use clap::{Parser, Subcommand};
-use gorgond_client::{api, models, Client, Uuid};
-use miette::Result;
+use gorgond_client::{api, events::BuildEvent, models, Client, Uuid};
+use miette::{miette, Context, IntoDiagnostic, Result};
+use tracing::debug;
+use url::Url;
 
 pub mod output;
 
@@ -231,17 +237,43 @@ impl BuildCommand {
             Self::Get { id } => args
                 .out
                 .dump(builds.id(id).get(api::BuildRequest {}).await?.get()),
-            Self::Events { progress, id } => args.out.with(
-                |r| output::event_tree(&r.events),
-                builds
-                    .id(id)
-                    .events(api::BuildEventsRequest {
-                        no_progress: (!progress).then_some(true),
+            Self::Events { progress, id } => {
+                let rsp_ = builds.id(id).events(api::BuildEventsRequest {}).await?;
+                let url = rsp_.get().url.clone();
+                debug!(%url, "Fetching events...");
+                let events = Self::load_events(&url)
+                    .map(|it| {
+                        it.filter(|e| e.as_ref().is_ok_and(|e| progress || !e.event.is_progress()))
                     })
-                    .await?
-                    .get(),
-            ),
+                    .with_context(|| url.to_string())?
+                    .collect::<Result<Vec<BuildEvent<'static>>>>()?;
+                args.out.with(|r| output::event_tree(r), &events)
+            }
         }
+    }
+    fn load_events(url: &Url) -> Result<impl Iterator<Item = Result<BuildEvent<'static>>>> {
+        match url.scheme() {
+            "file" => {
+                let path = url
+                    .to_file_path()
+                    .map_err(|_| miette!("URL has bad file path"))?;
+                std::fs::File::open(&path)
+                    .into_diagnostic()
+                    .map(Self::read_events)
+                    .with_context(|| path.to_string_lossy().to_string())
+            }
+            _ => Err(miette!("Don't know how to fetch events from: {url}")),
+        }
+    }
+    fn read_events(r: impl Read) -> impl Iterator<Item = Result<BuildEvent<'static>>> {
+        let r = BufReader::new(zstd::stream::Decoder::new(r).unwrap());
+        r.split(0x1e).map(|r| {
+            r.into_diagnostic().and_then(|data| {
+                serde_json::from_slice::<BuildEvent>(&data)
+                    .into_diagnostic()
+                    .map(|v| v.into_owned())
+            })
+        })
     }
 }
 

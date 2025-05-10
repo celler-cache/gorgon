@@ -136,7 +136,7 @@ fn call<R: Request>(
     }
 }
 
-#[derive(Debug, Deref)]
+#[derive(Debug, Clone, Deref)]
 pub struct Client {
     #[deref]
     client: reqwest::Client,

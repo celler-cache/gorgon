@@ -15,7 +15,6 @@ processes:
     is_foreground: true
     depends_on:
       postgres: { condition: process_healthy }
-      nats: { condition: process_healthy }
     readiness_probe:
       http_get:
         host: localhost
@@ -36,11 +35,3 @@ processes:
     readiness_probe:
       exec:
         command: direnv exec . pg_isready -d postgres
-  nats:
-    description: NATS Server
-    command: |
-      direnv exec . nats-server --jetstream \
-        --store_dir $$NATS_STORE_DIR -a $$NATS_SERVER_ADDR -p $$NATS_SERVER_PORT
-    readiness_probe:
-      exec:
-        command: direnv exec . nats rtt

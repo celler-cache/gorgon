@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::BTreeMap, fmt::Debug};
+use std::fmt::Debug;
 
 use axum::{
-    extract::{FromRequest, Path, Query, State},
+    extract::{FromRequest, Path, State},
     response::IntoResponse,
     routing::{get, post, put},
     Router,
@@ -19,7 +19,7 @@ use diesel_async::{
 use futures::stream::TryStreamExt;
 use gorgond_client::{
     api::{self, ApiError},
-    events, models as client, Uuid, Yoke, Yokeable,
+    Url, Uuid, Yoke, Yokeable,
 };
 use miette::{Context, Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
@@ -39,12 +39,14 @@ pub struct HttpArgs {
     http_addr: String,
 }
 
+#[derive(Clone)]
+pub struct S {
+    pub pool: Pool<AsyncPgConnection>,
+    pub events_base: Url,
+}
+
 #[instrument(name = "http", level = "ERROR", skip_all)]
-pub async fn run(
-    token: CancellationToken,
-    args: HttpArgs,
-    pool: Pool<AsyncPgConnection>,
-) -> miette::Result<()> {
+pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/projects", post(project_create))
@@ -55,13 +57,18 @@ pub async fn run(
         .route("/builds/{build_id}", get(build))
         .route("/builds/{build_id}/events", get(build_events))
         .route(
+            "/builds/{build_id}/internal/heartbeat",
+            put(build_internal_heartbeat),
+        )
+        .route("/builds/{build_id}/internal/end", put(build_internal_end))
+        .route(
             "/workers/{worker}/internal/allocate-build",
             put(worker_internal_allocate_build),
         )
         .fallback(error_not_found)
         .method_not_allowed_fallback(error_method_not_allowed)
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(S { pool });
+        .with_state(state);
 
     debug!(http_addr = args.http_addr, "Binding HTTP listener...");
     let listener = TcpListener::bind(&args.http_addr)
@@ -131,10 +138,6 @@ impl<T: Debug + Serialize> IntoResponse for JsonResponse<T> {
     }
 }
 
-#[derive(Clone)]
-struct S {
-    pool: Pool<AsyncPgConnection>,
-}
 macro_rules! transaction {
     ($state:ident, $block:expr) => {
         $state
@@ -313,49 +316,50 @@ async fn build(
 async fn build_events(
     State(state): State<S>,
     Path(build_id): Path<Uuid>,
-    Query(req): Query<api::BuildEventsRequest>,
-) -> Result<JsonResponse<api::BuildEventsResponse<'static>>> {
+) -> Result<JsonResponse<api::BuildEventsResponse>> {
+    Ok(JsonResponse(api::BuildEventsResponse {
+        url: state.events_base.join(&format!("{build_id}.jseq.zst"))?,
+    }))
+}
+
+async fn build_internal_heartbeat(
+    State(state): State<S>,
+    Path(build_id): Path<Uuid>,
+    JsonRequest(req): JsonRequest<api::BuildInternalHeartbeatRequest>,
+) -> Result<JsonResponse<api::BuildInternalHeartbeatResponse>> {
+    let req = req.get();
     transaction!(state, async |conn: &mut _| {
-        let build = models::Build::get(conn, build_id).await?;
-
-        let exclude_kinds = [req
-            .no_progress
-            .unwrap_or(false)
-            .then_some(models::BuildEventKind::Progress)]
-        .into_iter()
-        .flatten();
-
-        // Events are split up across two tables - fetch both.
-        let build_events = models::BuildEvent::belonging_to(&build)
-            .filter(schema::build_events::kind.ne_all(exclude_kinds))
-            .load::<models::BuildEvent>(conn)
-            .await?;
-        let build_logs = models::BuildLog::belonging_to(&build)
-            .load::<models::BuildLog>(conn)
+        diesel::update(schema::builds::table)
+            .filter(schema::builds::id.eq(build_id))
+            .set((
+                schema::builds::started_at.eq(req.started_at),
+                schema::builds::heartbeat_at.eq(req.heartbeat_at),
+            ))
+            .execute(conn)
             .await?;
 
-        // Then tasks mentioned in them; we need these to reconstruct 'task started' events.
-        let task_ids = build_events
-            .iter()
-            .filter_map(|e| e.task_id)
-            .chain(build_logs.iter().filter_map(|l| l.task_id));
-        let tasks: BTreeMap<Uuid, client::BuildTask> = models::BuildTask::ids(task_ids)
-            .load_stream(conn)
-            .await?
-            .map_ok(|t| (t.id, t.to_client()))
-            .try_collect()
+        Ok(JsonResponse(api::BuildInternalHeartbeatResponse {}))
+    })
+    .await
+}
+async fn build_internal_end(
+    State(state): State<S>,
+    Path(build_id): Path<Uuid>,
+    JsonRequest(req): JsonRequest<api::BuildInternalEndRequest>,
+) -> Result<JsonResponse<api::BuildInternalEndResponse>> {
+    let req = req.get();
+    transaction!(state, async |conn: &mut _| {
+        diesel::update(schema::builds::table)
+            .filter(schema::builds::id.eq(build_id))
+            .set((
+                schema::builds::started_at.eq(req.started_at),
+                schema::builds::ended_at.eq(req.ended_at),
+                schema::builds::result.eq(models::BuildResult::from(req.result)),
+            ))
+            .execute(conn)
             .await?;
 
-        // Merge both kinds of events into one list of client events, sorted by timestamp.
-        let mut events =
-            Vec::<events::BuildEvent>::with_capacity(build_events.len() + build_logs.len());
-        events.extend(build_events.into_iter().map(|e| {
-            let task = e.task_id.and_then(|tid| tasks.get(&tid));
-            e.to_client(task, build.result.map(|v| v.into()))
-        }));
-        events.sort_unstable_by_key(|e| e.timestamp);
-
-        Ok(JsonResponse(api::BuildEventsResponse { events }))
+        Ok(JsonResponse(api::BuildInternalEndResponse {}))
     })
     .await
 }

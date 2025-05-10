@@ -35,7 +35,7 @@ one.
 
 ## Give it a try!
 
-In one terminal, start the supervisor for PostgreSQL and NATS by running:
+In one terminal, start the supervisor for PostgreSQL by running:
 
 ```bash
 $ process-compose
@@ -112,7 +112,8 @@ $ cargo run -p gorgonctl -- project builds test list
 ```
 
 You can also see a log of every event that happened during the build, though note that
-it will be *very long*, and may take `gorgond` several seconds to even respond to:
+it will be *very long* - here we're specifying `-c/--color` and `-f/--format` to get it
+printed in human-friendly form, even though we're piping it to `less`:
 
 ```bash
 $ cargo run -p gorgonctl -- build events 0196affc-8d33-7712-9a7c-61b3013fb73e -cf default | less

@@ -12,6 +12,7 @@ use diesel_async::{
     pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
     AsyncConnection,
 };
+use gorgond_client::Url;
 use miette::{Context, IntoDiagnostic, Result};
 use std::{
     collections::HashMap,
@@ -25,7 +26,6 @@ use tracing::{debug, debug_span, enabled, info, instrument, Level};
 
 pub mod http;
 pub mod models;
-pub mod nats;
 pub mod schema;
 
 #[derive(Debug, Clone, Parser)]
@@ -34,6 +34,14 @@ struct DatabaseArgs {
     /// Database URL.
     #[arg(long, short = 'D', env = "GORGOND_DATABASE_URL")]
     db_url: String,
+}
+
+#[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Events Store")]
+struct EventsArgs {
+    /// Base URL for public event log URLs.
+    #[arg(long, short = 'e', env = "GORGON_EVENT_BASE_URL")]
+    event_base_url: Url,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -48,9 +56,9 @@ struct Args {
     #[command(flatten)]
     db: DatabaseArgs,
     #[command(flatten)]
-    http: http::HttpArgs,
+    events: EventsArgs,
     #[command(flatten)]
-    nats: nats::NatsArgs,
+    http: http::HttpArgs,
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -123,7 +131,6 @@ fn init_logging(args: &Args) {
                 .with_target("axum::rejections", Level::TRACE)
                 // These log way too much internal information. Comment out if debugging them.
                 .with_target("tokio_postgres", Level::INFO)
-                .with_target("async_nats", Level::INFO)
                 .with_default(level),
         )
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
@@ -189,11 +196,14 @@ async fn run(args: Args) -> miette::Result<()> {
     tasks.spawn_named("Ctrl+C", wait_for_ctrlc(token.clone()));
     tasks.spawn_named(
         "HTTP Server",
-        http::run(token.child_token(), args.http, pool.clone()),
-    );
-    tasks.spawn_named(
-        "NATS Consumer",
-        nats::run(token.child_token(), args.nats, pool.clone()),
+        http::run(
+            token.child_token(),
+            args.http,
+            http::S {
+                pool: pool.clone(),
+                events_base: args.events.event_base_url,
+            },
+        ),
     );
 
     let mut errs = None::<Vec<miette::Report>>;

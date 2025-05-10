@@ -4,6 +4,7 @@
 
 use std::{collections::BTreeMap, fmt::Display};
 
+use chrono::prelude::*;
 use derive_more::{Constructor, Deref, DerefMut};
 use miette::Diagnostic;
 use ownable::{
@@ -13,10 +14,11 @@ use ownable::{
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display as EnumDisplay, IntoStaticStr};
+use url::Url;
 use uuid::Uuid;
 use yoke::Yokeable;
 
-use crate::{events, models, Client, Request, Result, Yoke};
+use crate::{models, Client, Request, Result, Yoke};
 
 #[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
@@ -63,6 +65,14 @@ impl From<ApiErrorWrapper> for ApiError {
 #[serde(tag = "type")]
 #[strum(serialize_all = "title_case")]
 pub enum ApiError {
+    #[serde(rename = "tag:IO")]
+    #[diagnostic(code("gorgond:IO"))]
+    #[error("IO Error")]
+    IO {
+        #[source]
+        error: ApiErrorSource,
+    },
+
     #[serde(rename = "tag:NoSuchRoute")]
     #[diagnostic(code("gorgond:NoSuchRoute"))]
     #[error("No such route: {route}")]
@@ -84,6 +94,13 @@ pub enum ApiError {
     #[diagnostic(code("gorgond::BadRequestJson"))]
     #[error("Bad request JSON")]
     BadRequestJson {
+        #[source]
+        error: ApiErrorSource,
+    },
+    #[serde(rename = "tag:BadUrl")]
+    #[diagnostic(code("gorgond::BadUrl"))]
+    #[error("Bad URL")]
+    BadUrl {
         #[source]
         error: ApiErrorSource,
     },
@@ -110,7 +127,7 @@ pub enum ApiError {
         error: ApiErrorSource,
     },
     #[serde(rename = "tag:DatabaseConnection")]
-    #[diagnostic(code("gorgond::DatabaseQueryError"))]
+    #[diagnostic(code("gorgond::DatabaseConnection"))]
     #[error("Database connection error")]
     DatabaseConnection {
         #[source]
@@ -150,6 +167,7 @@ pub enum ApiError {
 impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::IO { .. } | Self::BadUrl { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
             Self::BadRequestBody { .. } | Self::BadRequestJson { .. } => StatusCode::BAD_REQUEST,
@@ -163,6 +181,12 @@ impl ApiError {
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::NoWorkAvailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    pub fn io(err: std::io::Error) -> Self {
+        Self::IO {
+            error: Self::wrap_err(&err),
         }
     }
 
@@ -204,6 +228,14 @@ impl ApiError {
             write!(f, ": {key}")?;
         }
         Ok(())
+    }
+}
+
+impl From<url::ParseError> for ApiError {
+    fn from(err: url::ParseError) -> Self {
+        Self::BadUrl {
+            error: Self::wrap_err(&err),
+        }
     }
 }
 
@@ -564,15 +596,13 @@ mkrequest!(BuildRequest, BuildResponse<'static>, {
         pub build: models::Build<'a>,
     }
 });
-mkrequest!(BuildEventsRequest, BuildEventsResponse<'static>, {
+mkrequest!(BuildEventsRequest, BuildEventsResponse, {
     #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildEventsRequest {
-        pub no_progress: Option<bool>,
-    }
+    pub struct BuildEventsRequest {}
     #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildEventsResponse<'a> {
-        #[serde(borrow)]
-        pub events: Vec<events::BuildEvent<'a>>,
+    pub struct BuildEventsResponse {
+        #[ownable(clone)]
+        pub url: Url,
     }
 });
 
@@ -581,10 +611,53 @@ pub struct BuildClient<'a> {
     client: &'a Client,
     build_id: Uuid,
 }
-impl BuildClient<'_> {
+impl<'a> BuildClient<'a> {
+    pub fn internal(&self) -> BuildInternalClient<'a> {
+        BuildInternalClient::new(self.client, self.build_id)
+    }
     gen_endpoints!("builds/{build_id}", (build_id), {
         fn get(BuildRequest) -> (GET, "");
         fn events(BuildEventsRequest) -> (GET, "events");
+    });
+}
+
+mkrequest!(
+    BuildInternalHeartbeatRequest,
+    BuildInternalHeartbeatResponse,
+    {
+        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+        pub struct BuildInternalHeartbeatRequest {
+            #[ownable(clone)]
+            pub started_at: DateTime<Utc>,
+            #[ownable(clone)]
+            pub heartbeat_at: DateTime<Utc>,
+        }
+        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+        pub struct BuildInternalHeartbeatResponse {}
+    }
+);
+mkrequest!(BuildInternalEndRequest, BuildInternalEndResponse, {
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildInternalEndRequest {
+        #[ownable(clone)]
+        pub started_at: DateTime<Utc>,
+        #[ownable(clone)]
+        pub ended_at: DateTime<Utc>,
+        pub result: models::BuildResult,
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+    pub struct BuildInternalEndResponse {}
+});
+
+#[derive(Debug, Constructor)]
+pub struct BuildInternalClient<'a> {
+    client: &'a Client,
+    build_id: Uuid,
+}
+impl BuildInternalClient<'_> {
+    gen_endpoints!("builds/{build_id}/internal", (build_id), {
+        fn end(BuildInternalEndRequest) -> (PUT, "end");
+        fn heartbeat(BuildInternalHeartbeatRequest) -> (PUT, "heartbeat");
     });
 }
 

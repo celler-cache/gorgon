@@ -12,3 +12,5 @@ result-*
 /nix-supervisor.sock
 /nix-supervisor.db
 .direnv/
+
+/data

@@ -55,6 +55,17 @@ pub enum BuildEventKind<'a> {
     #[serde(borrow)]
     Log(Log<'a>),
 }
+impl BuildEventKind<'_> {
+    pub fn is_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::Task(BuildTaskEvent {
+                event: BuildTaskEventKind::Updated(BuildTaskUpdate::Progress { .. }),
+                ..
+            })
+        )
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct BuildTaskEvent<'a> {
