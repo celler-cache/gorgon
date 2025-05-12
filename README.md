@@ -48,7 +48,7 @@ Then start `gorgond` by either:
 
   ```bash
   $ ./gorgond/bin/diesel database setup
-  $ cargo run -p gorgond -- -v
+  $ cargo run -p gorgond -- -v run
   ```
 
 These two do the exact same thing - launching it from `process-compose` just saves you

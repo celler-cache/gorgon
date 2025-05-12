@@ -11,7 +11,7 @@ processes:
       eval "$(direnv export bash)"
 
       ./gorgond/bin/diesel database setup
-      cargo run -p gorgond -- -v
+      cargo run -p gorgond -- -v run
     is_foreground: true
     depends_on:
       postgres: { condition: process_healthy }
