@@ -17,6 +17,7 @@ diesel = { version = "2.2.9", default-features = false, optional = true }
 diesel-async = { version = "0.5.2", features = ["deadpool"], optional = true }
 log = { version = "0.4.27", optional = true }
 miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter", "serde"] }
+minicbor = { version = "0.26.5", features = ["std", "derive"] }
 ownable = "0.6.2"
 reqwest = "0.12.12"
 serde = { version = "1.0.217", features = ["derive"] }

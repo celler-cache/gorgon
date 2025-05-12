@@ -79,31 +79,23 @@ pub struct Args {
 }
 
 struct WritingEventHandler<W: Write> {
-    w: Mutex<Option<W>>,
+    w: Mutex<Option<minicbor_io::Writer<W>>>,
     build_id: Uuid,
     next: &'static dyn EventHandler,
 }
 impl<W: Write> WritingEventHandler<W> {
     pub fn new(w: W, build_id: Uuid, next: &'static dyn EventHandler) -> Self {
         Self {
-            w: Mutex::new(Some(w)),
+            w: Mutex::new(Some(minicbor_io::Writer::new(w))),
             build_id,
             next,
         }
-    }
-    fn write_event(&self, event: &events::BuildEvent) -> Result<()> {
-        let mut w = self.w.lock();
-        let mut w = w
-            .as_mut()
-            .expect("Event received after handler was shut down!");
-        serde_json::to_writer(&mut w, event).into_diagnostic()?;
-        write!(&mut w, "\x1E").into_diagnostic()?; // ASCII Record Separator
-        Ok(())
     }
     fn shutdown(&self) -> W {
         self.w
             .lock()
             .take()
+            .map(|w| w.into_parts().0)
             .expect("Attempted to shut down event handler twice!")
     }
 }
@@ -111,7 +103,14 @@ impl<W: Write> EventHandler for WritingEventHandler<W> {
     fn handle(&self, target: &str, mut event: Event) {
         if let Event::Build(ref mut event) = event {
             event.build_id = self.build_id;
-            self.write_event(event).expect("Couldn't write event!?");
+
+            let mut w = self.w.lock();
+            let w = w
+                .as_mut()
+                .expect("Event received after handler was shut down!");
+            w.write(event)
+                .into_diagnostic()
+                .expect("Couldn't write event!?");
         }
         self.next.handle(target, event);
     }
@@ -291,7 +290,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     info!(id:% = build.id, __log__=build_.backing_cart(); " -> Got a task!");
 
     // Test that the log storage backend seems to work.
-    let event_path = event_dir_path.child(format!("{}.jseq.zst", build.id));
+    let event_path = event_dir_path.child(format!("{}.cbor.zst", build.id));
     rt.block_on(event_store.put(&event_path, object_store::PutPayload::new()))
         .into_diagnostic()
         .context("Couldn't create events log file in destination")?;

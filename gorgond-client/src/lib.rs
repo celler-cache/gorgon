@@ -15,6 +15,7 @@ pub use uuid::Uuid;
 pub use yoke::Yokeable;
 
 pub mod api;
+pub mod cbor;
 pub mod events;
 pub mod models;
 

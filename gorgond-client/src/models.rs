@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use chrono::prelude::*;
+use minicbor::{Decode, Encode};
 use ownable::{IntoOwned, ToOwned};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
@@ -52,11 +53,16 @@ pub struct Worker<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Display, Clone, Copy, Serialize, Deserialize, ToOwned, IntoOwned)]
+#[derive(
+    Debug, Display, Clone, Copy, Serialize, Deserialize, ToOwned, IntoOwned, Encode, Decode,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildResult {
+    #[n(0)]
     Unknown,
+    #[n(1)]
     Success,
+    #[n(2)]
     Failure,
 }
 
@@ -115,30 +121,40 @@ pub struct Build<'a> {
     IntoStaticStr,
     ToOwned,
     IntoOwned,
+    Encode,
+    Decode,
 )]
 pub enum BuildTaskLevel {
+    #[n(0)]
     #[serde(rename = "E")]
     #[strum(serialize = "E")]
     Error,
+    #[n(1)]
     #[serde(rename = "W")]
     #[strum(serialize = "W")]
     Warn,
+    #[n(2)]
     #[serde(rename = "N")]
     #[strum(serialize = "N")]
     Notice,
+    #[n(3)]
     #[serde(rename = "I")]
     #[strum(serialize = "I")]
     #[default]
     Info,
+    #[n(4)]
     #[serde(rename = "T")]
     #[strum(serialize = "T")]
     Talkative,
+    #[n(5)]
     #[serde(rename = "C")]
     #[strum(serialize = "C")]
     Chatty,
+    #[n(6)]
     #[serde(rename = "D")]
     #[strum(serialize = "D")]
     Debug,
+    #[n(7)]
     #[serde(rename = "V")]
     #[strum(serialize = "V")]
     Vomit,
@@ -175,47 +191,74 @@ impl From<BuildTaskLevel> for log::Level {
     IntoStaticStr,
     ToOwned,
     IntoOwned,
+    Encode,
+    Decode,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum BuildTaskKind {
+    #[n(0)]
     Helper,
+    #[n(1)]
     Realise,
+    #[n(2)]
     Builds,
+    #[n(3)]
     Build,
+    #[n(4)]
     PostBuildHook,
+    #[n(5)]
     BuildWaiting,
+    #[n(6)]
     Substitute,
+    #[n(7)]
     CopyPaths,
+    #[n(8)]
     CopyPath,
+    #[n(9)]
     FileTransfer,
+    #[n(10)]
     OptimiseStore,
+    #[n(11)]
     VerifyPaths,
+    #[n(12)]
     QueryPathInfo,
 }
 
 /// A task performed as part of a Build.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+#[derive(
+    Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned, Encode, Decode,
+)]
 pub struct BuildTask<'a> {
     #[ownable(clone)]
+    #[cbor(n(0), with = "crate::cbor::uuid", has_nil)]
     pub id: Uuid,
     #[ownable(clone)]
+    #[cbor(n(1), with = "crate::cbor::uuid::opt", has_nil)]
     pub parent_id: Option<Uuid>,
     #[ownable(clone)]
+    #[cbor(n(2), with = "crate::cbor::uuid", has_nil)]
     pub build_id: Uuid,
 
+    #[b(3)]
     #[serde(borrow)]
     pub name: Cow<'a, str>,
+    #[n(4)]
     pub kind: Option<BuildTaskKind>,
+    #[n(5)]
     pub level: BuildTaskLevel,
 
     #[ownable(clone)]
-    pub created_at: Option<DateTime<Utc>>,
-    #[ownable(clone)]
-    pub updated_at: Option<DateTime<Utc>>,
-    #[ownable(clone)]
+    #[cbor(n(6), with = "crate::cbor::timestamp", has_nil)]
     pub started_at: DateTime<Utc>,
     #[ownable(clone)]
+    #[cbor(n(7), with = "crate::cbor::timestamp::opt", has_nil)]
     pub ended_at: Option<DateTime<Utc>>,
+    #[ownable(clone)]
+    #[cbor(n(8), with = "crate::cbor::timestamp::opt", has_nil)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[ownable(clone)]
+    #[cbor(n(9), with = "crate::cbor::timestamp::opt", has_nil)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 impl<'a> BuildTask<'a> {
     pub fn borrowed(&'a self) -> Self {

@@ -21,6 +21,8 @@ clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
 humantime = "2.2.0"
 log = { version = "0.4.26", features = ["kv", "kv_serde"] }
 miette = "7.5.0"
+minicbor-io = "0.21.0"
+minicbor = { version = "0.26.5", features = ["std"] }
 object_store = "0.12.0"
 parking_lot = "0.12.3"
 reqwest = "0.12.12"
