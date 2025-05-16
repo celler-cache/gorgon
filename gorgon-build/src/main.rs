@@ -25,7 +25,7 @@ use gorgon_build_helper::{
 };
 use gorgond_client::{
     api,
-    events::{self, BuildEvent, BuildEventKind},
+    events::{BuildEvent, BuildEventKind},
     models::{Build, BuildResult},
     Client, Uuid, Yoke,
 };
