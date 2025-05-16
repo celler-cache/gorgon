@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgond-diesel"
+version = "0.1.0"
+edition = "2024"
+license = "EUPL-1.2"
+
+[dependencies]
+gorgond-client = { path = "../gorgond-client", features = ["diesel"] }
+
+chrono.workspace = true
+diesel-async = { workspace = true, features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel-derive-enum.workspace = true
+diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "32-column-tables", "with-deprecated"] }
+serde = { workspace = true, features = ["derive"] }
+uuid.workspace = true
+yoke = { workspace = true, features = ["derive"] }

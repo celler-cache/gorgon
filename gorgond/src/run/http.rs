@@ -21,13 +21,12 @@ use gorgond_client::{
     api::{self, ApiError},
     Url, Uuid, Yoke, Yokeable,
 };
+use gorgond_diesel::{models, schema};
 use miette::{Context, Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
-
-use crate::{models, schema};
 
 pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 
@@ -174,8 +173,7 @@ async fn project_create(
         let now = Utc::now();
         let project = models::Project::from_spec(req.get().project.to_owned(), Uuid::now_v7(), now);
         let project = {
-            use crate::schema::projects::dsl::*;
-            diesel::insert_into(projects)
+            diesel::insert_into(schema::projects::table)
                 .values(&project)
                 .get_result::<models::Project>(conn)
                 .await?

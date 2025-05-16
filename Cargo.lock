@@ -1616,6 +1616,7 @@ dependencies = [
  "futures",
  "gorgon-build-helper",
  "gorgond-client",
+ "gorgond-diesel",
  "humantime",
  "miette",
  "minicbor",
@@ -1659,6 +1660,20 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+ "yoke 0.8.0",
+]
+
+[[package]]
+name = "gorgond-diesel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "diesel",
+ "diesel-async",
+ "diesel-derive-enum",
+ "gorgond-client",
+ "serde",
  "uuid",
  "yoke 0.8.0",
 ]

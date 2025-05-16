@@ -5,18 +5,19 @@
 [workspace]
 resolver = "2"
 members = [
-    "gorgon-github-events",
     "nix-web",
     "nix-supervisor",
     "nix-daemon",
-    "gorgond",
-    "gorgond-client",
-    "gorgonctl",
     "gorgon-build",
     "gorgon-build-helper",
     "gorgon-build-nix",
-    "gorgon-util-cli",
+    "gorgonctl",
+    "gorgond",
+    "gorgond-client",
+    "gorgond-diesel",
+    "gorgon-github-events",
     "gorgon-rollup",
+    "gorgon-util-cli",
 ]
 
 [workspace.dependencies]

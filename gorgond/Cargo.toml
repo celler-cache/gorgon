@@ -9,8 +9,9 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 gorgon-build-helper = { path = "../gorgon-build-helper" }
+gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
+gorgond-diesel = { path = "../gorgond-diesel" }
 
 axum-extra = { workspace = true, features = ["erased-json"] }
 axum = { workspace = true, features = ["macros", "http1", "tokio"] }

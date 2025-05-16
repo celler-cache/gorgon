@@ -55,7 +55,7 @@ async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Resu
     use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
     // Migrations are embedded into the binary.
-    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../gorgond-diesel/migrations");
 
     // Bridge the async connection back into a sync one for diesel-migrations.
     tokio::task::block_in_place(move || {

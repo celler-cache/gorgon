@@ -11,9 +11,7 @@ use clap::{Parser, Subcommand};
 use miette::Result;
 
 pub mod events;
-pub mod models;
 pub mod run;
-pub mod schema;
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
