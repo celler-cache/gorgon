@@ -14,18 +14,17 @@ gorgond-client = { path = "../gorgond-client" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 nix-daemon = { path = "../nix-daemon" }
 
-chrono = "0.4.40"
+chrono.workspace = true
 clap-stdin = "0.6.0"
-clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
-derive_more = { version = "2.0.1", features = ["full"] }
-log = { version = "0.4.26", features = ["kv", "kv_serde"] }
-miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
-nutmeg = "0.1.4"
+clap.workspace = true
+derive_more.workspace = true
+log.workspace = true
+miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
 once_cell = { version = "1.21.3", features = ["parking_lot"] }
-owo-colors = "4.1.0"
-serde_json = "1.0.138"
-thiserror = "2.0.11"
-url = "2.5.4"
+owo-colors.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

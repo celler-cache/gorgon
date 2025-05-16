@@ -12,35 +12,34 @@ license = "EUPL-1.2"
 gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 
-axum-extra = { version = "0.10.0", features = ["erased-json"] }
-axum = { version = "0.8.1", features = ["macros"] }
-backon = "1.5.0"
-bytesize = "2.0.1"
-chrono = { version = "0.4.40", features = ["serde"] }
-clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
-clio = { version = "0.3.5", features = ["clap-parse"] }
-derive_more = { version = "2.0.1", features = ["full"] }
-diesel-async = { version = "0.5.2", features = ["async-connection-wrapper", "deadpool", "postgres"] }
-diesel-derive-enum = { version = "3.0.0-beta.1", features = ["postgres"] }
-diesel_migrations = "2.2.0"
-diesel = { version = "2.2.7", features = ["chrono", "uuid", "postgres_backend"] }
-futures = "0.3.31"
-humantime = "2.2.0"
-miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
-minicbor-io = "0.21.0"
-minicbor = { version = "0.26.5", features = ["std"] }
-ownable = "0.6.2"
-scoped-futures = "0.1.4"
-serde_json = "1.0.140"
-serde = { version = "1.0.217", features = ["derive"] }
-syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
-thingbuf = "0.1.6"
-thiserror = "2.0.11"
-tokio-stream = "0.1.17"
-tokio-util = "0.7.15"
-tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "macros", "parking_lot", "signal"] }
+axum-extra = { workspace = true, features = ["erased-json"] }
+axum = { workspace = true, features = ["macros", "http1", "tokio"] }
+backon.workspace = true
+bytesize.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clio.workspace = true
+derive_more.workspace = true
+diesel-async = { workspace = true, features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel-derive-enum.workspace = true
+diesel_migrations.workspace = true
+diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "32-column-tables", "with-deprecated"] }
+futures.workspace = true
+humantime.workspace = true
+miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
+minicbor-io.workspace = true
+minicbor.workspace = true
+ownable.workspace = true
+scoped-futures.workspace = true
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+syntect.workspace = true
+thiserror.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "signal", "macros"] }
 tower-http = { version = "0.6.2", features = ["trace"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
-uuid = { version = "1.16.0", features = ["v7", "serde"] }
-yoke = { version = "0.8.0", features = ["derive"] }
+tracing-subscriber.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+yoke = { workspace = true, features = ["derive"] }

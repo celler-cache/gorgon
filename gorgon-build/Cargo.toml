@@ -13,21 +13,21 @@ gorgond-client = { path = "../gorgond-client" }
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 
-backon = "1.5.0"
-bytes = "1.10.1"
-bytesize = "2.0.1"
-chrono = "0.4.41"
-clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
-humantime = "2.2.0"
-log = { version = "0.4.26", features = ["kv", "kv_serde"] }
-miette = "7.5.0"
-minicbor-io = "0.21.0"
-minicbor = { version = "0.26.5", features = ["std"] }
-object_store = "0.12.0"
-parking_lot = "0.12.3"
-reqwest = "0.12.12"
-serde_json = "1.0.140"
-tempfile = "3.19.1"
-tokio-util = { version = "0.7.15", features = ["io-util"] }
-tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "net", "fs", "macros", "parking_lot"] }
-zstd = "0.13.3"
+backon.workspace = true
+bytes.workspace = true
+bytesize.workspace = true
+chrono.workspace = true
+clap.workspace = true
+humantime.workspace = true
+log.workspace = true
+miette.workspace = true
+minicbor-io.workspace = true
+minicbor.workspace = true
+object_store.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio-util = { workspace = true, features = ["io-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "fs", "macros", "parking_lot"] }
+zstd.workspace = true

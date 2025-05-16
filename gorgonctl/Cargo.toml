@@ -11,21 +11,21 @@ license = "EUPL-1.2"
 [dependencies]
 gorgond-client = { path = "../gorgond-client" }
 
-bytesize = "2.0.1"
-chrono = { version = "0.4.40", features = ["serde"] }
-clap = { version = "4.5.27", features = ["env", "cargo", "derive"] }
-colored_json = "5.0.0"
-comfy-table = "7.1.4"
-derive_more = { version = "2.0.1", features = ["full"] }
-miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter"] }
-owo-colors = { version = "4.2.0", features = ["supports-colors"] }
-serde_json = "1.0.138"
-serde = { version = "1.0.217", features = ["derive"] }
-syntect = { version = "5.2.0", default-features = false, features = ["default-fancy"] }
-terminal_size = "0.4.2"
-thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["rt", "rt-multi-thread", "macros", "parking_lot"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["time", "smallvec", "once_cell", "parking_lot"] }
-url = "2.5.4"
-zstd = "0.13.3"
+bytesize.workspace = true
+chrono.workspace = true
+clap.workspace = true
+colored_json.workspace = true
+comfy-table.workspace = true
+derive_more.workspace = true
+miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
+owo-colors.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+syntect.workspace = true
+terminal_size.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+zstd.workspace = true

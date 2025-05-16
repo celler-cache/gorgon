@@ -9,27 +9,27 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-axum = { version = "0.8.1", optional = true, default-features = false }
-axum-extra = { version = "0.10.0", features = ["erased-json"], optional = true }
-chrono = { version = "0.4.39", features = ["serde"] }
-derive_more = { version = "2.0.1", features = ["full"] }
-diesel = { version = "2.2.9", default-features = false, optional = true }
-diesel-async = { version = "0.5.2", features = ["deadpool"], optional = true }
-log = { version = "0.4.27", optional = true }
-miette = { version = "7.5.0", features = ["fancy", "syntect-highlighter", "serde"] }
-minicbor = { version = "0.26.5", features = ["std", "derive"] }
-ownable = "0.6.2"
-reqwest = "0.12.12"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.138"
-serde_urlencoded = "0.7.1"
-strum = { version = "0.26.3", features = ["derive"] }
-thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["net", "macros", "parking_lot"] }
-tracing = "0.1.41"
-url = { version = "2.5.4", features = ["serde"] }
-uuid = { version = "1.13.1", features = ["v6", "v7", "v8", "serde"] }
-yoke = { version = "0.8.0", features = ["derive"] }
+axum = { workspace = true, optional = true }
+axum-extra = { workspace = true, features = ["erased-json"], optional = true }
+chrono.workspace = true
+derive_more.workspace = true
+diesel = { workspace = true, optional = true }
+diesel-async = { workspace = true, features = ["deadpool"], optional = true }
+log = { workspace = true, optional = true }
+miette.workspace = true
+minicbor = { workspace = true, features = ["derive"] }
+ownable.workspace = true
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+yoke = { workspace = true, features = ["derive"] }
 
 [features]
 axum = ["dep:axum", "dep:axum-extra"]
