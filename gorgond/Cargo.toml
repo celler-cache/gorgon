@@ -22,8 +22,6 @@ clap.workspace = true
 clio.workspace = true
 derive_more.workspace = true
 diesel-async = { workspace = true, features = ["async-connection-wrapper", "deadpool", "postgres"] }
-diesel-derive-enum.workspace = true
-diesel_migrations.workspace = true
 diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "32-column-tables", "with-deprecated"] }
 futures.workspace = true
 humantime.workspace = true

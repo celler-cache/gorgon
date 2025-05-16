@@ -2,30 +2,16 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::HashMap, error::Error as StdError, future::Future};
+use std::{collections::HashMap, future::Future};
 
 use clap::Parser;
-use diesel::pg::Pg;
-use diesel_async::{
-    pg::AsyncPgConnection,
-    pooled_connection::{deadpool::Pool, AsyncDieselConnectionManager},
-    AsyncConnection,
-};
 use gorgond_client::Url;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, debug_span, enabled, info, instrument, Level};
+use tracing::{debug, enabled, info, instrument, Level};
 
 pub mod http;
-
-#[derive(Debug, Clone, Parser)]
-#[command(next_help_heading = "Database Connection")]
-pub struct DatabaseArgs {
-    /// Database URL.
-    #[arg(long, short = 'D', env = "GORGOND_DATABASE_URL")]
-    db_url: String,
-}
 
 #[derive(Debug, Clone, Parser)]
 #[command(next_help_heading = "Events Store")]
@@ -38,64 +24,11 @@ pub struct EventsArgs {
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     #[command(flatten)]
-    db: DatabaseArgs,
+    db: gorgond_diesel::Args,
     #[command(flatten)]
     events: EventsArgs,
     #[command(flatten)]
     http: http::HttpArgs,
-}
-
-#[derive(Debug, thiserror::Error, miette::Diagnostic)]
-#[error(transparent)]
-struct MigrationError(#[from] Box<dyn StdError + Send + Sync>);
-
-#[instrument(name = "migrate", level = "DEBUG", skip_all)]
-async fn db_migrate<C: AsyncConnection<Backend = Pg> + 'static>(conn: C) -> Result<()> {
-    use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
-    use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
-
-    // Migrations are embedded into the binary.
-    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../gorgond-diesel/migrations");
-
-    // Bridge the async connection back into a sync one for diesel-migrations.
-    tokio::task::block_in_place(move || {
-        debug!("Running migrations...");
-        let mut conn = AsyncConnectionWrapper::<C>::from(conn);
-        match conn.pending_migrations(MIGRATIONS)? {
-            pending if pending.is_empty() => debug!("▶️ Migrations already up to date"),
-            pending => {
-                info!(num = pending.len(), "⏸️ Database has pending migrations");
-                for migration in pending {
-                    let name = migration.name();
-                    let _enter = debug_span!("migration", %name).entered();
-                    info!(%name, "⏩ Applying migration...");
-
-                    conn.run_migration(&migration)?;
-                }
-                info!("▶️ Database successfully migrated!");
-            }
-        }
-        Ok(())
-    })
-    .map_err(MigrationError)
-    .context("Migrations Failed")
-}
-
-#[instrument(name = "db", level = "DEBUG", skip_all)]
-async fn init_db(args: &Args) -> Result<Pool<AsyncPgConnection>> {
-    debug!(db_url = args.db.db_url, "Connecting to database...");
-    let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&args.db.db_url);
-    let pool = Pool::builder(cfg)
-        .build()
-        .into_diagnostic()
-        .context("Couldn't build database connection pool")?;
-    let conn = pool
-        .get()
-        .await
-        .into_diagnostic()
-        .context("Couldn't get connection from pool")?;
-    db_migrate(conn).await?;
-    Ok(pool)
 }
 
 #[instrument(name = "ctrl_c", skip_all)]
@@ -149,7 +82,7 @@ impl Tasks {
 struct TaskErrors(#[related] Vec<miette::Report>);
 
 pub async fn run(args: Args) -> Result<()> {
-    let pool = init_db(&args).await?;
+    let pool = args.db.init().await?;
     let token = CancellationToken::new();
     let mut tasks = Tasks::default();
     tasks.spawn_named("Ctrl+C", wait_for_ctrlc(token.clone()));
