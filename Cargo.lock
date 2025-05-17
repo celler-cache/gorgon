@@ -1570,6 +1570,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gorgon-util-diesel"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "diesel",
+ "diesel-async",
+ "diesel-derive-enum",
+ "diesel_migrations",
+ "miette",
+ "thiserror 2.0.11",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "gorgonctl"
 version = "0.1.0"
 dependencies = [
@@ -1608,8 +1623,10 @@ dependencies = [
  "derive_more",
  "diesel",
  "diesel-async",
+ "diesel_migrations",
  "futures",
  "gorgon-build-helper",
+ "gorgon-util-diesel",
  "gorgond-client",
  "gorgond-diesel",
  "humantime",
@@ -1663,17 +1680,12 @@ name = "gorgond-diesel"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "clap",
  "diesel",
  "diesel-async",
  "diesel-derive-enum",
- "diesel_migrations",
  "gorgond-client",
  "miette",
  "serde",
- "thiserror 2.0.11",
- "tokio",
- "tracing",
  "uuid",
  "yoke 0.8.0",
 ]

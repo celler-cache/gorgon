@@ -5,6 +5,7 @@
 use std::{collections::HashMap, future::Future};
 
 use clap::Parser;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 use gorgond_client::Url;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio::task::{AbortHandle, Id, JoinSet};
@@ -24,7 +25,7 @@ pub struct EventsArgs {
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     #[command(flatten)]
-    db: gorgond_diesel::Args,
+    db: gorgon_util_diesel::Args,
     #[command(flatten)]
     events: EventsArgs,
     #[command(flatten)]
@@ -82,7 +83,9 @@ impl Tasks {
 struct TaskErrors(#[related] Vec<miette::Report>);
 
 pub async fn run(args: Args) -> Result<()> {
-    let pool = args.db.init().await?;
+    const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+    let pool = args.db.init(MIGRATIONS).await?;
+
     let token = CancellationToken::new();
     let mut tasks = Tasks::default();
     tasks.spawn_named("Ctrl+C", wait_for_ctrlc(token.clone()));

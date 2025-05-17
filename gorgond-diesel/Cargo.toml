@@ -12,15 +12,10 @@ license = "EUPL-1.2"
 gorgond-client = { path = "../gorgond-client", features = ["diesel"] }
 
 chrono.workspace = true
-clap.workspace = true
-diesel-async = { workspace = true, features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel-async = { workspace = true, features = ["postgres"] }
 diesel-derive-enum.workspace = true
-diesel_migrations.workspace = true
-diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "32-column-tables", "with-deprecated"] }
+diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "with-deprecated"] }
 miette.workspace = true
 serde = { workspace = true, features = ["derive"] }
-thiserror.workspace = true
-tokio = { workspace = true, features = ["rt"] }
-tracing.workspace = true
 uuid.workspace = true
 yoke = { workspace = true, features = ["derive"] }

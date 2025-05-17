@@ -18,6 +18,7 @@ members = [
     "gorgon-github-events",
     "gorgon-rollup",
     "gorgon-util-cli",
+    "gorgon-util-diesel",
 ]
 
 [workspace.dependencies]

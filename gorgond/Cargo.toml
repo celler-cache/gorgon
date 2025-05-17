@@ -12,6 +12,7 @@ license = "EUPL-1.2"
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 gorgond-diesel = { path = "../gorgond-diesel" }
+gorgon-util-diesel = { path = "../gorgon-util-diesel" }
 
 axum-extra = { workspace = true, features = ["erased-json"] }
 axum = { workspace = true, features = ["macros", "http1", "tokio"] }
@@ -22,6 +23,7 @@ clap.workspace = true
 clio.workspace = true
 derive_more.workspace = true
 diesel-async = { workspace = true, features = ["async-connection-wrapper", "deadpool", "postgres"] }
+diesel_migrations.workspace = true
 diesel = { workspace = true, features = ["chrono", "uuid", "postgres_backend", "32-column-tables", "with-deprecated"] }
 futures.workspace = true
 humantime.workspace = true
