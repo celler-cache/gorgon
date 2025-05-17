@@ -19,9 +19,9 @@ use gorgond_client::{
     models::{BuildTask, BuildTaskKind},
     Uuid,
 };
-use log::{debug, error, info, log_enabled, trace, warn};
 use miette::{NamedSource, SourceOffset};
 use owo_colors::OwoColorize;
+use tracing::{debug, enabled, error, info, info_span, trace, warn};
 
 use crate::{event_handler, Event, SerializedError};
 
@@ -193,14 +193,14 @@ impl HelperCaller for HelperFinder<'_> {
             match src_path.try_exists() {
                 Ok(true) => {
                     info!(
-                        target: "helper::dev", name=name.as_ref().to_string_lossy();
+                        name = &*name.as_ref().to_string_lossy(),
                         "🚧 Building helper from source..."
                     );
                     return Helper::build_dev(&name, repo_path, &self.current_dir);
                 }
-                Ok(false) => trace!(target: "helper::dev", src_path:?; "Path does not exist"),
+                Ok(false) => trace!(?src_path, "Path does not exist"),
                 Err(err) => {
-                    debug!(target: "helper::dev", src_path:?, err:%; "Couldn't check if path exists")
+                    debug!(?src_path, %err, "Couldn't check if path exists")
                 }
             }
         }
@@ -263,8 +263,8 @@ impl Helper {
     }
 
     pub fn start(&mut self) -> Result<HelperChild> {
-        if log_enabled!(log::Level::Debug) {
-            debug!(target:"helper", __log__:display=self; "Invoking helper...");
+        if enabled!(tracing::Level::DEBUG) {
+            debug!(%self, "Invoking helper...");
         }
         self.spawn()
             .map(|child| HelperChild {
@@ -336,14 +336,16 @@ impl Helper {
     }
 
     pub fn into_task(self, task: Option<BuildTask<'static>>) -> TaskHelper {
+        let task = task.unwrap_or_else(|| BuildTask {
+            id: Uuid::now_v7(),
+            name: self.name().into_owned().into(),
+            kind: Some(BuildTaskKind::Helper),
+            ..Default::default()
+        });
         TaskHelper {
-            task: task.unwrap_or_else(|| BuildTask {
-                id: Uuid::now_v7(),
-                name: self.name().into_owned().into(),
-                kind: Some(BuildTaskKind::Helper),
-                ..Default::default()
-            }),
+            span: info_span!("task", name = &*task.name),
             helper: self,
+            task,
         }
     }
 }
@@ -369,51 +371,66 @@ impl HelperChild<'_> {
 pub struct TaskHelper {
     task: BuildTask<'static>,
     helper: Helper,
+    span: tracing::Span,
 }
 
 #[derive(Debug)]
 pub struct TaskChild<'a> {
     pub helper: &'a TaskHelper,
     pub child: Child,
-    join_stderr: JoinHandle<Result<(), StderrError>>,
+    join_stdout: JoinHandle<Result<(), StderrError>>,
     recv_err: crossbeam::channel::Receiver<SerializedError>,
-    _stop_on_drop: StopTaskOnDrop<'a>,
+    _stop_on_drop: StopTaskOnDrop,
 }
 
 impl TaskHelper {
-    pub fn start(&mut self) -> Result<TaskChild, TaskError> {
-        event_handler().handle(
-            &self.task.name,
-            Event::Build(
-                BuildTaskEvent {
-                    task_id: self.task.id,
-                    event: BuildTaskEventKind::Started(self.task.borrowed()),
-                }
-                .into(),
-            ),
-        );
+    pub fn start(&mut self, level: tracing::Level) -> Result<TaskChild, TaskError> {
+        let _enter = self.span.enter();
+        event_handler().handle(Event::Build(
+            BuildTaskEvent {
+                task_id: self.task.id,
+                event: BuildTaskEventKind::Started(self.task.borrowed()),
+            }
+            .into(),
+        ));
 
         self.helper
-            .env("GORGON_VERBOSE", "100")
-            .env("GORGON_OUTPUT_FORMAT", "json")
-            .env("GORGON_LOG_FORMAT", "json")
+            .env(
+                "GORGON_VERBOSE",
+                match level {
+                    tracing::Level::DEBUG => "1",
+                    tracing::Level::TRACE => "2",
+                    _ => "0",
+                },
+            )
+            .env(
+                "GORGON_QUIET",
+                match level {
+                    tracing::Level::WARN => "1",
+                    tracing::Level::ERROR => "2",
+                    _ => "0",
+                },
+            )
+            .env("GORGON_EVENTS", "true")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::inherit());
         let HelperChild {
             helper: _,
             mut child,
         } = self.helper.start()?;
 
         let (send_err, recv_err) = crossbeam::channel::unbounded::<SerializedError>();
-        let join_stderr = std::thread::spawn({
-            let name = self.task.name.to_string();
+        let join_stdout = std::thread::spawn({
+            let span = self.span.clone();
             let task_id = self.task.id;
-            let mut stderr = std::io::BufReader::new(child.stderr.take().expect("No child stderr"));
+            let mut stdout = std::io::BufReader::new(child.stdout.take().expect("No child stdout"));
             move || -> Result<(), StderrError> {
+                let _enter = span.entered();
+                let _enter = info_span!("stdout").entered();
                 let handler = event_handler();
                 let mut buf = String::new();
                 loop {
-                    stderr.read_line(&mut buf)?;
+                    stdout.read_line(&mut buf)?;
                     if buf.is_empty() {
                         return Ok(());
                     }
@@ -424,7 +441,7 @@ impl TaskHelper {
                                 continue;
                             }
                             Err(err) => Err(StderrError::from(JsonError::new(
-                                NamedSource::new("stderr", buf.clone()).with_language("JSON"),
+                                NamedSource::new("stdout", buf.clone()).with_language("JSON"),
                                 err,
                             ))),
                             Ok(event) => Ok(event),
@@ -451,9 +468,9 @@ impl TaskHelper {
                             send_err.try_send(err.clone())?;
                         }
 
-                        handler.handle(&name, event);
+                        handler.handle(event);
                     } else {
-                        warn!("stderr: {}", buf.trim_end());
+                        warn!("{}", buf.trim_end());
                     }
 
                     // Now we can clear the buffer.
@@ -464,10 +481,9 @@ impl TaskHelper {
         Ok(TaskChild {
             helper: self,
             child,
-            join_stderr,
+            join_stdout,
             recv_err,
             _stop_on_drop: StopTaskOnDrop {
-                target: &self.task.name,
                 task_id: self.task.id,
             },
         })
@@ -476,15 +492,16 @@ impl TaskHelper {
 
 impl TaskChild<'_> {
     pub fn wait_checked(self) -> Result<Output, TaskError> {
+        let _enter = self.helper.span.enter();
         let output = self.child.wait_with_output().map_err(HelperError::Start)?;
-        self.join_stderr.join().expect("stderr thread panicked!?")?;
+        self.join_stdout.join().expect("stdout thread panicked!?")?;
         match output.status {
             status if !status.success() => {
                 let stdout_str = LazyCell::new(|| String::from_utf8_lossy(&output.stdout));
 
                 // If debug logging is enabled, log stdout.
-                if log_enabled!(log::Level::Debug) {
-                    let termwidth = terminal_size::terminal_size_of(std::io::stderr())
+                if enabled!(tracing::Level::DEBUG) {
+                    let termwidth = terminal_size::terminal_size_of(std::io::stdout())
                         .map(|(w, _)| w.0 as usize)
                         .unwrap_or(80);
                     eprintln!(
@@ -521,21 +538,17 @@ impl TaskChild<'_> {
 /// Dropping this value will emit a "task stopped" event. TaskChild holds an instance.
 /// (We're not implementing Drop directly on TaskChild, as then we can't move out of it.)
 #[derive(Debug)]
-pub struct StopTaskOnDrop<'a> {
-    target: &'a str,
+pub struct StopTaskOnDrop {
     task_id: Uuid,
 }
-impl Drop for StopTaskOnDrop<'_> {
+impl Drop for StopTaskOnDrop {
     fn drop(&mut self) {
-        event_handler().handle(
-            self.target,
-            Event::Build(
-                BuildTaskEvent {
-                    task_id: self.task_id,
-                    event: BuildTaskEventKind::Stopped,
-                }
-                .into(),
-            ),
-        )
+        event_handler().handle(Event::Build(
+            BuildTaskEvent {
+                task_id: self.task_id,
+                event: BuildTaskEventKind::Stopped,
+            }
+            .into(),
+        ))
     }
 }

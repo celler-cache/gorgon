@@ -16,7 +16,6 @@ use gorgond_client::{
     models::BuildTaskLevel,
     Uuid,
 };
-use log::{info, trace, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use nix_daemon::{
     nix::internal_json::{
@@ -32,6 +31,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
+use tracing::{info, trace, warn};
 use url::{Position, Url};
 
 #[derive(Debug, Clone, Parser)]
@@ -177,7 +177,7 @@ impl NixCommand {
                         let action = match serde_json::from_str::<Action>(json).into_diagnostic() {
                             Ok(action) => action,
                             Err(err) => {
-                                warn!(err:display; "Couldn't decode log line");
+                                warn!("{:?}", err.context("Couldn't decode log line"));
                                 continue;
                             }
                         };
@@ -266,7 +266,14 @@ impl NixCommand {
                                         }) => {
                                             let dedup = (done, expected, running, failed);
                                             if progress_dedup.insert(id, dedup) == Some(dedup) {
-                                                trace!(id, done, expected, running, failed; "Skipping duplicate Progress");
+                                                trace!(
+                                                    id,
+                                                    done,
+                                                    expected,
+                                                    running,
+                                                    failed,
+                                                    "Skipping duplicate Progress"
+                                                );
                                             }
                                             BuildTaskEventKind::Updated(BuildTaskUpdate::Progress {
                                                 done: done.try_into().expect("done"),
@@ -296,15 +303,12 @@ impl NixCommand {
                                 text: msg.into(),
                             }),
                         };
-                        event_handler().handle(
-                            "nix",
-                            Event::Build(BuildEvent {
-                                timestamp: Utc::now(),
-                                build_id: Uuid::nil(),
-                                event_id: Uuid::now_v7(),
-                                event,
-                            }),
-                        );
+                        event_handler().handle(Event::Build(BuildEvent {
+                            timestamp: Utc::now(),
+                            build_id: Uuid::nil(),
+                            event_id: Uuid::now_v7(),
+                            event,
+                        }));
                     }
                 }
                 Ok(())
@@ -342,13 +346,13 @@ fn run(args: Args) -> Result<()> {
             .with_context(|| format!("build.inputs[{i}]"))?;
     }
     inst.args(["--expr", &build.spec.expr]);
-    info!(inst:?; "Instantiating derivation...");
+    info!(?inst, "Instantiating derivation...");
     let drv = inst.call().context("nix-instantiate failed")?;
 
     // ...then realise (build) it.
     let mut build = NixCommand::new(args.nix_store);
     build.args(["--realise", &drv]);
-    info!(build:?; "Building...");
+    info!(?build, "Building...");
     let out = build.call().context("nix-instantiate failed")?;
 
     println!("{out}");
@@ -357,8 +361,8 @@ fn run(args: Args) -> Result<()> {
 
 fn main() {
     let args = Args::parse();
-    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
-    gorgon_util_cli::main(args.common.output_format, || run(args));
+    gorgon_util_cli::logger(args.common).init();
+    gorgon_util_cli::main(args.common, || run(args));
 }
 
 pub fn task_level(verbosity: Verbosity) -> BuildTaskLevel {

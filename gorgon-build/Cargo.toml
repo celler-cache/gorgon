@@ -14,12 +14,11 @@ gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 
 backon.workspace = true
-bytes.workspace = true
 bytesize.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 humantime.workspace = true
-log.workspace = true
 miette.workspace = true
 minicbor-io.workspace = true
 minicbor.workspace = true
@@ -30,4 +29,5 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio-util = { workspace = true, features = ["io-util"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "fs", "macros", "parking_lot"] }
+tracing.workspace = true
 zstd.workspace = true

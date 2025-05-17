@@ -8,7 +8,6 @@ use std::{
     io::Write,
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
-    time::Instant,
 };
 
 use clap::Parser;
@@ -21,108 +20,125 @@ use gorgond_client::{
     events::{
         BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind, BuildTaskUpdate, Log,
     },
-    models::BuildTask,
+    models::{BuildTask, BuildTaskLevel},
     Uuid,
 };
-use log::{error, info, log, log_enabled, Level};
 use miette::{miette, Context, IntoDiagnostic, Result};
-use owo_colors::{OwoColorize, Stream, Style};
 use parking_lot::RwLock;
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+use tracing::{debug, error, info, info_span, trace, warn, Span};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EventLoggerTask {
-    level: log::Level,
-    started: Instant,
+    span: Span,
 }
 
-#[derive(Default)]
 pub struct EventLogger {
+    span: Span,
     tasks: RwLock<BTreeMap<Uuid, EventLoggerTask>>,
 }
+impl Default for EventLogger {
+    fn default() -> Self {
+        Self {
+            span: info_span!("event"),
+            tasks: Default::default(),
+        }
+    }
+}
+impl EventLogger {
+    fn log_log(
+        &self,
+        Log {
+            level,
+            kind,
+            file: _,
+            column: _,
+            line: _,
+            text,
+        }: Log,
+    ) {
+        match level {
+            BuildTaskLevel::Error => error!(%kind, "{text}"),
+            BuildTaskLevel::Warn => warn!(%kind, "{text}"),
+            BuildTaskLevel::Notice | BuildTaskLevel::Info => info!("{text}",),
+            BuildTaskLevel::Talkative | BuildTaskLevel::Chatty | BuildTaskLevel::Debug => {
+                debug!(%kind, "{text}")
+            }
+            BuildTaskLevel::Vomit => trace!(%kind, "{text}"),
+        }
+    }
+}
 impl EventHandler for EventLogger {
-    fn handle(&self, target: &str, event: Event<'_>) {
-        let log_log = |lvl: Level, log: Log| {
-            log::logger().log(
-                &log::Record::builder()
-                    .target(target)
-                    .level(lvl)
-                    .file(log.file.as_deref())
-                    .line(log.line.map(|v| v as _))
-                    .key_values(&("kind", log.kind.as_ref()))
-                    .args(format_args!("{}", log.text))
-                    .build(),
-            )
-        };
-
+    fn handle(&self, event: Event<'_>) {
+        let _enter = self.span.enter();
         match event {
             Event::Error(err) => {
-                let e = format!("{:?}", miette::Report::new(err));
-                error!(__log__=e; "Error")
+                error!("{:?}", miette::Report::new(err))
             }
-            Event::Log(log) => log.log(target),
-            Event::Build(BuildEvent { event, .. }) => match event {
-                BuildEventKind::Started => info!(target: target, "Build: Started"),
-                BuildEventKind::Stopped(result) => {
-                    info!(target: target, result:?; "Build: Stopped")
-                }
-                BuildEventKind::Log(log) => log_log(Level::Info, log),
-                BuildEventKind::Task(BuildTaskEvent { task_id, event }) => {
-                    let task: EventLoggerTask =
-                        match event {
-                            BuildTaskEventKind::Started(BuildTask { level, .. }) => {
-                                let task = EventLoggerTask {
-                                    level: level.into(),
-                                    started: Instant::now(),
-                                };
-                                self.tasks.write().insert(task_id, task);
-                                task
-                            }
-                            _ => self.tasks.read().get(&task_id).copied().unwrap_or(
-                                EventLoggerTask {
-                                    level: Level::Trace,
-                                    started: Instant::now(),
-                                },
-                            ),
+            Event::Build(BuildEvent { event, .. }) => {
+                let build_span = info_span!("build");
+                let _enter = build_span.enter();
+                match event {
+                    BuildEventKind::Started => info!("Build Started"),
+                    BuildEventKind::Stopped(result) => info!(%result, "Build Stopped"),
+                    BuildEventKind::Log(log) => self.log_log(log),
+                    BuildEventKind::Task(BuildTaskEvent { task_id, event }) => {
+                        if let BuildTaskEventKind::Started(BuildTask {
+                            level,
+                            parent_id,
+                            ref name,
+                            ..
+                        }) = event
+                        {
+                            let mut tasks = self.tasks.write();
+                            let task = EventLoggerTask {
+                                span: parent_id
+                                    .and_then(|id| tasks.get(&id).map(|e| &e.span))
+                                    .unwrap_or(&build_span)
+                                    .in_scope(|| match level {
+                                        BuildTaskLevel::Error => {
+                                            tracing::error_span!("task", %name, %level)
+                                        }
+                                        BuildTaskLevel::Warn => {
+                                            tracing::warn_span!("task", %name, %level)
+                                        }
+                                        BuildTaskLevel::Notice | BuildTaskLevel::Info => {
+                                            tracing::info_span!("task", %name, %level)
+                                        }
+                                        BuildTaskLevel::Talkative
+                                        | BuildTaskLevel::Chatty
+                                        | BuildTaskLevel::Debug
+                                        | BuildTaskLevel::Vomit => {
+                                            tracing::debug_span!("task", %name, %level)
+                                        }
+                                    }),
+                            };
+                            tasks.insert(task_id, task);
+                        } else if let BuildTaskEventKind::Stopped = event {
+                            self.tasks.write().remove(&task_id);
+                            return;
                         };
+                        let tasks = self.tasks.read();
+                        let Some(task) = tasks.get(&task_id) else {
+                            error!(%task_id, "Event received for unknown task!");
+                            return;
+                        };
+                        let _enter = task.span.enter();
 
-                    let lvl = match event {
-                        BuildTaskEventKind::Started(_) | BuildTaskEventKind::Stopped => task.level,
-                        BuildTaskEventKind::Log(Log { level, .. }) => level.into(),
-                        BuildTaskEventKind::Updated(ref update) => match update {
-                            BuildTaskUpdate::UntrustedPath | BuildTaskUpdate::CorruptedPath => {
-                                Level::Warn
-                            }
-                            BuildTaskUpdate::FileLinked { .. }
-                            | BuildTaskUpdate::SetPhase { .. } => Level::Debug,
-                            BuildTaskUpdate::Progress { .. } => Level::Trace,
-                        },
-                    };
-                    if log_enabled!(target: target, lvl) {
                         match event {
-                            BuildTaskEventKind::Started(BuildTask {
-                                level, kind, name, ..
-                            }) => {
-                                let level: &'static str = level.into();
-                                let kind: &'static str = kind.map(|v| v.into()).unwrap_or("???");
-                                log!(target: target, lvl, name, level, kind; "+ Started");
-                            }
-                            BuildTaskEventKind::Stopped => {
-                                let t = humantime::Duration::from(Instant::now() - task.started);
-                                log!(target: target, lvl, t:%; "- Stopped");
-                            }
+                            BuildTaskEventKind::Started(..) | BuildTaskEventKind::Stopped => {}
                             BuildTaskEventKind::Updated(update) => match update {
                                 BuildTaskUpdate::FileLinked { bytes } => {
-                                    log!(target: target, lvl, bytes; "  -> File Linked")
+                                    info!(bytes, "  -> File Linked")
                                 }
                                 BuildTaskUpdate::UntrustedPath => {
-                                    log!(target: target, lvl, "  -> Untrusted Path")
+                                    warn!("  -> Untrusted Path")
                                 }
                                 BuildTaskUpdate::CorruptedPath => {
-                                    log!(target: target, lvl, "  -> Corrupted Path")
+                                    warn!("  -> Corrupted Path")
                                 }
                                 BuildTaskUpdate::SetPhase { phase } => {
-                                    log!(target: target, lvl, phase; "  -> Phase Change")
+                                    info!(phase = &*phase, "  -> Phase Change")
                                 }
                                 BuildTaskUpdate::Progress {
                                     done,
@@ -130,14 +146,14 @@ impl EventHandler for EventLogger {
                                     running,
                                     failed,
                                 } => {
-                                    log!(target: target, lvl, done, expected, running, failed; "  -> Progress")
+                                    trace!(done, expected, running, failed, "  -> Progress")
                                 }
                             },
-                            BuildTaskEventKind::Log(log) => log_log(lvl, log),
+                            BuildTaskEventKind::Log(log) => self.log_log(log),
                         };
                     }
                 }
-            },
+            }
         }
     }
 }
@@ -145,10 +161,10 @@ impl EventHandler for EventLogger {
 #[derive(Default)]
 struct EventSerializer;
 impl EventHandler for EventSerializer {
-    fn handle(&self, _: &str, event: Event) {
-        let mut stderr = std::io::stderr().lock();
-        serde_json::to_writer(&mut stderr, &event).expect("Couldn't serialize event!?");
-        let _ = writeln!(&mut stderr);
+    fn handle(&self, event: Event) {
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &event).expect("Couldn't serialize event!?");
+        let _ = writeln!(&mut stdout);
     }
 }
 
@@ -175,7 +191,7 @@ pub enum OutputFormat {
     Json,
 }
 
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Copy, Parser)]
 #[group(id = "common")]
 #[command(next_help_heading = "Logging")]
 pub struct Args {
@@ -187,23 +203,19 @@ pub struct Args {
     #[arg(long, short, env = "GORGON_QUIET", action=clap::ArgAction::Count)]
     pub quiet: u8,
 
-    /// Output format for logs and events.
-    #[arg(long, env = "GORGON_LOG_FORMAT", default_value = "default")]
-    pub log_format: OutputFormat,
-
-    /// Output format for output and errors.
-    #[arg(long, env = "GORGON_OUTPUT_FORMAT", default_value = "default")]
-    pub output_format: OutputFormat,
+    /// Write events to stdout.
+    #[arg(long, env = "GORGON_EVENTS", action=clap::ArgAction::SetTrue)]
+    pub events: bool,
 }
 
 impl Args {
-    pub fn level(&self) -> log::LevelFilter {
+    pub fn level(&self) -> tracing::Level {
         match self.verbose as i8 - self.quiet as i8 {
-            ..=-2 => log::LevelFilter::Error,
-            -1 => log::LevelFilter::Warn,
-            0 => log::LevelFilter::Info,
-            1 => log::LevelFilter::Debug,
-            2.. => log::LevelFilter::Trace,
+            ..=-2 => tracing::Level::ERROR,
+            -1 => tracing::Level::WARN,
+            0 => tracing::Level::INFO,
+            1 => tracing::Level::DEBUG,
+            2.. => tracing::Level::TRACE,
         }
     }
 }
@@ -216,9 +228,10 @@ impl HelperContext for &Args {
         if self.quiet > 0 {
             helper = helper.with_env("GORGON_QUIET", self.quiet.to_string());
         }
+        if self.events {
+            helper = helper.with_env("GORGON_EVENTS", "true");
+        }
         helper
-            .with_env("GORGON_LOG_FORMAT", self.log_format.as_ref())
-            .with_env("GORGON_OUTPUT_FORMAT", self.output_format.as_ref())
     }
 }
 
@@ -296,172 +309,80 @@ impl HelperArgs {
 
 #[must_use]
 pub struct LoggerBuilder {
-    format: OutputFormat,
-    level: log::LevelFilter,
-    target_levels: BTreeMap<Cow<'static, str>, log::LevelFilter>,
+    level: tracing::Level,
+    target_levels: BTreeMap<Cow<'static, str>, tracing::Level>,
 }
 
 impl LoggerBuilder {
-    pub fn with_format(mut self, format: OutputFormat) -> Self {
-        self.format = format;
-        self
-    }
-
     pub fn with_target_level(
         mut self,
         target: impl Into<Cow<'static, str>>,
-        level: log::LevelFilter,
+        level: tracing::Level,
     ) -> Self {
         self.target_levels.insert(target.into(), level);
         self
     }
 
     pub fn init(self) {
-        let disp = self.target_levels.into_iter().fold(
-            fern::Dispatch::new().level(self.level),
-            |disp, (target, level)| disp.level_for(target, level),
-        );
-        let disp = match self.format {
-            OutputFormat::Default => disp
-                .format(move |out, message, record| {
-                    let level = record.level();
-                    let level_style = match level {
-                        log::Level::Error => Style::new().red(),
-                        log::Level::Warn => Style::new().yellow(),
-                        log::Level::Info => Style::new(),
-                        log::Level::Debug => Style::new().blue(),
-                        log::Level::Trace => Style::new().dimmed(),
-                    };
-                    let text_style = match level {
-                        log::Level::Info => Style::new(),
-                        log::Level::Trace => Style::new().dimmed(),
-                        _ => level_style,
-                    };
-                    let kv_style = match level {
-                        log::Level::Debug | log::Level::Trace => level_style,
-                        _ => text_style.dimmed(),
-                    };
-
-                    // fern doesn't have a good way to do key/value formatting atm:
-                    // https://github.com/daboross/fern/issues/63
-                    struct KVDisplay<'a>(&'a dyn log::kv::Source);
-                    impl std::fmt::Display for KVDisplay<'_> {
-                        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                            struct Visitor<'b, 'f>(&'b mut std::fmt::Formatter<'f>);
-                            impl<'kv> log::kv::VisitSource<'kv> for Visitor<'_, '_> {
-                                fn visit_pair(
-                                    &mut self,
-                                    key: log::kv::Key<'kv>,
-                                    value: log::kv::Value<'kv>,
-                                ) -> std::result::Result<(), log::kv::Error>
-                                {
-                                    match key.as_str() {
-                                        "__log__" => Ok(()),
-                                        _ => write!(self.0, " {key}={value}")
-                                            .map_err(|_| log::kv::Error::msg("fmt::Error")),
-                                    }
-                                }
-                            }
-                            self.0
-                                .visit(&mut Visitor(f))
-                                .map_err(move |_| std::fmt::Error)
-                        }
-                    }
-
-                    let log = record.key_values().get("__log__".into()).map(|log| {
-                        textwrap::fill(
-                            &format!("{log}"),
-                            textwrap::Options::with_termwidth()
-                                .initial_indent("  ")
-                                .subsequent_indent("  "),
-                        )
-                    });
-
-                    out.finish(format_args!(
-                        "{:<5}  {}{}{}{}",
-                        level.if_supports_color(Stream::Stderr, |v| v.style(level_style)),
-                        format_args!("{target:<20}  {message}", target = record.target(),)
-                            .if_supports_color(Stream::Stderr, |v| v.style(text_style)),
-                        KVDisplay(record.key_values())
-                            .if_supports_color(Stream::Stderr, |v| v.style(kv_style)),
-                        log.as_ref().map(|_| "\n").unwrap_or(""),
-                        log.as_deref()
-                            .unwrap_or_default()
-                            .if_supports_color(Stream::Stderr, |v| v.style(text_style)),
-                    ))
-                })
-                .chain(std::io::stderr()),
-            OutputFormat::Json => disp.chain(fern::Output::call(|rec| {
-                let mut stderr = std::io::stderr().lock();
-                serde_json::to_writer(
-                    &mut stderr,
-                    &gorgon_build_helper::Event::Log(
-                        rec.try_into()
-                            .expect("Couldn't turn log record into log event: {rec}"),
-                    ),
-                )
-                .expect("Couldn't write JSON log line: {rec}");
-                writeln!(stderr).expect("Couldn't write newline after JSON line: {rec}");
-            })),
-        };
-        disp.apply().expect("Couldn't apply logger!?");
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::Registry::default()
+            .with(
+                tracing_subscriber::filter::Targets::new()
+                    .with_targets(self.target_levels)
+                    .with_default(self.level),
+            )
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
     }
 }
 
-pub fn logger(format: OutputFormat, level: log::LevelFilter) -> LoggerBuilder {
+pub fn logger(args: Args) -> LoggerBuilder {
     LoggerBuilder {
-        format,
-        level,
+        level: args.level(),
         target_levels: BTreeMap::new(),
     }
 }
 
-pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(format: OutputFormat, f: F) {
+pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(args: Args, f: F) {
     static MAIN_CALLED: AtomicBool = AtomicBool::new(false);
     assert!(
         !MAIN_CALLED.swap(true, Ordering::SeqCst),
         "Please don't call main() more than once."
     );
 
-    match format {
-        OutputFormat::Default => {
-            miette::set_hook(Box::new(|_| {
-                Box::new(
-                    miette::MietteHandlerOpts::new()
-                        .with_syntax_highlighting(
-                            miette::highlighters::SyntectHighlighter::default(),
-                        )
-                        .context_lines(6)
-                        .build(),
-                )
-            }))
-            .expect("Couldn't install miette hook");
+    miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
+                .context_lines(6)
+                .build(),
+        )
+    }))
+    .expect("Couldn't install miette hook");
 
-            // SAFETY: See MAIN_CALLED.
-            unsafe {
-                gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventLogger::default())))
-            };
-        }
-        OutputFormat::Json => {
-            // SAFETY: See MAIN_CALLED.
-            unsafe { gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventSerializer))) };
-        }
+    if !args.events {
+        // SAFETY: See MAIN_CALLED.
+        unsafe {
+            gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventLogger::default())))
+        };
+    } else {
+        // SAFETY: See MAIN_CALLED.
+        unsafe { gorgon_build_helper::set_event_handler(Box::leak(Box::new(EventSerializer))) };
     }
 
     if let Err(err) = f().map_err(|err| err.into()) {
-        match format {
-            OutputFormat::Default => eprintln!("\n{err:?}"),
-            OutputFormat::Json => {
-                write_colored_json_with_mode(
-                    &Event::Error(SerializedError::new(
-                        AsRef::<dyn miette::Diagnostic>::as_ref(&err),
-                    )),
-                    &mut std::io::stderr(),
-                    colored_json::ColorMode::Auto(colored_json::Output::StdErr),
-                )
-                .expect("Couldn't serialize error");
-                println!();
-            }
+        if !args.events {
+            eprintln!("\n{err:?}");
+        } else {
+            write_colored_json_with_mode(
+                &Event::Error(SerializedError::new(
+                    AsRef::<dyn miette::Diagnostic>::as_ref(&err),
+                )),
+                &mut std::io::stdout(),
+                colored_json::ColorMode::Auto(colored_json::Output::StdOut),
+            )
+            .expect("Couldn't serialize error");
+            println!();
         }
 
         if err.severity().unwrap_or(miette::Severity::Error) >= miette::Severity::Error {

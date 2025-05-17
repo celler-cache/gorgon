@@ -9,13 +9,12 @@ edition = "2021"
 license = "EUPL-1.2"
 
 [dependencies]
-gorgond-client = { path = "../gorgond-client", features = ["log"] }
+gorgond-client = { path = "../gorgond-client" }
 
 clap.workspace = true
 crossbeam.workspace = true
 derive_more.workspace = true
 humantime.workspace = true
-log.workspace = true
 miette.workspace = true
 owo-colors.workspace = true
 serde_json.workspace = true
@@ -24,4 +23,6 @@ strum.workspace = true
 terminal_size.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tracing-serde-structured.workspace = true
+tracing.workspace = true
 which = "7.0.2"

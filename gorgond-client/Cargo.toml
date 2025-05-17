@@ -15,7 +15,6 @@ chrono.workspace = true
 derive_more.workspace = true
 diesel = { workspace = true, optional = true }
 diesel-async = { workspace = true, features = ["deadpool"], optional = true }
-log = { workspace = true, optional = true }
 miette.workspace = true
 minicbor = { workspace = true, features = ["derive"] }
 ownable.workspace = true
@@ -34,4 +33,3 @@ yoke = { workspace = true, features = ["derive"] }
 [features]
 axum = ["dep:axum", "dep:axum-extra"]
 diesel = ["dep:diesel", "dep:diesel-async"]
-log = ["dep:log"]

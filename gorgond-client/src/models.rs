@@ -159,17 +159,16 @@ pub enum BuildTaskLevel {
     #[strum(serialize = "V")]
     Vomit,
 }
-#[cfg(feature = "log")]
-impl From<BuildTaskLevel> for log::Level {
+impl From<BuildTaskLevel> for tracing::Level {
     fn from(level: BuildTaskLevel) -> Self {
         match level {
-            BuildTaskLevel::Error => log::Level::Error,
-            BuildTaskLevel::Warn => log::Level::Warn,
-            BuildTaskLevel::Notice | BuildTaskLevel::Info => log::Level::Info,
+            BuildTaskLevel::Error => tracing::Level::ERROR,
+            BuildTaskLevel::Warn => tracing::Level::WARN,
+            BuildTaskLevel::Notice | BuildTaskLevel::Info => tracing::Level::INFO,
             BuildTaskLevel::Talkative | BuildTaskLevel::Chatty | BuildTaskLevel::Debug => {
-                log::Level::Debug
+                tracing::Level::DEBUG
             }
-            BuildTaskLevel::Vomit => log::Level::Trace,
+            BuildTaskLevel::Vomit => tracing::Level::TRACE,
         }
     }
 }

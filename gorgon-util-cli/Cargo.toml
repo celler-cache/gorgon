@@ -14,16 +14,16 @@ gorgond-client = { path = "../gorgond-client" }
 
 clap.workspace = true
 colored_json.workspace = true
-fern.workspace = true
 humantime.workspace = true
-log.workspace = true
 miette = { workspace = true, features = ["fancy", "syntect-highlighter"] }
-owo-colors.workspace = true
 parking_lot.workspace = true
-serde.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 strum.workspace = true
 supports-color.workspace = true
 syntect.workspace = true
 textwrap.workspace = true
 tokio.workspace = true
+tracing-serde-structured.workspace = true
+tracing-subscriber = { workspace = true, features = ["json"] }
+tracing.workspace = true

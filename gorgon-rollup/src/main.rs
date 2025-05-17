@@ -105,6 +105,6 @@ fn run(args: Args) -> miette::Result<()> {
 
 fn main() {
     let args = Args::parse();
-    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
-    gorgon_util_cli::main(args.common.output_format, || run(args));
+    gorgon_util_cli::logger(args.common).init();
+    gorgon_util_cli::main(args.common, || run(args));
 }

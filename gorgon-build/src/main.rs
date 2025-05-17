@@ -30,13 +30,13 @@ use gorgond_client::{
     Client, Uuid, Yoke,
 };
 use humantime::Duration;
-use log::{debug, error, info, warn};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use object_store::ObjectStore;
 use parking_lot::Mutex;
 use reqwest::Url;
 use tokio::runtime::Runtime;
 use tokio_util::{io::SyncIoBridge, sync::CancellationToken};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
@@ -100,7 +100,7 @@ impl<W: Write> WritingEventHandler<W> {
     }
 }
 impl<W: Write> EventHandler for WritingEventHandler<W> {
-    fn handle(&self, target: &str, mut event: Event) {
+    fn handle(&self, mut event: Event) {
         if let Event::Build(ref mut event) = event {
             event.build_id = self.build_id;
 
@@ -112,13 +112,13 @@ impl<W: Write> EventHandler for WritingEventHandler<W> {
                 .into_diagnostic()
                 .expect("Couldn't write event!?");
         }
-        self.next.handle(target, event);
+        self.next.handle(event);
     }
 }
 
 fn init_event_store(args: &Args) -> Result<(Arc<Box<dyn ObjectStore>>, object_store::path::Path)> {
     let url = &args.event_store_url;
-    debug!(url:?; "Building object store...");
+    debug!(%url, "Building object store...");
     let (event_store, event_dir_path) = object_store::parse_url(url)
         .into_diagnostic()
         .with_context(|| url.to_string())?;
@@ -140,6 +140,7 @@ async fn request_build(args: &Args, client: &Client) -> Result<Yoke<Build<'stati
         .map_project(|rsp, _| rsp.build))
 }
 
+#[instrument(name = "heartbeats", skip(client))]
 async fn send_heartbeats(
     client: Client,
     build_id: Uuid,
@@ -156,7 +157,7 @@ async fn send_heartbeats(
         let tick = ticker.tick().await;
         let delay = Duration::from(tick.duration_since(last_tick));
         let heartbeat_at = Utc::now();
-        debug!(target: "heartbeats", delay:%, heartbeat_at:%; "Sending heartbeat...");
+        debug!(%delay, %heartbeat_at, "Sending heartbeat...");
         last_tick = tick;
 
         let req = api::BuildInternalHeartbeatRequest {
@@ -166,9 +167,9 @@ async fn send_heartbeats(
         if let Err(err) = build_internal
             .heartbeat(req)
             .await
-            .map_err(miette::Report::new)
+            .context("Heartbeat Failed")
         {
-            error!(target: "heartbeats", __log__:?=err; "Heartbeat Failed");
+            error!("{err:?}");
         }
     }
 }
@@ -230,7 +231,7 @@ fn upload_logs(
         (|| -> std::io::Result<()> {
             while !r.fill_buf()?.is_empty() {
                 r.consume(w.write(r.buffer()).inspect(|len| pos += *len as u64)?);
-                debug!(pos:display, len:display; "-> Uploading event log");
+                debug!(%pos, %len, "-> Uploading event log");
             }
             Ok(())
         })()
@@ -251,9 +252,9 @@ fn upload_logs(
     }
     .retry(ExponentialBuilder::default())
     .when(|(retry, _)| *retry)
-    .notify(|err, d| {
+    .notify(|(_, err), d| {
         let d = Duration::from(d);
-        warn!(__log__:?=err; "Failed to upload event log -- retrying in {d}...");
+        warn!("Failed to upload event log -- retrying in {d}...\n\n{err:?}");
     })
     .call()
     .map_err(|(_, err)| err)
@@ -287,14 +288,14 @@ pub fn run(args: Args) -> miette::Result<()> {
         .block_on(request_build(&args, &client))
         .context("Couldn't get something to build; lost and without purpose")?;
     let build = build_.get();
-    info!(id:% = build.id, __log__=build_.backing_cart(); " -> Got a task!");
+    info!(id = %build.id, task=build_.backing_cart(), " -> Got a task!");
 
     // Test that the log storage backend seems to work.
     let event_path = event_dir_path.child(format!("{}.cbor.zst", build.id));
     rt.block_on(event_store.put(&event_path, object_store::PutPayload::new()))
         .into_diagnostic()
         .context("Couldn't create events log file in destination")?;
-    info!(event_path:%, event_store:%; "Log storage backend is working!");
+    info!(%event_path, %event_store, "Log storage backend is working!");
 
     // We'll write events to a temporary file to begin with.
     let event_handler = {
@@ -319,7 +320,9 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     // Start the builder process...
     info!("Starting build...");
-    let mut build_child = build_task.start().context("Couldn't start build")?;
+    let mut build_child = build_task
+        .start(args.common.level())
+        .context("Couldn't start build")?;
 
     // ...feed it the build context over stdin...
     let build_child_stdin = build_child
@@ -333,10 +336,7 @@ pub fn run(args: Args) -> miette::Result<()> {
 
     // ...start communicating with gorgond...
     let started_at = Utc::now();
-    event_handler.handle(
-        "gorgon-build",
-        Event::Build(BuildEvent::from(BuildEventKind::Started)),
-    );
+    event_handler.handle(Event::Build(BuildEvent::from(BuildEventKind::Started)));
     let cancel_heartbeats = CancellationToken::new();
     let join_heartbeats = rt.spawn(cancel_heartbeats.child_token().run_until_cancelled_owned(
         send_heartbeats(
@@ -350,7 +350,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     // ...and wait for the build to finish - note that the build failing does not mean we fail.
     let result = match build_child.wait_checked() {
         Err(err) => {
-            error!(__log__:debug=err; "Build Failed");
+            error!("{:?}", miette::Report::new(err).context("Build Failed"));
             BuildResult::Failure
         }
         Ok(_) => {
@@ -359,13 +359,12 @@ pub fn run(args: Args) -> miette::Result<()> {
         }
     };
     let ended_at = Utc::now();
-    event_handler.handle(
-        "gorgon-build",
-        Event::Build(BuildEvent::from(BuildEventKind::Stopped(result))),
-    );
+    event_handler.handle(Event::Build(BuildEvent::from(BuildEventKind::Stopped(
+        result,
+    ))));
 
     // Upload event log.
-    info!(event_store:display, event_path:display; "-> Uploading event log...");
+    info!(%event_store, %event_path, "-> Uploading event log...");
     let event_file = event_handler
         .shutdown()
         .into_inner()
@@ -382,7 +381,7 @@ pub fn run(args: Args) -> miette::Result<()> {
             .retry(ExponentialBuilder::default())
             .notify(|err, d| {
                 let d = Duration::from(d);
-                warn!(__log__:?=err; "Failed to report build completion -- retrying in {d}...");
+                warn!("Failed to report build completion -- retrying in {d}...\n\n{err:?}");
             }),
     )
     .context("Couldn't report build completion")?;
@@ -390,7 +389,7 @@ pub fn run(args: Args) -> miette::Result<()> {
     // And stop reporting in.
     cancel_heartbeats.cancel();
     if let Err(err) = rt.block_on(join_heartbeats).into_diagnostic() {
-        warn!(__log__:?=err; "Heartbeat task panicked!")
+        warn!("{:?}", err.context("Heartbeat task panicked!"))
     }
 
     info!("All done - goodbye!");
@@ -399,6 +398,6 @@ pub fn run(args: Args) -> miette::Result<()> {
 
 fn main() {
     let args = Args::parse();
-    gorgon_util_cli::logger(args.common.log_format, args.common.level()).init();
-    gorgon_util_cli::main(args.common.output_format, || run(args));
+    gorgon_util_cli::logger(args.common).init();
+    gorgon_util_cli::main(args.common, || run(args));
 }
