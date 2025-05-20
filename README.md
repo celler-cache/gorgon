@@ -99,7 +99,7 @@ $ cargo run -p gorgonctl -- project builds test create -k nix \
 }
 ```
 
-And then build it! _(The output of this command is currently a bit of a mess, and will change soon.)_
+And then build it! _(Note that this may take a while.)_
 
 ```bash
 $ cargo run -p gorgon-build -- -vvi $(hostname) --helper-dev
