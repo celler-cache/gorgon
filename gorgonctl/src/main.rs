@@ -6,11 +6,7 @@
 // returning Error if it's not silenced like this.
 #![allow(clippy::result_large_err)]
 
-use std::{
-    borrow::Cow,
-    fmt::Debug,
-    io::{BufRead, BufReader, Read},
-};
+use std::{borrow::Cow, fmt::Debug, io::Read};
 
 use clap::{Parser, Subcommand};
 use gorgond_client::{api, events::BuildEvent, models, Client, Uuid};
@@ -266,13 +262,12 @@ impl BuildCommand {
         }
     }
     fn read_events(r: impl Read) -> impl Iterator<Item = Result<BuildEvent<'static>>> {
-        let r = BufReader::new(zstd::stream::Decoder::new(r).unwrap());
-        r.split(0x1e).map(|r| {
-            r.into_diagnostic().and_then(|data| {
-                serde_json::from_slice::<BuildEvent>(&data)
-                    .into_diagnostic()
-                    .map(|v| v.into_owned())
-            })
+        let mut r = minicbor_io::Reader::new(zstd::stream::Decoder::new(r).unwrap());
+        std::iter::from_fn(move || {
+            r.read::<BuildEvent>()
+                .map(|o| o.map(|e| e.into_owned()))
+                .into_diagnostic()
+                .transpose()
         })
     }
 }

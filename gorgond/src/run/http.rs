@@ -316,7 +316,7 @@ async fn build_events(
     Path(build_id): Path<Uuid>,
 ) -> Result<JsonResponse<api::BuildEventsResponse>> {
     Ok(JsonResponse(api::BuildEventsResponse {
-        url: state.events_base.join(&format!("{build_id}.jseq.zst"))?,
+        url: state.events_base.join(&format!("{build_id}.cbor.zst"))?,
     }))
 }
 

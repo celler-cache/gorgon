@@ -1596,6 +1596,8 @@ dependencies = [
  "derive_more",
  "gorgond-client",
  "miette",
+ "minicbor",
+ "minicbor-io",
  "owo-colors",
  "serde",
  "serde_json",
