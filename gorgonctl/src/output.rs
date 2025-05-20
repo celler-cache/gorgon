@@ -155,7 +155,7 @@ pub fn build_table<'a>(
     let mut table = table();
     table
         .set_header([
-            "ID", "Project", "Kind", "Worker", "Result", "Started", "Ended",
+            "Build ID", "Project", "Kind", "Worker", "Result", "Started", "Ended",
         ])
         .set_constraints([ColumnConstraint::ContentWidth])
         .add_rows(builds.into_iter().map(|(b, p, w)| {
