@@ -25,7 +25,7 @@ pub struct EventsArgs {
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     #[command(flatten)]
-    db: gorgon_util_diesel::Args,
+    db: gorgond_diesel::Args,
     #[command(flatten)]
     events: EventsArgs,
     #[command(flatten)]
@@ -84,7 +84,7 @@ struct TaskErrors(#[related] Vec<miette::Report>);
 
 pub async fn run(args: Args) -> Result<()> {
     const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
-    let pool = args.db.init(MIGRATIONS).await?;
+    let pool = args.db.init(MIGRATIONS, "gorgond").await?;
 
     let token = CancellationToken::new();
     let mut tasks = Tasks::default();

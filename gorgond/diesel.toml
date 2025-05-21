@@ -6,5 +6,6 @@
 # see https://diesel.rs/guides/configuring-diesel-cli
 
 [print_schema]
-file = "src/schema.rs"
+schema = "gorgond"
+file = "../gorgond-diesel/src/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]

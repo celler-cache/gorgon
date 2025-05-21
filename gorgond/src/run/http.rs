@@ -173,7 +173,7 @@ async fn project_create(
         let now = Utc::now();
         let project = models::Project::from_spec(req.get().project.to_owned(), Uuid::now_v7(), now);
         let project = {
-            diesel::insert_into(schema::projects::table)
+            diesel::insert_into(schema::gorgond::projects::table)
                 .values(&project)
                 .get_result::<models::Project>(conn)
                 .await?
@@ -236,14 +236,14 @@ async fn project_build_create(
         let (build, inputs) =
             models::Build::from_spec(req.get().build.to_owned(), Uuid::now_v7(), project_id, now);
         let build = {
-            use schema::builds;
+            use schema::gorgond::builds;
             diesel::insert_into(builds::table)
                 .values(&build)
                 .get_result::<models::Build>(conn)
                 .await?
         };
         let inputs = {
-            use schema::build_inputs;
+            use schema::gorgond::build_inputs;
             diesel::insert_into(build_inputs::table)
                 .values(inputs.collect::<Vec<_>>())
                 .get_results::<models::BuildInput>(conn)
@@ -327,11 +327,11 @@ async fn build_internal_heartbeat(
 ) -> Result<JsonResponse<api::BuildInternalHeartbeatResponse>> {
     let req = req.get();
     transaction!(state, async |conn: &mut _| {
-        diesel::update(schema::builds::table)
-            .filter(schema::builds::id.eq(build_id))
+        diesel::update(schema::gorgond::builds::table)
+            .filter(schema::gorgond::builds::id.eq(build_id))
             .set((
-                schema::builds::started_at.eq(req.started_at),
-                schema::builds::heartbeat_at.eq(req.heartbeat_at),
+                schema::gorgond::builds::started_at.eq(req.started_at),
+                schema::gorgond::builds::heartbeat_at.eq(req.heartbeat_at),
             ))
             .execute(conn)
             .await?;
@@ -347,12 +347,12 @@ async fn build_internal_end(
 ) -> Result<JsonResponse<api::BuildInternalEndResponse>> {
     let req = req.get();
     transaction!(state, async |conn: &mut _| {
-        diesel::update(schema::builds::table)
-            .filter(schema::builds::id.eq(build_id))
+        diesel::update(schema::gorgond::builds::table)
+            .filter(schema::gorgond::builds::id.eq(build_id))
             .set((
-                schema::builds::started_at.eq(req.started_at),
-                schema::builds::ended_at.eq(req.ended_at),
-                schema::builds::result.eq(models::BuildResult::from(req.result)),
+                schema::gorgond::builds::started_at.eq(req.started_at),
+                schema::gorgond::builds::ended_at.eq(req.ended_at),
+                schema::gorgond::builds::result.eq(models::BuildResult::from(req.result)),
             ))
             .execute(conn)
             .await?;
@@ -368,7 +368,7 @@ async fn worker_internal_allocate_build(
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
-        use schema::{build_inputs, builds, workers};
+        use schema::gorgond::{build_inputs, builds, workers};
         let now = Utc::now();
 
         // Resolve the worker slug to an ID, or create it if it doesn't exist.

@@ -15,10 +15,10 @@ members = [
     "gorgond",
     "gorgond-client",
     "gorgond-diesel",
+    "gorgond-github",
     "gorgon-github-events",
     "gorgon-rollup",
     "gorgon-util-cli",
-    "gorgon-util-diesel",
 ]
 
 [workspace.dependencies]

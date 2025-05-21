@@ -3,11 +3,26 @@
 #
 # SPDX-License-Identifier: EUPL-1.2
 
-# Move to the /gorgond directory, so diesel will find ./diesel.toml and ./migrations.
+# Move to the parent directorhy, so diesel will find ./diesel.toml and ./migrations.
 cd (dirname (status dirname))
+echo "$(set_color --dim)📂 Running diesel in: $(pwd)$(set_color normal)"
 
-# Unless $DATABASE_URL has been manually set, use $GORGOND_DATABASE_URL from .envrc.
-set -q DATABASE_URL; or set -x DATABASE_URL $GORGOND_DATABASE_URL
+# Use the directory name (eg. "gorgond") as the schema we're working with.
+set -l SCHEMA (string replace -a - _ (path basename (pwd)))
+echo "$(set_color --dim)🗄️ Using Schema: $SCHEMA$(set_color normal)"
 
+# Diesel migrations always use the default schema, so we need to overwrite search_path
+# to force it to put the __diesel_schema_migrations table in the right place.
+set -x DATABASE_URL $GORGOND_DATABASE_URL&options=-csearch_path%3D$SCHEMA
+echo "$(set_color --dim)📡 DATABASE_URL: $DATABASE_URL$(set_color normal)"
+
+# Create the schema before proceeding.
+# This won't work with `database reset`, which deletes the database and recreates it. :(
+set_color --dim
+echo "📁 Creating schema..."
+psql -a $DATABASE_URL -c "CREATE SCHEMA IF NOT EXISTS $SCHEMA"
+set_color normal
+
+# Invoke the actual diesel CLI.
 set -q DIESEL; or set -x DIESEL (command -s diesel)
 exec $DIESEL $argv

@@ -12,7 +12,6 @@ license = "EUPL-1.2"
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 gorgond-diesel = { path = "../gorgond-diesel" }
-gorgon-util-diesel = { path = "../gorgon-util-diesel" }
 
 axum-extra = { workspace = true, features = ["erased-json"] }
 axum = { workspace = true, features = ["macros", "http1", "tokio"] }

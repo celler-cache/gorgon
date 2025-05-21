@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 
 use chrono::prelude::*;
 use diesel::{
+    Selectable,
     dsl::{self, auto_type},
     pg::Pg,
     prelude::*,
-    Selectable,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use yoke::Yokeable;
 
-use crate::schema;
+use crate::schema::gorgond as schema;
 
 macro_rules! impl_model {
     ($model:ident, $schema:ident) => {
@@ -95,7 +95,7 @@ macro_rules! impl_model_slug {
 #[derive(
     Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable, Identifiable,
 )]
-#[diesel(table_name = crate::schema::projects, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::projects, check_for_backend(diesel::pg::Pg))]
 pub struct Project {
     pub id: Uuid,
     pub slug: String,
@@ -142,7 +142,7 @@ impl Project {
     Identifiable,
     AsChangeset,
 )]
-#[diesel(table_name = crate::schema::workers, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::workers, check_for_backend(diesel::pg::Pg))]
 pub struct Worker {
     pub id: Uuid,
     pub slug: String,
@@ -170,7 +170,7 @@ impl Worker {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, DbEnum)]
-#[db_enum(existing_type_path = "crate::schema::sql_types::BuildResult")]
+#[db_enum(existing_type_path = "crate::schema::gorgond::sql_types::BuildResult")]
 pub enum BuildResult {
     Unknown,
     Success,
@@ -206,7 +206,7 @@ impl From<BuildResult> for client::BuildResult {
     Identifiable,
     Associations,
 )]
-#[diesel(table_name = crate::schema::build_inputs, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::build_inputs, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Build))]
 pub struct BuildInput {
     pub id: Uuid,
@@ -227,7 +227,7 @@ impl_model!(BuildInput, build_inputs);
     Identifiable,
     Associations,
 )]
-#[diesel(table_name = crate::schema::builds, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::builds, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Project), belongs_to(Worker))]
 pub struct Build {
     pub id: Uuid,
