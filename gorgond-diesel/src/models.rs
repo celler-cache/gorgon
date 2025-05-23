@@ -20,76 +20,76 @@ use yoke::Yokeable;
 
 use crate::schema::gorgond as schema;
 
-macro_rules! impl_model {
-    ($model:ident, $schema:ident) => {
-        impl $model {
-            pub fn all() -> dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> {
-                schema::$schema::table.select(Self::as_select())
+macro_rules! gen_model {
+    ($schema:ident, $model:ident) => {
+        pub fn not_found(key: impl Into<String>) -> api::ApiError {
+            api::ApiError::ModelNotFound {
+                model: api::Model::$model,
+                key: Some(key.into()),
             }
+        }
 
-            #[auto_type(no_type_alias)]
-            pub fn ids<I: IntoIterator<Item = Uuid>>(ids: I) -> _ {
-                let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
-                let it: I::IntoIter = ids.into_iter();
-                q.filter(schema::$schema::id.eq_any(it))
-            }
+        pub fn all() -> dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> {
+            schema::$schema::table.select(Self::as_select())
+        }
 
-            pub async fn get(
-                conn: &mut AsyncPgConnection,
-                id: Uuid,
-            ) -> Result<Self, api::ApiError> {
-                Self::all()
-                    .find(id)
-                    .first(conn)
-                    .await
-                    .optional()?
-                    .ok_or_else(|| api::ApiError::ModelNotFound {
-                        model: api::Model::$model,
-                        key: Some(id.to_string()),
-                    })
-            }
+        #[auto_type(no_type_alias)]
+        pub fn ids<I: IntoIterator<Item = Uuid>>(ids: I) -> _ {
+            let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
+            let it: I::IntoIter = ids.into_iter();
+            q.filter(schema::$schema::id.eq_any(it))
+        }
+
+        pub async fn get(conn: &mut AsyncPgConnection, id: Uuid) -> Result<Self, api::ApiError> {
+            Self::all()
+                .find(id)
+                .first(conn)
+                .await
+                .optional()?
+                .ok_or_else(|| Self::not_found(id))
         }
     };
 }
-macro_rules! impl_model_slug {
-    ($model:ident, $schema:ident) => {
-        impl $model {
-            #[auto_type(no_type_alias)]
-            pub fn with_ident(ident: &str) -> _ {
-                let id: Uuid = Uuid::parse_str(&ident).unwrap_or_default();
-                let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
-                q.find(id).or_filter(schema::$schema::slug.eq(ident))
-            }
+macro_rules! gen_model_with_ident_slug {
+    ($schema:ident) => {
+        #[auto_type(no_type_alias)]
+        pub fn with_ident(ident: &str) -> _ {
+            let id: Uuid = Uuid::parse_str(&ident).unwrap_or_default();
+            let q: dsl::Select<schema::$schema::table, dsl::AsSelect<Self, Pg>> = Self::all();
+            q.find(id).or_filter(schema::$schema::slug.eq(ident))
+        }
 
+        pub fn not_found_ident(ident: &str) -> api::ApiError {
+            Self::not_found(ident)
+        }
+
+        gen_model_with_ident_helpers!($schema, slug as &str);
+    };
+}
+macro_rules! gen_model_with_ident_helpers {
+    ($schema:ident, $($arg:ident as $t:ty),*) => {
             pub async fn get_ident(
                 conn: &mut AsyncPgConnection,
-                ident: &str,
+                $($arg: $t),*
             ) -> Result<Self, api::ApiError> {
-                Self::with_ident(ident)
+                Self::with_ident($($arg),*)
                     .first(conn)
                     .await
                     .optional()?
-                    .ok_or_else(|| api::ApiError::ModelNotFound {
-                        model: api::Model::$model,
-                        key: Some(ident.into()),
-                    })
+                    .ok_or_else(|| Self::not_found_ident($($arg),*))
             }
             pub async fn get_id(
                 conn: &mut AsyncPgConnection,
-                ident: &str,
+                $($arg: $t),*
             ) -> Result<Uuid, api::ApiError> {
-                Self::with_ident(ident)
+                Self::with_ident($($arg),*)
                     .select(schema::$schema::id)
                     .first(conn)
                     .await
                     .optional()?
-                    .ok_or_else(|| api::ApiError::ModelNotFound {
-                        model: api::Model::$model,
-                        key: Some(ident.into()),
-                    })
+                    .ok_or_else(|| Self::not_found_ident($($arg),*))
             }
-        }
-    };
+    }
 }
 
 #[derive(
@@ -104,10 +104,10 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-impl_model!(Project, projects);
-impl_model_slug!(Project, projects);
-
 impl Project {
+    gen_model!(projects, Project);
+    gen_model_with_ident_slug!(projects);
+
     pub fn from_spec(v: client::ProjectSpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
         Self {
             id,
@@ -152,10 +152,10 @@ pub struct Worker {
     pub updated_at: DateTime<Utc>,
     pub seen_at: Option<DateTime<Utc>>,
 }
-impl_model!(Worker, workers);
-impl_model_slug!(Worker, workers);
-
 impl Worker {
+    gen_model!(workers, Worker);
+    gen_model_with_ident_slug!(workers);
+
     pub fn to_client(self) -> client::Worker<'static> {
         client::Worker {
             id: self.id,
@@ -214,7 +214,9 @@ pub struct BuildInput {
     pub key: String,
     pub source: String,
 }
-impl_model!(BuildInput, build_inputs);
+impl BuildInput {
+    gen_model!(build_inputs, BuildInput);
+}
 
 #[derive(
     Debug,
@@ -245,9 +247,9 @@ pub struct Build {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
 }
-impl_model!(Build, builds);
-
 impl Build {
+    gen_model!(builds, Build);
+
     pub fn from_spec(
         v: client::BuildSpec<'static>,
         id: Uuid,
@@ -300,4 +302,112 @@ impl Build {
             ended_at: self.ended_at,
         }
     }
+}
+
+#[derive(
+    Debug, Serialize, Deserialize, Yokeable, Queryable, Selectable, Insertable, Identifiable,
+)]
+#[diesel(table_name = crate::schema::gorgond::repositories, check_for_backend(diesel::pg::Pg))]
+pub struct Repository {
+    pub id: Uuid,
+    pub kind: String,
+    pub ident: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl Repository {
+    gen_model!(repositories, Repository);
+    gen_model_with_ident_helpers!(repositories, kind as &str, ident as &str);
+
+    #[auto_type(no_type_alias)]
+    pub fn with_ident<'a>(kind: &'a str, ident: &'a str) -> _ {
+        let id: Uuid = (kind == "-")
+            .then(|| Uuid::parse_str(ident).unwrap_or_default())
+            .unwrap_or_default();
+        let q: dsl::Select<schema::repositories::table, dsl::AsSelect<Self, Pg>> = Self::all();
+        q.find(id).or_filter(
+            (schema::repositories::kind.eq(kind)).and(schema::repositories::ident.eq(ident)),
+        )
+    }
+    pub fn not_found_ident(kind: &str, ident: &str) -> api::ApiError {
+        Self::not_found(format!("{kind}:{ident}"))
+    }
+
+    pub fn from_spec(v: client::RepositorySpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
+        Self {
+            id,
+            kind: v.kind.into(),
+            ident: v.ident.into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+    pub fn to_client(self) -> client::Repository<'static> {
+        client::Repository {
+            id: self.id,
+            spec: client::RepositorySpec {
+                kind: self.kind.into(),
+                ident: self.ident.into(),
+            },
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::merge_requests, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repository))]
+pub struct MergeRequest {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub ident: String,
+    pub title: String,
+    pub description: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl MergeRequest {
+    gen_model!(merge_requests, MergeRequest);
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(
+    table_name = crate::schema::gorgond::merge_request_versions,
+    check_for_backend(diesel::pg::Pg),
+    belongs_to(MergeRequest),
+)]
+pub struct MergeRequestVersion {
+    pub id: Uuid,
+    pub merge_request_id: Uuid,
+    pub url: String,
+
+    pub version_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+impl MergeRequestVersion {
+    gen_model!(merge_request_versions, MergeRequestVersion);
 }

@@ -37,10 +37,43 @@ pub mod gorgond {
     }
 
     diesel::table! {
+        gorgond.merge_request_versions (id) {
+            id -> Uuid,
+            merge_request_id -> Uuid,
+            url -> Text,
+            version_at -> Timestamptz,
+            created_at -> Timestamptz,
+            updated_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.merge_requests (id) {
+            id -> Uuid,
+            repository_id -> Uuid,
+            ident -> Text,
+            title -> Text,
+            description -> Text,
+            created_at -> Timestamptz,
+            updated_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
         gorgond.projects (id) {
             id -> Uuid,
             slug -> Text,
             name -> Text,
+            created_at -> Timestamptz,
+            updated_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.repositories (id) {
+            id -> Uuid,
+            kind -> Text,
+            ident -> Text,
             created_at -> Timestamptz,
             updated_at -> Timestamptz,
         }
@@ -60,11 +93,16 @@ pub mod gorgond {
     diesel::joinable!(build_inputs -> builds (build_id));
     diesel::joinable!(builds -> projects (project_id));
     diesel::joinable!(builds -> workers (worker_id));
+    diesel::joinable!(merge_request_versions -> merge_requests (merge_request_id));
+    diesel::joinable!(merge_requests -> repositories (repository_id));
 
     diesel::allow_tables_to_appear_in_same_query!(
         build_inputs,
         builds,
+        merge_request_versions,
+        merge_requests,
         projects,
+        repositories,
         workers,
     );
 }

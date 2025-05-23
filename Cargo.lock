@@ -1648,6 +1648,7 @@ dependencies = [
  "miette",
  "minicbor",
  "ownable",
+ "percent-encoding",
  "reqwest 0.12.15",
  "serde",
  "serde_json",

@@ -48,10 +48,14 @@ pub struct S {
 pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::Result<()> {
     let app = Router::new()
         .route("/", get(root))
+        .route("/repos", get(repo_list).post(repo_create))
+        .route("/repos/{kind}/{ident}", get(repo))
         .route("/projects", post(project_create))
         .route("/projects/{project}", get(project))
-        .route("/projects/{project}/builds", get(project_builds))
-        .route("/projects/{project}/builds", post(project_build_create))
+        .route(
+            "/projects/{project}/builds",
+            get(project_builds).post(project_build_create),
+        )
         .route("/builds", get(builds))
         .route("/builds/{build_id}", get(build))
         .route("/builds/{build_id}/events", get(build_events))
@@ -163,6 +167,57 @@ async fn error_method_not_allowed(req: axum::extract::Request) -> Result<()> {
 
 async fn root() -> JsonResponse<api::RootResponse> {
     JsonResponse(api::RootResponse {})
+}
+
+async fn repo(
+    State(state): State<S>,
+    Path((repo_kind, repo_ident)): Path<(String, String)>,
+) -> Result<JsonResponse<api::RepositoryResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        Ok(JsonResponse(api::RepositoryResponse {
+            repository: models::Repository::get_ident(conn, &repo_kind, &repo_ident)
+                .await?
+                .to_client(),
+        }))
+    })
+    .await
+}
+
+async fn repo_list(
+    State(state): State<S>,
+) -> Result<JsonResponse<api::RepositoriesResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        Ok(JsonResponse(api::RepositoriesResponse {
+            repositories: models::Repository::all()
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| v.to_client())
+                .try_collect()
+                .await?,
+        }))
+    })
+    .await
+}
+
+async fn repo_create(
+    State(state): State<S>,
+    JsonRequest(req): JsonRequest<api::RepositoryCreateRequest<'static>>,
+) -> Result<JsonResponse<api::RepositoryResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let now = Utc::now();
+        let repo =
+            models::Repository::from_spec(req.get().repository.to_owned(), Uuid::now_v7(), now);
+        let repo = {
+            diesel::insert_into(schema::gorgond::repositories::table)
+                .values(&repo)
+                .get_result::<models::Repository>(conn)
+                .await?
+        };
+        Ok(JsonResponse(api::RepositoryResponse {
+            repository: repo.to_client(),
+        }))
+    })
+    .await
 }
 
 async fn project_create(

@@ -74,6 +74,11 @@ impl Args {
 enum Command {
     /// Test your connection to gorgond.
     Ping(Ping),
+    /// Manage Repositories.
+    Repo {
+        #[command(subcommand)]
+        cmd: RepositoriesCommand,
+    },
     /// Manage Projects.
     Project {
         #[command(subcommand)]
@@ -89,6 +94,7 @@ impl Command {
     pub async fn run(self, args: &Args, client: Client) -> Result<()> {
         match self {
             Command::Ping(cmd) => cmd.run(args, client).await,
+            Command::Repo { cmd } => cmd.run(args, client.repositories()).await,
             Command::Project { cmd } => cmd.run(args, client.projects()).await,
             Command::Build { cmd } => cmd.run(args, client.builds()).await,
         }
@@ -100,6 +106,84 @@ struct Ping;
 impl Ping {
     pub async fn run(self, args: &Args, client: Client) -> Result<()> {
         args.out.dump(client.root(api::RootRequest {}).await?.get())
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoriesCommand {
+    /// List repositories.
+    List,
+    /// Create a new repository.
+    Create {
+        #[command(flatten)]
+        spec: RepositoryArgs,
+    },
+    /// Manage a repository by ID.
+    Id {
+        id: Uuid,
+        #[command(subcommand)]
+        command: RepositoryCommand,
+    },
+    /// Manage a repository by Kind + Ident.
+    Ident {
+        kind: String,
+        ident: String,
+        #[command(subcommand)]
+        command: RepositoryCommand,
+    },
+}
+#[derive(Debug, Clone, Parser)]
+struct RepositoryArgs {
+    pub kind: String,
+    pub ident: String,
+}
+impl From<RepositoryArgs> for models::RepositorySpec<'static> {
+    fn from(args: RepositoryArgs) -> Self {
+        Self {
+            kind: args.kind.into(),
+            ident: args.ident.into(),
+        }
+    }
+}
+impl RepositoriesCommand {
+    pub async fn run(self, args: &Args, repos: api::RepositoriesClient<'_>) -> Result<()> {
+        match self {
+            Self::Create { spec } => args.out.with(
+                |r| output::repo_table([&r.repository]),
+                repos
+                    .create(api::RepositoryCreateRequest {
+                        repository: spec.into(),
+                    })
+                    .await?
+                    .get(),
+            ),
+            Self::Id { id, command } => command.run(args, repos.id(id)).await,
+            Self::Ident {
+                kind,
+                ident,
+                command,
+            } => command.run(args, repos.ident(&kind, &ident)).await,
+            Self::List => args.out.with(
+                |r| output::repo_table(r.repositories.iter()),
+                repos.list(api::RepositoriesListRequest {}).await?.get(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoryCommand {
+    /// Get this repository.
+    Get,
+}
+impl RepositoryCommand {
+    pub async fn run(self, args: &Args, repo: api::RepositoryClient<'_>) -> Result<()> {
+        match self {
+            Self::Get => args.out.with(
+                |r| output::repo_table([&r.repository]),
+                repo.get(api::RepositoryGetRequest {}).await?.get(),
+            ),
+        }
     }
 }
 
@@ -118,6 +202,11 @@ enum ProjectCommand {
         #[command(subcommand)]
         cmd: ProjectBuildCommand,
     },
+}
+#[derive(Debug, Clone, Parser)]
+struct ProjectArgs {
+    pub slug: String,
+    pub name: String,
 }
 impl ProjectCommand {
     pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
@@ -143,12 +232,6 @@ impl ProjectCommand {
             Self::Builds { slug, cmd } => cmd.run(args, projects.slug(&slug).builds()).await,
         }
     }
-}
-
-#[derive(Debug, Clone, Parser)]
-struct ProjectArgs {
-    pub slug: String,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, Parser)]

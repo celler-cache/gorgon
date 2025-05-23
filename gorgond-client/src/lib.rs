@@ -181,6 +181,9 @@ impl Client {
         call(&self.client, Method::GET, self.base_url.clone(), req).await
     }
 
+    pub fn repositories(&self) -> api::RepositoriesClient {
+        api::RepositoriesClient::new(self)
+    }
     pub fn projects(&self) -> api::ProjectsClient {
         api::ProjectsClient::new(self)
     }

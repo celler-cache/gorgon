@@ -275,3 +275,24 @@ impl<'a> BuildTask<'a> {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct RepositorySpec<'a> {
+    #[serde(borrow)]
+    pub kind: Cow<'a, str>,
+    #[serde(borrow)]
+    pub ident: Cow<'a, str>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct Repository<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[serde(flatten, borrow)]
+    pub spec: RepositorySpec<'a>,
+
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub updated_at: DateTime<Utc>,
+}

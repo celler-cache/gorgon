@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, fmt::Display};
 
 use chrono::prelude::*;
-use derive_more::{Constructor, Deref, DerefMut};
+use derive_more::{Constructor, Deref, DerefMut, Display};
 use miette::Diagnostic;
 use ownable::{
     traits::{IntoOwned, ToOwned},
@@ -20,6 +20,13 @@ use yoke::Yokeable;
 
 use crate::{models, Client, Request, Result, Yoke};
 
+/// Percent encodes characters that are not safe for use in a URL segment.
+fn percent_encode(s: &str) -> percent_encoding::PercentEncode {
+    const SET: &percent_encoding::AsciiSet =
+        &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'_');
+    percent_encoding::utf8_percent_encode(s, SET)
+}
+
 #[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
     Project,
@@ -29,6 +36,9 @@ pub enum Model {
     BuildTask,
     BuildEvent,
     BuildLog,
+    Repository,
+    MergeRequest,
+    MergeRequestVersion,
     #[serde(untagged)]
     Unknown(String),
 }
@@ -104,6 +114,13 @@ pub enum ApiError {
         #[source]
         error: ApiErrorSource,
     },
+    #[serde(rename = "tag:BadUuid")]
+    #[diagnostic(code("gorgond::BadUuid"))]
+    #[error("Bad UUID")]
+    BadUuid {
+        #[source]
+        error: ApiErrorSource,
+    },
 
     #[serde(rename = "tag:DatabaseNotFound")]
     #[diagnostic(code("gorgond::DatabaseNotFound"))]
@@ -170,7 +187,9 @@ impl ApiError {
             Self::IO { .. } | Self::BadUrl { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NoSuchRoute { .. } => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
-            Self::BadRequestBody { .. } | Self::BadRequestJson { .. } => StatusCode::BAD_REQUEST,
+            Self::BadRequestBody { .. } | Self::BadRequestJson { .. } | Self::BadUuid { .. } => {
+                StatusCode::BAD_REQUEST
+            }
             Self::DatabaseNotFound { .. } => StatusCode::NOT_FOUND,
             Self::DatabaseDuplicate { .. } | Self::DatabaseConstraints { .. } => {
                 StatusCode::BAD_REQUEST
@@ -234,6 +253,13 @@ impl ApiError {
 impl From<url::ParseError> for ApiError {
     fn from(err: url::ParseError) -> Self {
         Self::BadUrl {
+            error: Self::wrap_err(&err),
+        }
+    }
+}
+impl From<uuid::Error> for ApiError {
+    fn from(err: uuid::Error) -> Self {
+        Self::BadUuid {
             error: Self::wrap_err(&err),
         }
     }
@@ -428,28 +454,28 @@ where
     }
 }
 
-// The block is only included here for readability. If it starts causing problems, just yeet it and
-// just use the macro to implement Request, like it did before I got fancy with it.
+// -- Macros -- //
+
 macro_rules! mkrequest {
-    ($req:ty, $rsp:ty, { $($body:tt)* }) => {
-        $($body)*
-        impl $crate::Request for $req {
-            type Response = $rsp;
+    ($rsp:ident$(<$($rspgen:tt),*>)?, $req:ident$(<$($reqgen:tt),*>)? { $($body:tt)* }) => {
+        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+        pub struct $req$(<$($reqgen),*>)? { $($body)* }
+        impl$(<$($reqgen),*>)? $crate::Request for $req$(<$($reqgen),*>)? {
+            type Response = $rsp$(<$($rspgen),*>)?;
         }
     };
 }
-macro_rules! mkmodelrequest {
+macro_rules! mkresponse {
+    ($rsp:ident$(<$($rspgen:tt),*>)? { $($body:tt)* }) => {
+        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+        pub struct $rsp$(<$($rspgen),*>)? { $($body)* }
+    };
+}
+
+macro_rules! mkmodelrequest_pair_old {
     ($field:ident, $req:ident, $rsp:ident<$rspmodel:ident>) => {
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct $req {}
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct $rsp<'a> {
-            #[serde(borrow)]
-            pub $field: models::$rspmodel<'a>,
-        }
-        impl $crate::Request for $req {
-            type Response = $rsp<'static>;
-        }
+        mkrequest!($rsp<'static>, $req {});
+        mkmodelresponse_pair_old!($rsp<$rspmodel>, $field);
     };
     ($field:ident, $req:ident<$reqmodel:ident>, $rsp:ident<$rspmodel:ident>) => {
         #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
@@ -457,13 +483,18 @@ macro_rules! mkmodelrequest {
             #[serde(borrow)]
             pub $field: models::$reqmodel<'a>,
         }
+        impl<'a> $crate::Request for $req<'a> {
+            type Response = $rsp<'static>;
+        }
+        mkmodelresponse_pair_old!($rsp<$rspmodel>, $field);
+    };
+}
+macro_rules! mkmodelresponse_pair_old {
+    ($rsp:ident<$rspmodel:ident>, $field:ident) => {
         #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
         pub struct $rsp<'a> {
             #[serde(borrow)]
             pub $field: models::$rspmodel<'a>,
-        }
-        impl<'a> $crate::Request for $req<'a> {
-            type Response = $rsp<'static>;
         }
     };
 }
@@ -485,15 +516,68 @@ macro_rules! gen_endpoints {
     };
 }
 
-mkrequest!(RootRequest, RootResponse, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct RootRequest {}
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct RootResponse {}
+// -- Root -- //
+
+mkresponse!(RootResponse {});
+mkrequest!(RootResponse, RootRequest {});
+
+// -- Repositories -- //
+
+mkresponse!(RepositoryResponse<'a> {
+    #[serde(borrow)]
+    pub repository: models::Repository<'a>,
+});
+mkrequest!(RepositoryResponse<'static>, RepositoryGetRequest {});
+mkrequest!(RepositoryResponse<'static>, RepositoryCreateRequest<'a> {
+    #[serde(borrow)]
+    pub repository: models::RepositorySpec<'a>,
 });
 
-mkmodelrequest!(project, ProjectGetRequest, ProjectGetResponse<Project>);
-mkmodelrequest!(
+mkresponse!(RepositoriesResponse<'a> {
+    #[serde(borrow)]
+    pub repositories: Vec<models::Repository<'a>>,
+});
+mkrequest!(RepositoriesResponse<'static>, RepositoriesListRequest {});
+
+#[derive(Debug, Constructor)]
+pub struct RepositoriesClient<'a> {
+    client: &'a Client,
+}
+impl<'a> RepositoriesClient<'a> {
+    pub fn id(&self, id: Uuid) -> RepositoryClient<'a> {
+        RepositoryClient::new(self.client, RepositoryPath::Id(id))
+    }
+    pub fn ident(&self, kind: &'a str, ident: &'a str) -> RepositoryClient<'a> {
+        RepositoryClient::new(self.client, RepositoryPath::Ident(kind, ident))
+    }
+    gen_endpoints!("repos", (), {
+        fn list(RepositoriesListRequest) -> (GET, "");
+        fn create(RepositoryCreateRequest<'_>) -> (POST, "");
+    });
+}
+
+#[derive(Debug, Display)]
+pub enum RepositoryPath<'a> {
+    #[display("-/{_0}")]
+    Id(Uuid),
+    #[display("{_0}/{}", percent_encode(_1))]
+    Ident(&'a str, &'a str),
+}
+#[derive(Debug, Constructor)]
+pub struct RepositoryClient<'a> {
+    client: &'a Client,
+    repo_path: RepositoryPath<'a>,
+}
+impl RepositoryClient<'_> {
+    gen_endpoints!("repos/{repo_path}", (repo_path), {
+        fn get(RepositoryGetRequest) -> (GET, "");
+    });
+}
+
+// -- Projects -- //
+
+mkmodelrequest_pair_old!(project, ProjectGetRequest, ProjectGetResponse<Project>);
+mkmodelrequest_pair_old!(
     project,
     ProjectCreateRequest<ProjectSpec>,
     ProjectCreateResponse<Project>
@@ -526,22 +610,18 @@ impl<'a> ProjectClient<'a> {
     });
 }
 
-mkmodelrequest!(
+mkmodelrequest_pair_old!(
     build,
     ProjectBuildCreateRequest<BuildSpec>,
     ProjectBuildCreateResponse<Build>
 );
 
-mkrequest!(ProjectBuildsRequest, ProjectBuildsResponse<'static>, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct ProjectBuildsRequest {}
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct ProjectBuildsResponse<'a> {
-        #[serde(borrow)]
-        pub project: models::Project<'a>,
-        #[serde(borrow)]
-        pub builds: Vec<models::Build<'a>>,
-    }
+mkrequest!(ProjectBuildsResponse<'static>, ProjectBuildsRequest {});
+mkresponse!(ProjectBuildsResponse<'a> {
+    #[serde(borrow)]
+    pub project: models::Project<'a>,
+    #[serde(borrow)]
+    pub builds: Vec<models::Build<'a>>,
 });
 
 #[derive(Debug, Constructor)]
@@ -556,18 +636,16 @@ impl ProjectsBuildsClient<'_> {
     });
 }
 
-mkrequest!(BuildsRequest, BuildsResponse<'static>, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildsRequest {}
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildsResponse<'a> {
-        #[serde(borrow)]
-        pub workers: OwnableMap<Uuid, models::Worker<'a>>,
-        #[serde(borrow)]
-        pub projects: OwnableMap<Uuid, models::Project<'a>>,
-        #[serde(borrow)]
-        pub builds: Vec<models::Build<'a>>,
-    }
+// -- Builds -- //
+
+mkrequest!(BuildsResponse<'static>, BuildsRequest {});
+mkresponse!(BuildsResponse<'a> {
+    #[serde(borrow)]
+    pub workers: OwnableMap<Uuid, models::Worker<'a>>,
+    #[serde(borrow)]
+    pub projects: OwnableMap<Uuid, models::Project<'a>>,
+    #[serde(borrow)]
+    pub builds: Vec<models::Build<'a>>,
 });
 
 #[derive(Debug, Constructor)]
@@ -583,27 +661,20 @@ impl<'a> BuildsClient<'a> {
     });
 }
 
-mkrequest!(BuildRequest, BuildResponse<'static>, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildRequest {}
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildResponse<'a> {
-        #[serde(borrow)]
-        pub worker: Option<models::Worker<'a>>,
-        #[serde(borrow)]
-        pub project: models::Project<'a>,
-        #[serde(borrow)]
-        pub build: models::Build<'a>,
-    }
+mkrequest!(BuildResponse<'static>, BuildRequest {});
+mkresponse!(BuildResponse<'a> {
+    #[serde(borrow)]
+    pub worker: Option<models::Worker<'a>>,
+    #[serde(borrow)]
+    pub project: models::Project<'a>,
+    #[serde(borrow)]
+    pub build: models::Build<'a>,
 });
-mkrequest!(BuildEventsRequest, BuildEventsResponse, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildEventsRequest {}
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildEventsResponse {
-        #[ownable(clone)]
-        pub url: Url,
-    }
+
+mkrequest!(BuildEventsResponse, BuildEventsRequest {});
+mkresponse!(BuildEventsResponse {
+    #[ownable(clone)]
+    pub url: Url,
 });
 
 #[derive(Debug, Constructor)]
@@ -621,33 +692,22 @@ impl<'a> BuildClient<'a> {
     });
 }
 
-mkrequest!(
-    BuildInternalHeartbeatRequest,
-    BuildInternalHeartbeatResponse,
-    {
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct BuildInternalHeartbeatRequest {
-            #[ownable(clone)]
-            pub started_at: DateTime<Utc>,
-            #[ownable(clone)]
-            pub heartbeat_at: DateTime<Utc>,
-        }
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct BuildInternalHeartbeatResponse {}
-    }
-);
-mkrequest!(BuildInternalEndRequest, BuildInternalEndResponse, {
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildInternalEndRequest {
-        #[ownable(clone)]
-        pub started_at: DateTime<Utc>,
-        #[ownable(clone)]
-        pub ended_at: DateTime<Utc>,
-        pub result: models::BuildResult,
-    }
-    #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-    pub struct BuildInternalEndResponse {}
+mkrequest!(BuildInternalHeartbeatResponse, BuildInternalHeartbeatRequest {
+    #[ownable(clone)]
+    pub started_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub heartbeat_at: DateTime<Utc>,
 });
+mkresponse!(BuildInternalHeartbeatResponse {});
+
+mkrequest!(BuildInternalEndResponse, BuildInternalEndRequest {
+    #[ownable(clone)]
+    pub started_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub ended_at: DateTime<Utc>,
+    pub result: models::BuildResult,
+});
+mkresponse!(BuildInternalEndResponse {});
 
 #[derive(Debug, Constructor)]
 pub struct BuildInternalClient<'a> {
@@ -660,6 +720,8 @@ impl BuildInternalClient<'_> {
         fn heartbeat(BuildInternalHeartbeatRequest) -> (PUT, "heartbeat");
     });
 }
+
+// -- Workers -- //
 
 #[derive(Debug, Constructor)]
 pub struct WorkersClient<'a> {
@@ -683,18 +745,13 @@ impl WorkerClient<'_> {
 }
 
 mkrequest!(
-    WorkerInternalAllocateBuildRequest,
     WorkerInternalAllocateBuildResponse<'static>,
-    {
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct WorkerInternalAllocateBuildRequest {}
-        #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
-        pub struct WorkerInternalAllocateBuildResponse<'a> {
-            #[serde(borrow)]
-            pub build: models::Build<'a>,
-        }
-    }
+    WorkerInternalAllocateBuildRequest {}
 );
+mkresponse!(WorkerInternalAllocateBuildResponse<'a> {
+    #[serde(borrow)]
+    pub build: models::Build<'a>,
+});
 
 #[derive(Debug, Constructor)]
 pub struct WorkerInternalClient<'a> {

@@ -172,6 +172,19 @@ pub fn build_table<'a>(
     println!("{table}");
 }
 
+pub fn repo_table<'a>(repos: impl IntoIterator<Item = &'a models::Repository<'a>>) {
+    let mut table = table();
+    table
+        .set_header(["Repo ID", "Kind", "Ident"])
+        .set_constraints([ColumnConstraint::ContentWidth])
+        .add_rows(
+            repos
+                .into_iter()
+                .map(|r| [cell(&r.id), cell(&r.spec.kind), cell(&r.spec.ident)]),
+        );
+    println!("{table}");
+}
+
 pub fn event_tree<'a>(events: impl IntoIterator<Item = &'a BuildEvent<'a>>) {
     #[derive(Debug)]
     enum TimelineEvent<'a> {
