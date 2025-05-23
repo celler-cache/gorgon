@@ -48,7 +48,8 @@ pub struct S {
 pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::Result<()> {
     let app = Router::new()
         .route("/", get(root))
-        .route("/repos", get(repo_list).post(repo_create))
+        .route("/repos", get(repos).post(repo_create))
+        .route("/repos/{kind}", get(repos_by_kind))
         .route("/repos/{kind}/{ident}", get(repo))
         .route("/projects", post(project_create))
         .route("/projects/{project}", get(project))
@@ -169,6 +170,38 @@ async fn root() -> JsonResponse<api::RootResponse> {
     JsonResponse(api::RootResponse {})
 }
 
+async fn repos(State(state): State<S>) -> Result<JsonResponse<api::RepositoriesResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        Ok(JsonResponse(api::RepositoriesResponse {
+            repositories: models::Repository::all()
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| v.to_client())
+                .try_collect()
+                .await?,
+        }))
+    })
+    .await
+}
+
+async fn repos_by_kind(
+    State(state): State<S>,
+    Path(repo_kind): Path<String>,
+) -> Result<JsonResponse<api::RepositoriesResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        Ok(JsonResponse(api::RepositoriesResponse {
+            repositories: models::Repository::all()
+                .filter(schema::gorgond::repositories::kind.eq(repo_kind))
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| v.to_client())
+                .try_collect()
+                .await?,
+        }))
+    })
+    .await
+}
+
 async fn repo(
     State(state): State<S>,
     Path((repo_kind, repo_ident)): Path<(String, String)>,
@@ -178,22 +211,6 @@ async fn repo(
             repository: models::Repository::get_ident(conn, &repo_kind, &repo_ident)
                 .await?
                 .to_client(),
-        }))
-    })
-    .await
-}
-
-async fn repo_list(
-    State(state): State<S>,
-) -> Result<JsonResponse<api::RepositoriesResponse<'static>>> {
-    transaction!(state, async |conn: &mut _| {
-        Ok(JsonResponse(api::RepositoriesResponse {
-            repositories: models::Repository::all()
-                .load_stream(conn)
-                .await?
-                .map_ok(|v| v.to_client())
-                .try_collect()
-                .await?,
         }))
     })
     .await

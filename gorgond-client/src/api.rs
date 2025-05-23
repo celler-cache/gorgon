@@ -547,12 +547,26 @@ impl<'a> RepositoriesClient<'a> {
     pub fn id(&self, id: Uuid) -> RepositoryClient<'a> {
         RepositoryClient::new(self.client, RepositoryPath::Id(id))
     }
-    pub fn ident(&self, kind: &'a str, ident: &'a str) -> RepositoryClient<'a> {
-        RepositoryClient::new(self.client, RepositoryPath::Ident(kind, ident))
+    pub fn kind(&self, kind: &'a str) -> RepositoriesKindClient<'a> {
+        RepositoriesKindClient::new(self.client, kind)
     }
     gen_endpoints!("repos", (), {
         fn list(RepositoriesListRequest) -> (GET, "");
         fn create(RepositoryCreateRequest<'_>) -> (POST, "");
+    });
+}
+
+#[derive(Debug, Constructor)]
+pub struct RepositoriesKindClient<'a> {
+    client: &'a Client,
+    repo_kind: &'a str,
+}
+impl<'a> RepositoriesKindClient<'a> {
+    pub fn ident(&self, ident: &'a str) -> RepositoryClient<'a> {
+        RepositoryClient::new(self.client, RepositoryPath::Ident(self.repo_kind, ident))
+    }
+    gen_endpoints!("repos/{repo_kind}", (repo_kind), {
+        fn list(RepositoriesListRequest) -> (GET, "");
     });
 }
 

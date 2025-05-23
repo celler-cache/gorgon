@@ -101,6 +101,8 @@ impl Command {
     }
 }
 
+// -- Root -- //
+
 #[derive(Debug, Clone, Parser)]
 struct Ping;
 impl Ping {
@@ -109,29 +111,8 @@ impl Ping {
     }
 }
 
-#[derive(Debug, Clone, Subcommand)]
-enum RepositoriesCommand {
-    /// List repositories.
-    List,
-    /// Create a new repository.
-    Create {
-        #[command(flatten)]
-        spec: RepositoryArgs,
-    },
-    /// Manage a repository by ID.
-    Id {
-        id: Uuid,
-        #[command(subcommand)]
-        command: RepositoryCommand,
-    },
-    /// Manage a repository by Kind + Ident.
-    Ident {
-        kind: String,
-        ident: String,
-        #[command(subcommand)]
-        command: RepositoryCommand,
-    },
-}
+// -- Repositories -- //
+
 #[derive(Debug, Clone, Parser)]
 struct RepositoryArgs {
     pub kind: String,
@@ -145,9 +126,34 @@ impl From<RepositoryArgs> for models::RepositorySpec<'static> {
         }
     }
 }
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoriesCommand {
+    /// Manage a repository by ID.
+    Id {
+        id: Uuid,
+        #[command(subcommand)]
+        command: RepositoryCommand,
+    },
+    /// Manage repositories by Kind.
+    Kind {
+        kind: String,
+        #[command(subcommand)]
+        command: RepositoriesKindCommand,
+    },
+    /// Create a new repository.
+    Create {
+        #[command(flatten)]
+        spec: RepositoryArgs,
+    },
+    /// List repositories.
+    List,
+}
 impl RepositoriesCommand {
     pub async fn run(self, args: &Args, repos: api::RepositoriesClient<'_>) -> Result<()> {
         match self {
+            Self::Id { id, command } => command.run(args, repos.id(id)).await,
+            Self::Kind { kind, command } => command.run(args, repos.kind(&kind)).await,
             Self::Create { spec } => args.out.with(
                 |r| output::repo_table([&r.repository]),
                 repos
@@ -157,12 +163,29 @@ impl RepositoriesCommand {
                     .await?
                     .get(),
             ),
-            Self::Id { id, command } => command.run(args, repos.id(id)).await,
-            Self::Ident {
-                kind,
-                ident,
-                command,
-            } => command.run(args, repos.ident(&kind, &ident)).await,
+            Self::List => args.out.with(
+                |r| output::repo_table(r.repositories.iter()),
+                repos.list(api::RepositoriesListRequest {}).await?.get(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoriesKindCommand {
+    /// Manage a repository by Kind + Ident.
+    Ident {
+        ident: String,
+        #[command(subcommand)]
+        command: RepositoryCommand,
+    },
+    /// List repositories by Kind.
+    List,
+}
+impl RepositoriesKindCommand {
+    pub async fn run(self, args: &Args, repos: api::RepositoriesKindClient<'_>) -> Result<()> {
+        match self {
+            Self::Ident { ident, command } => command.run(args, repos.ident(&ident)).await,
             Self::List => args.out.with(
                 |r| output::repo_table(r.repositories.iter()),
                 repos.list(api::RepositoriesListRequest {}).await?.get(),
@@ -186,6 +209,8 @@ impl RepositoryCommand {
         }
     }
 }
+
+// -- Projects -- //
 
 #[derive(Debug, Clone, Subcommand)]
 enum ProjectCommand {
@@ -233,6 +258,8 @@ impl ProjectCommand {
         }
     }
 }
+
+// -- Builds -- //
 
 #[derive(Debug, Clone, Parser)]
 struct BuildArgs {
