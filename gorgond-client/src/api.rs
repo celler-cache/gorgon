@@ -30,6 +30,7 @@ fn percent_encode(s: &str) -> percent_encoding::PercentEncode {
 #[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
     Project,
+    ProjectInput,
     Worker,
     Build,
     BuildInput,
@@ -37,8 +38,9 @@ pub enum Model {
     BuildEvent,
     BuildLog,
     Repository,
-    MergeRequest,
-    MergeRequestVersion,
+    Commit,
+    RepositoryMergeRequest,
+    RepositoryMergeRequestVersion,
     #[serde(untagged)]
     Unknown(String),
 }

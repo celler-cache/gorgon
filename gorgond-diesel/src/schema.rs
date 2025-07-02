@@ -27,35 +27,43 @@ pub mod gorgond {
             expr -> Text,
             worker_id -> Nullable<Uuid>,
             result -> Nullable<BuildResult>,
-            created_at -> Timestamptz,
-            updated_at -> Timestamptz,
             allocated_at -> Nullable<Timestamptz>,
             heartbeat_at -> Nullable<Timestamptz>,
             started_at -> Nullable<Timestamptz>,
             ended_at -> Nullable<Timestamptz>,
-        }
-    }
-
-    diesel::table! {
-        gorgond.merge_request_versions (id) {
-            id -> Uuid,
-            merge_request_id -> Uuid,
-            url -> Text,
-            version_at -> Timestamptz,
-            created_at -> Timestamptz,
             updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
     diesel::table! {
-        gorgond.merge_requests (id) {
+        gorgond.commits (id) {
             id -> Uuid,
             repository_id -> Uuid,
-            ident -> Text,
-            title -> Text,
-            description -> Text,
+            hash -> Bytea,
             created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.project_input_commits (input_id, commit_id) {
+            input_id -> Uuid,
+            commit_id -> Uuid,
+            result -> Bool,
             updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.project_inputs (id) {
+            id -> Uuid,
+            project_id -> Uuid,
+            key -> Text,
+            source -> Text,
+            repository_id -> Nullable<Uuid>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
@@ -64,8 +72,8 @@ pub mod gorgond {
             id -> Uuid,
             slug -> Text,
             name -> Text,
-            created_at -> Timestamptz,
             updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
@@ -74,8 +82,53 @@ pub mod gorgond {
             id -> Uuid,
             kind -> Text,
             ident -> Text,
-            created_at -> Timestamptz,
+            storage -> Text,
             updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.repository_merge_request_versions (id) {
+            id -> Uuid,
+            merge_request_id -> Uuid,
+            source -> Text,
+            commit_id -> Nullable<Uuid>,
+            current_at -> Timestamptz,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.repository_merge_requests (id) {
+            id -> Uuid,
+            repository_id -> Uuid,
+            ident -> Text,
+            is_open -> Bool,
+            title -> Text,
+            description -> Text,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.rollup_commits (rollup_id, commit_id) {
+            rollup_id -> Uuid,
+            commit_id -> Uuid,
+        }
+    }
+
+    diesel::table! {
+        gorgond.rollups (id) {
+            id -> Uuid,
+            parent_id -> Nullable<Uuid>,
+            input_id -> Uuid,
+            commit_id -> Uuid,
+            build_input_id -> Nullable<Uuid>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
@@ -84,25 +137,41 @@ pub mod gorgond {
             id -> Uuid,
             slug -> Text,
             name -> Text,
-            created_at -> Timestamptz,
-            updated_at -> Timestamptz,
             seen_at -> Nullable<Timestamptz>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
     diesel::joinable!(build_inputs -> builds (build_id));
     diesel::joinable!(builds -> projects (project_id));
     diesel::joinable!(builds -> workers (worker_id));
-    diesel::joinable!(merge_request_versions -> merge_requests (merge_request_id));
-    diesel::joinable!(merge_requests -> repositories (repository_id));
+    diesel::joinable!(commits -> repositories (repository_id));
+    diesel::joinable!(project_input_commits -> commits (commit_id));
+    diesel::joinable!(project_input_commits -> project_inputs (input_id));
+    diesel::joinable!(project_inputs -> projects (project_id));
+    diesel::joinable!(project_inputs -> repositories (repository_id));
+    diesel::joinable!(repository_merge_request_versions -> commits (commit_id));
+    diesel::joinable!(repository_merge_request_versions -> repository_merge_requests (merge_request_id));
+    diesel::joinable!(repository_merge_requests -> repositories (repository_id));
+    diesel::joinable!(rollup_commits -> commits (commit_id));
+    diesel::joinable!(rollup_commits -> rollups (rollup_id));
+    diesel::joinable!(rollups -> build_inputs (build_input_id));
+    diesel::joinable!(rollups -> commits (commit_id));
+    diesel::joinable!(rollups -> project_inputs (input_id));
 
     diesel::allow_tables_to_appear_in_same_query!(
         build_inputs,
         builds,
-        merge_request_versions,
-        merge_requests,
+        commits,
+        project_input_commits,
+        project_inputs,
         projects,
         repositories,
+        repository_merge_request_versions,
+        repository_merge_requests,
+        rollup_commits,
+        rollups,
         workers,
     );
 }

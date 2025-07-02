@@ -117,12 +117,14 @@ impl Ping {
 struct RepositoryArgs {
     pub kind: String,
     pub ident: String,
+    pub storage: String,
 }
 impl From<RepositoryArgs> for models::RepositorySpec<'static> {
     fn from(args: RepositoryArgs) -> Self {
         Self {
             kind: args.kind.into(),
             ident: args.ident.into(),
+            storage: args.storage.into(),
         }
     }
 }

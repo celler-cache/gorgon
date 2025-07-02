@@ -7,8 +7,8 @@ CREATE TABLE projects (
     slug        TEXT UNIQUE NOT NULL CHECK (slug <> ''),
     name        TEXT NOT NULL CHECK (name <> ''),
 
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 SELECT diesel_manage_updated_at('projects');
@@ -20,9 +20,9 @@ CREATE TABLE workers (
     slug        TEXT UNIQUE NOT NULL CHECK (slug <> ''),
     name        TEXT NOT NULL CHECK (name <> ''),
 
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    seen_at     TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    seen_at     TIMESTAMPTZ
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 SELECT diesel_manage_updated_at('workers');
@@ -40,12 +40,12 @@ CREATE TABLE builds (
     worker_id       UUID REFERENCES workers (id),
     result          build_result,
 
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     allocated_at    TIMESTAMPTZ,
     heartbeat_at    TIMESTAMPTZ,
     started_at      TIMESTAMPTZ,
-    ended_at        TIMESTAMPTZ
+    ended_at        TIMESTAMPTZ,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 SELECT diesel_manage_updated_at('builds');

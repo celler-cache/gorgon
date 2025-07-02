@@ -282,6 +282,8 @@ pub struct RepositorySpec<'a> {
     pub kind: Cow<'a, str>,
     #[serde(borrow)]
     pub ident: Cow<'a, str>,
+    #[serde(borrow)]
+    pub storage: Cow<'a, str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]

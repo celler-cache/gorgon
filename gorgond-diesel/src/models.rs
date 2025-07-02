@@ -101,8 +101,8 @@ pub struct Project {
     pub slug: String,
     pub name: String,
 
-    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 impl Project {
     gen_model!(projects, Project);
@@ -136,6 +136,58 @@ impl Project {
     Deserialize,
     Yokeable,
     Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::project_inputs, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Project))]
+pub struct ProjectInput {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub key: String,
+
+    pub source: String,
+    pub repository_id: Option<Uuid>,
+
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl ProjectInput {
+    gen_model!(project_inputs, ProjectInput);
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::project_input_commits)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(primary_key(input_id, commit_id))]
+#[diesel(belongs_to(ProjectInput, foreign_key = input_id))]
+pub struct ProjectInputCommit {
+    pub input_id: Uuid,
+    pub commit_id: Uuid,
+    pub result: bool,
+
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
     QueryableByName,
     Selectable,
     Insertable,
@@ -148,9 +200,9 @@ pub struct Worker {
     pub slug: String,
     pub name: String,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
     pub seen_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 impl Worker {
     gen_model!(workers, Worker);
@@ -240,12 +292,12 @@ pub struct Build {
     pub worker_id: Option<Uuid>,
     pub result: Option<BuildResult>,
 
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
     pub allocated_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 impl Build {
     gen_model!(builds, Build);
@@ -313,8 +365,10 @@ pub struct Repository {
     pub kind: String,
     pub ident: String,
 
-    pub created_at: DateTime<Utc>,
+    pub storage: String,
+
     pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 impl Repository {
     gen_model!(repositories, Repository);
@@ -339,6 +393,7 @@ impl Repository {
             id,
             kind: v.kind.into(),
             ident: v.ident.into(),
+            storage: v.storage.into(),
             created_at: now,
             updated_at: now,
         }
@@ -349,6 +404,7 @@ impl Repository {
             spec: client::RepositorySpec {
                 kind: self.kind.into(),
                 ident: self.ident.into(),
+                storage: self.storage.into(),
             },
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -367,20 +423,17 @@ impl Repository {
     Identifiable,
     Associations,
 )]
-#[diesel(table_name = crate::schema::gorgond::merge_requests, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::commits, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Repository))]
-pub struct MergeRequest {
+pub struct Commit {
     pub id: Uuid,
     pub repository_id: Uuid,
-    pub ident: String,
-    pub title: String,
-    pub description: String,
+    pub hash: Vec<u8>,
 
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
-impl MergeRequest {
-    gen_model!(merge_requests, MergeRequest);
+impl Commit {
+    gen_model!(commits, Commit);
 }
 
 #[derive(
@@ -394,20 +447,52 @@ impl MergeRequest {
     Identifiable,
     Associations,
 )]
-#[diesel(
-    table_name = crate::schema::gorgond::merge_request_versions,
-    check_for_backend(diesel::pg::Pg),
-    belongs_to(MergeRequest),
+#[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repository))]
+pub struct RepositoryMergeRequest {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub ident: String,
+
+    pub is_open: bool,
+    pub title: String,
+    pub description: String,
+
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl RepositoryMergeRequest {
+    gen_model!(repository_merge_requests, RepositoryMergeRequest);
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
 )]
-pub struct MergeRequestVersion {
+#[diesel(table_name = crate::schema::gorgond::repository_merge_request_versions)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(RepositoryMergeRequest, foreign_key = merge_request_id))]
+pub struct RepositoryMergeRequestVersion {
     pub id: Uuid,
     pub merge_request_id: Uuid,
-    pub url: String,
+    pub source: String,
+    pub commit_id: Option<Uuid>,
 
-    pub version_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub current_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
-impl MergeRequestVersion {
-    gen_model!(merge_request_versions, MergeRequestVersion);
+impl RepositoryMergeRequestVersion {
+    gen_model!(
+        repository_merge_request_versions,
+        RepositoryMergeRequestVersion
+    );
 }
