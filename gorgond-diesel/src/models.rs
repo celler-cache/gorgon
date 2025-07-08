@@ -486,7 +486,7 @@ pub struct RepositoryMergeRequestVersion {
     pub source: String,
     pub commit_id: Option<Uuid>,
 
-    pub current_at: DateTime<Utc>,
+    pub obsolete_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }

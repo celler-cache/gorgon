@@ -70,7 +70,7 @@ CREATE TABLE repository_merge_request_versions (
     source            TEXT NOT NULL CHECK (source <> ''),
     commit_id         UUID          REFERENCES commits (id),
 
-    current_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    obsolete_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

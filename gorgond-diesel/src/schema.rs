@@ -94,7 +94,7 @@ pub mod gorgond {
             merge_request_id -> Uuid,
             source -> Text,
             commit_id -> Nullable<Uuid>,
-            current_at -> Timestamptz,
+            obsolete_at -> Timestamptz,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
