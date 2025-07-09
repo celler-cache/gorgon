@@ -46,6 +46,7 @@ pub enum EventError {
 #[group(id = "ingest")]
 pub struct Args {}
 impl Args {
+    #[instrument(name = "ingest", skip_all)]
     pub fn run(self, pool: AsyncPgPool, rt: Runtime) -> Result<()> {
         let mut it =
             serde_json::Deserializer::from_reader(std::io::BufReader::new(std::io::stdin().lock()))
@@ -79,7 +80,7 @@ impl Args {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(
+    #[instrument(name = "event", skip_all, fields(
         event_id = Empty, kind = Empty, action = Empty,
         repo_id = Empty, actor_id = Empty, org_id = Empty, push_id = Empty, pr_id = Empty,
     ))]
@@ -96,9 +97,9 @@ impl Args {
         let repo = models::Repo::try_from_event(now, current_at, &e.repo).context("Repo")?;
         let actor = models::Actor::try_from_event(now, current_at, &e.actor).context("Actor")?;
         span.record("event_id", event.id)
-            .record("kind", event.kind.as_ref())
             .record("repo_id", repo.id)
-            .record("actor_id", actor.id);
+            .record("actor_id", actor.id)
+            .record("kind", event.kind.as_ref());
 
         let org = e
             .org
