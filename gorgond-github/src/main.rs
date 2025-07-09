@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result};
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 
 pub mod ingest;
 pub mod models;
@@ -51,22 +51,21 @@ fn init_runtime(threads: Option<usize>) -> Result<Runtime> {
         .into_diagnostic()
         .context("Couldn't init Tokio runtime")
 }
+fn with_runtime(threads: Option<usize>, f: impl FnOnce(Runtime) -> Result<()>) -> Result<()> {
+    f(init_runtime(threads)?)
+}
 
 async fn init_db(args: &gorgond_diesel::Args) -> Result<AsyncPgPool> {
     args.init(MIGRATIONS, "gorgond_github").await
 }
 pub fn run(args: Args) -> Result<()> {
     match args.command {
-        Command::Sync(cmd) => {
-            let rt = Arc::new(init_runtime(None)?);
-            let db = rt.block_on(init_db(&args.db))?;
-            cmd.run(rt, db)
-        }
+        Command::Sync(cmd) => with_runtime(None, |rt| {
+            cmd.run(rt.block_on(init_db(&args.db))?, Arc::new(rt))
+        }),
         Command::Ingest(cmd) => {
             // Don't spawn `nproc` worker threads for a basically single-threaded task.
-            let rt = init_runtime(Some(2))?;
-            let db = rt.block_on(init_db(&args.db))?;
-            cmd.run(rt, db)
+            with_runtime(Some(2), |rt| cmd.run(rt.block_on(init_db(&args.db))?, rt))
         }
     }
 }

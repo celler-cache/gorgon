@@ -46,7 +46,7 @@ pub enum EventError {
 #[group(id = "ingest")]
 pub struct Args {}
 impl Args {
-    pub fn run(self, rt: Runtime, pool: AsyncPgPool) -> Result<()> {
+    pub fn run(self, pool: AsyncPgPool, rt: Runtime) -> Result<()> {
         let mut it =
             serde_json::Deserializer::from_reader(std::io::BufReader::new(std::io::stdin().lock()))
                 .into_iter::<serde_json::Value>()
