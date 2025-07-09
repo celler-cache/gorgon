@@ -13,6 +13,9 @@ use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio::runtime::{Handle, Runtime};
 
+pub mod ingest;
+pub mod models;
+pub mod schema;
 pub mod sync;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -31,33 +34,45 @@ pub struct Args {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     Sync(sync::Args),
+    Ingest(ingest::Args),
 }
 
-fn init_db(args: &gorgond_diesel::Args) -> Result<AsyncPgPool> {
-    Handle::current().block_on(args.init(MIGRATIONS, "gorgond_github"))
+fn init_runtime(threads: Option<usize>) -> Result<Runtime> {
+    let mut rt = tokio::runtime::Builder::new_multi_thread();
+    if let Some(threads) = threads {
+        rt.worker_threads(threads);
+    }
+    rt.enable_all()
+        .thread_name_fn({
+            static THREAD_ID: AtomicUsize = AtomicUsize::new(1);
+            move || format!("tokio-{:02}", THREAD_ID.fetch_add(1, Ordering::Relaxed))
+        })
+        .build()
+        .into_diagnostic()
+        .context("Couldn't init Tokio runtime")
 }
-pub fn run(rt: Arc<Runtime>, args: Args) -> Result<()> {
+
+async fn init_db(args: &gorgond_diesel::Args) -> Result<AsyncPgPool> {
+    args.init(MIGRATIONS, "gorgond_github").await
+}
+pub fn run(args: Args) -> Result<()> {
     match args.command {
-        Command::Sync(cmd) => cmd.run(rt, init_db(&args.db)?),
+        Command::Sync(cmd) => {
+            let rt = Arc::new(init_runtime(None)?);
+            let db = rt.block_on(init_db(&args.db))?;
+            cmd.run(rt, db)
+        }
+        Command::Ingest(cmd) => {
+            // Don't spawn `nproc` worker threads for a basically single-threaded task.
+            let rt = init_runtime(Some(2))?;
+            let db = rt.block_on(init_db(&args.db))?;
+            cmd.run(rt, db)
+        }
     }
 }
 
 fn main() {
     let args = Args::parse();
     gorgon_util_cli::logger(args.common).init();
-    gorgon_util_cli::main(args.common, || {
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name_fn({
-                    static THREAD_ID: AtomicUsize = AtomicUsize::new(1);
-                    move || format!("tokio-{:02}", THREAD_ID.fetch_add(1, Ordering::Relaxed))
-                })
-                .build()
-                .into_diagnostic()
-                .context("Couldn't init Tokio runtime")?,
-        );
-        let _enter = rt.enter();
-        run(rt, args)
-    });
+    gorgon_util_cli::main(args.common, || run(args));
 }

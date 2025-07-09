@@ -147,7 +147,7 @@ impl JsonError {
     }
 }
 
-pub trait HelperContext {
+pub trait HelperContext: Clone {
     fn apply(&self, helper: Helper) -> Helper;
 }
 impl HelperContext for () {
@@ -156,13 +156,14 @@ impl HelperContext for () {
     }
 }
 
-pub trait HelperCaller: Sized {
+pub trait HelperCaller: Sized + Clone {
     fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper>;
     fn with<Ctx: HelperContext>(self, ctx: Ctx) -> impl HelperCaller {
         HelperCallerWith(ctx, self)
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HelperFinder<'a> {
     pub current_dir: Cow<'a, Path>,
     pub path: Cow<'a, OsStr>,
@@ -209,6 +210,7 @@ impl HelperCaller for HelperFinder<'_> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct HelperCallerWith<Ctx: HelperContext, C: HelperCaller>(Ctx, C);
 
 impl<Ctx: HelperContext, C: HelperCaller> HelperCaller for HelperCallerWith<Ctx, C> {
