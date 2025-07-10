@@ -3,6 +3,12 @@
 #
 # SPDX-License-Identifier: EUPL-1.2
 
+# Our schema shims don't work properly with 'database setup' and 'database reset' :(
+if test "$argv[1]" = "database"
+    echo "The 'diesel database' subcommands don't work with our wrapper. :("
+    exit 1
+end
+
 # Move to the parent directorhy, so diesel will find ./diesel.toml and ./migrations.
 cd (dirname (status dirname))
 echo "$(set_color --dim)📂 Running diesel in: $(pwd)$(set_color normal)"
@@ -17,7 +23,6 @@ set -x DATABASE_URL $GORGOND_DATABASE_URL&options=-csearch_path%3D$SCHEMA
 echo "$(set_color --dim)📡 DATABASE_URL: $DATABASE_URL$(set_color normal)"
 
 # Create the schema before proceeding.
-# This won't work with `database reset`, which deletes the database and recreates it. :(
 set_color --dim
 echo "📁 Creating schema..."
 psql -a $DATABASE_URL -c "CREATE SCHEMA IF NOT EXISTS $SCHEMA"

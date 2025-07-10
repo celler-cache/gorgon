@@ -9,8 +9,7 @@ processes:
     description: Gorgon Daemon
     command: |
       eval "$(direnv export bash)"
-
-      ./gorgond/bin/diesel database setup
+      createdb $PGDATABASE 2>/dev/null
       cargo run -p gorgond -- -v run
     is_foreground: true
     depends_on:

@@ -47,7 +47,7 @@ Then start `gorgond` by either:
 - Opening a second terminal and running:
 
   ```bash
-  $ ./gorgond/bin/diesel database setup
+  $ createdb gorgon
   $ cargo run -p gorgond -- -v run
   ```
 
