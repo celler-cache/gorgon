@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{path::Path, sync::Arc};
+use std::{io::Write, path::Path, sync::Arc};
 
 use chrono::prelude::*;
 use clap::Parser;
@@ -109,16 +109,30 @@ impl Args {
     ) -> Result<()> {
         let now = Utc::now();
 
-        info!("-> Polling...");
-        let mut helper = helper
-            .with_arg(&*repo.spec.ident)
-            .with_arg(exe)
-            .with_args(args)
-            .with_stdin(std::process::Stdio::piped());
-        let mut child = helper.start()?;
-        child.child.stdin.take().ok_or(miette!("No stdin!"))?;
-        child.wait_checked()?;
+        // Fetch previously seen events, as inputs to `gorgon-github-events`.
+        let last_event_ids: Vec<i64> = rt
+            .block_on(
+                schema::events::table
+                    .select(schema::events::id)
+                    .filter(
+                        schema::events::repo_id.eq_any(
+                            schema::repos::table
+                                .select(schema::repos::id)
+                                .filter(schema::repos::name.eq(&*repo.spec.ident)),
+                        ),
+                    )
+                    .limit(100)
+                    .load(conn),
+            )
+            .into_diagnostic()
+            .context("Couldn't fetch previous events")?;
 
+        // Call `gorgon-github-events`...
+        info!("-> Polling...");
+        self.call_gorgon_github_events(helper, &repo.spec.ident, exe, args, last_event_ids)
+            .context("gorgon-github-events")?;
+
+        // ...then update the `polled_at` timestamp.
         info!("  -> Updating polled_at...");
         rt.block_on(
             diesel::update(schema::repos::table)
@@ -132,6 +146,33 @@ impl Args {
         .into_diagnostic()
         .context("Couldn't update polled_at")?;
 
+        Ok(())
+    }
+
+    #[instrument(name = "gorgon-github-events", skip_all)]
+    pub fn call_gorgon_github_events(
+        &self,
+        helper: Helper,
+        ident: &str,
+        exe: &Path,
+        args: &[&str],
+        last_event_ids: impl IntoIterator<Item = i64>,
+    ) -> Result<()> {
+        let mut helper = helper
+            .with_arg(ident)
+            .with_arg(exe)
+            .with_args(args)
+            .with_stdin(std::process::Stdio::piped());
+        let mut child = helper.start()?;
+        {
+            let mut stdin = child.child.stdin.take().ok_or(miette!("No stdin!?"))?;
+            for id in last_event_ids {
+                writeln!(&mut stdin, "{id}")
+                    .into_diagnostic()
+                    .context("Couldn't write Event ID")?;
+            }
+        }
+        child.wait_checked()?;
         Ok(())
     }
 }
