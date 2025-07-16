@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: EUPL-1.2
 
 use std::sync::{
-    Arc,
+    Arc, LazyLock,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -12,6 +12,7 @@ use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio::runtime::Runtime;
+use tracing_indicatif::style::ProgressStyle;
 
 pub mod ingest;
 pub mod models;
@@ -70,8 +71,30 @@ pub fn run(args: Args) -> Result<()> {
     }
 }
 
+static STYLE_SPIN: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix}{spinner} {span_name}{{{span_fields}}} ",
+        "{wide_msg}",
+    ))
+    .unwrap()
+});
+static STYLE_BAR: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix}{spinner} {span_name}{{{span_fields}}} ",
+        "{bar} {human_pos}/{human_len} {wide_msg}",
+    ))
+    .unwrap()
+});
+
 fn main() {
     let args = Args::parse();
-    gorgon_util_cli::logger(args.common).init();
+
+    use tracing_subscriber::prelude::*;
+    let pblayer = tracing_indicatif::IndicatifLayer::new().with_progress_style(STYLE_SPIN.clone());
+    (gorgon_util_cli::logger(args.common).build())
+        .with(tracing_subscriber::fmt::layer().with_writer(pblayer.get_stderr_writer()))
+        .with(pblayer)
+        .init();
+
     gorgon_util_cli::main(args.common, || run(args));
 }

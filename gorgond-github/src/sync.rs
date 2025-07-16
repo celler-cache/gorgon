@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{io::Write, path::Path, sync::Arc};
+use std::{io::Write, path::PathBuf, sync::Arc};
 
 use chrono::prelude::*;
 use clap::Parser;
@@ -16,7 +16,9 @@ use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use tokio::runtime::Runtime;
-use tracing::{info, instrument};
+use tracing::{Span, info, instrument};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+use with_drop::with_drop;
 
 use crate::schema::gorgond_github as schema;
 
@@ -42,13 +44,6 @@ pub struct Args {
 impl Args {
     #[instrument(name = "sync", skip_all)]
     pub fn run(self, pool: AsyncPgPool, rt: Arc<Runtime>) -> Result<()> {
-        let client = gorgond_client::Client::new(&self.base_url)?;
-        let caller = self.helpers.caller()?;
-        let exe = std::env::current_exe()
-            .into_diagnostic()
-            .context("Couldn't get current executable path")?;
-        let args = ["ingest"];
-
         // Set up the Rayon thread pool.
         rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)
@@ -57,44 +52,64 @@ impl Args {
             .into_diagnostic()
             .context("Couldn't create thread pool")?;
 
+        self.sync_github(&pool, rt.clone())
+    }
+
+    #[instrument(name = "github", skip_all)]
+    fn sync_github(&self, pool: &AsyncPgPool, rt: Arc<Runtime>) -> Result<()> {
+        let client = gorgond_client::Client::new(&self.base_url)?;
+        let helper = GorgonGithubEvents {
+            path: self.helpers.caller()?.path("gorgon-github-events")?,
+            exe: std::env::current_exe()
+                .into_diagnostic()
+                .context("Couldn't get current executable path")?,
+        };
+
         // Ask gorgond for Github repositories, iterating over them in parallel.
         // TODO: Prioritise these - remember Github's rate limits.
-        rt.block_on(
+        let rsp = rt.block_on(
             client
                 .repositories()
                 .kind("github")
                 .list(api::RepositoriesListRequest {}),
-        )?
-        .get()
-        .repositories
-        .par_iter()
-        .try_for_each_with((rt, pool, caller), |(rt, pool, caller), repo| {
-            // TODO: Make this clonable.
-            let helper = caller.helper("gorgon-github-events")?;
+        )?;
+        let repos = &rsp.get().repositories;
 
-            let mut conn = rt
-                .block_on(pool.get())
-                .into_diagnostic()
-                .context("Couldn't get database connection")?;
+        // Top-level progress bar.
+        let span = Span::current();
+        span.pb_set_style(&crate::STYLE_BAR);
+        span.pb_set_length(repos.len() as u64);
 
-            // Replicates the behaviour of `AsyncConnection::transaction()`, but without
-            // blocking the entire thread on an async closure.
-            rt.block_on(PoolTransactionManager::begin_transaction(&mut conn))
-                .into_diagnostic()
-                .context("Couldn't begin transaction")?;
-            match self.run_repo(rt, &mut conn, repo, helper, &exe, &args) {
-                Ok(()) => rt
-                    .block_on(PoolTransactionManager::commit_transaction(&mut conn))
+        repos
+            .par_iter()
+            .try_for_each_with((rt, pool), |(rt, pool), repo| {
+                let _drop = with_drop((), |_| span.pb_inc(1));
+
+                let mut conn = rt
+                    .block_on(pool.get())
                     .into_diagnostic()
-                    .with_context(|| repo.spec.ident.to_string()),
-                Err(err) => {
-                    match rt.block_on(PoolTransactionManager::rollback_transaction(&mut conn)) {
-                        Ok(()) | Err(diesel::result::Error::BrokenTransactionManager) => Err(err),
-                        Err(err) => Err(err).into_diagnostic(),
+                    .context("Couldn't get database connection")?;
+
+                // Replicates the behaviour of `AsyncConnection::transaction()`, but without
+                // blocking the entire thread on an async closure.
+                rt.block_on(PoolTransactionManager::begin_transaction(&mut conn))
+                    .into_diagnostic()
+                    .context("Couldn't begin transaction")?;
+                match self.run_repo(rt, &mut conn, repo, &helper) {
+                    Ok(()) => rt
+                        .block_on(PoolTransactionManager::commit_transaction(&mut conn))
+                        .into_diagnostic()
+                        .with_context(|| repo.spec.ident.to_string()),
+                    Err(err) => {
+                        match rt.block_on(PoolTransactionManager::rollback_transaction(&mut conn)) {
+                            Ok(()) | Err(diesel::result::Error::BrokenTransactionManager) => {
+                                Err(err)
+                            }
+                            Err(err) => Err(err).into_diagnostic(),
+                        }
                     }
                 }
-            }
-        })
+            })
     }
 
     #[instrument(name = "repo", skip_all, fields(ident = &*repo.spec.ident))]
@@ -103,9 +118,7 @@ impl Args {
         rt: &mut Arc<Runtime>,
         conn: &mut AsyncPgConnection,
         repo: &Repository,
-        helper: Helper,
-        exe: &Path,
-        args: &[&str],
+        helper: &GorgonGithubEvents,
     ) -> Result<()> {
         let now = Utc::now();
 
@@ -129,7 +142,8 @@ impl Args {
 
         // Call `gorgon-github-events`...
         info!("-> Polling...");
-        self.call_gorgon_github_events(helper, &repo.spec.ident, exe, args, last_event_ids)
+        helper
+            .call(&repo.spec.ident, last_event_ids)
             .context("gorgon-github-events")?;
 
         // ...then update the `polled_at` timestamp.
@@ -148,21 +162,27 @@ impl Args {
 
         Ok(())
     }
+}
 
+#[derive(Debug, Clone)]
+pub struct GorgonGithubEvents {
+    pub path: PathBuf,
+    pub exe: PathBuf,
+}
+impl GorgonGithubEvents {
     #[instrument(name = "gorgon-github-events", skip_all)]
-    pub fn call_gorgon_github_events(
+    pub fn call(
         &self,
-        helper: Helper,
-        ident: &str,
-        exe: &Path,
-        args: &[&str],
+        ident: impl AsRef<str>,
         last_event_ids: impl IntoIterator<Item = i64>,
     ) -> Result<()> {
-        let mut helper = helper
-            .with_arg(ident)
-            .with_arg(exe)
-            .with_args(args)
-            .with_stdin(std::process::Stdio::piped());
+        let mut helper = Helper::new(&self.path)
+            .with_arg(ident.as_ref())
+            .with_arg(&self.exe)
+            .with_args(["ingest"])
+            .with_stdin(std::process::Stdio::piped())
+            .with_stdout(std::process::Stdio::null())
+            .with_stderr(std::process::Stdio::piped());
         let mut child = helper.start()?;
         {
             let mut stdin = child.child.stdin.take().ok_or(miette!("No stdin!?"))?;

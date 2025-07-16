@@ -8,7 +8,7 @@ use std::{
     ffi::OsStr,
     fmt,
     io::BufRead,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread::JoinHandle,
 };
@@ -157,7 +157,10 @@ impl HelperContext for () {
 }
 
 pub trait HelperCaller: Sized + Clone {
-    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper>;
+    fn path(&self, name: impl AsRef<OsStr>) -> Result<PathBuf>;
+    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
+        Ok(Helper::from(Command::new(self.path(name)?)))
+    }
     fn with<Ctx: HelperContext>(self, ctx: Ctx) -> impl HelperCaller {
         HelperCallerWith(ctx, self)
     }
@@ -187,7 +190,7 @@ impl<'a> HelperFinder<'a> {
     }
 }
 impl HelperCaller for HelperFinder<'_> {
-    fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
+    fn path(&self, name: impl AsRef<OsStr>) -> Result<PathBuf> {
         if self.dev {
             let repo_path = self.dev_repo.as_ref().unwrap_or(&self.current_dir);
             let src_path = repo_path.join(Path::new(&name));
@@ -197,7 +200,7 @@ impl HelperCaller for HelperFinder<'_> {
                         name = &*name.as_ref().to_string_lossy(),
                         "🚧 Building helper from source..."
                     );
-                    return Helper::build_dev(&name, repo_path, &self.current_dir);
+                    return Helper::build_dev_path(&name, repo_path, &self.current_dir);
                 }
                 Ok(false) => trace!(?src_path, "Path does not exist"),
                 Err(err) => {
@@ -206,7 +209,7 @@ impl HelperCaller for HelperFinder<'_> {
             }
         }
 
-        Helper::find(name, &self.path, &self.current_dir)
+        Helper::find_path(name, &self.path, &self.current_dir)
     }
 }
 
@@ -214,6 +217,9 @@ impl HelperCaller for HelperFinder<'_> {
 pub struct HelperCallerWith<Ctx: HelperContext, C: HelperCaller>(Ctx, C);
 
 impl<Ctx: HelperContext, C: HelperCaller> HelperCaller for HelperCallerWith<Ctx, C> {
+    fn path(&self, name: impl AsRef<OsStr>) -> Result<PathBuf> {
+        self.1.path(name)
+    }
     fn helper(&self, name: impl AsRef<OsStr>) -> Result<Helper> {
         self.1.helper(name).map(|h| h.with(&self.0))
     }
@@ -281,12 +287,23 @@ impl Helper {
         repo_path: impl AsRef<Path>,
         cwd: impl AsRef<Path>,
     ) -> Result<Self> {
+        Ok(Self::from(Command::new(Self::build_dev_path(
+            name, repo_path, cwd,
+        )?)))
+    }
+    pub fn build_dev_path(
+        name: impl AsRef<OsStr>,
+        repo_path: impl AsRef<Path>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
         Self::from(Command::new("cargo"))
             .with_args(["build", "-p"])
             .with_arg(name.as_ref())
             .with_cwd(repo_path.as_ref())
+            .with_stdout(Stdio::piped())
+            .with_stderr(Stdio::piped())
             .run()?;
-        Self::find(name, repo_path.as_ref().join("target/debug/"), cwd)
+        Self::find_path(name, repo_path.as_ref().join("target/debug/"), cwd)
     }
 
     pub fn find(
@@ -294,17 +311,22 @@ impl Helper {
         paths: impl AsRef<OsStr>,
         cwd: impl AsRef<Path>,
     ) -> Result<Self> {
-        Ok(Self::from(Command::new(
-            which::which_in(name.as_ref(), Some(paths.as_ref()), cwd).map_err(|err| {
-                HelperError::FindBinary(
-                    name.as_ref().to_string_lossy().into(),
-                    std::env::split_paths(&paths)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect(),
-                    err,
-                )
-            })?,
-        )))
+        Ok(Self::from(Command::new(Self::find_path(name, paths, cwd)?)))
+    }
+    pub fn find_path(
+        name: impl AsRef<OsStr>,
+        paths: impl AsRef<OsStr>,
+        cwd: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
+        which::which_in(name.as_ref(), Some(paths.as_ref()), cwd).map_err(|err| {
+            HelperError::FindBinary(
+                name.as_ref().to_string_lossy().into(),
+                std::env::split_paths(&paths)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+                err,
+            )
+        })
     }
 
     pub fn with<C: HelperContext>(self, ctx: &C) -> Self {
@@ -334,6 +356,14 @@ impl Helper {
     }
     pub fn with_stdin(mut self, stdin: impl Into<std::process::Stdio>) -> Self {
         self.stdin(stdin);
+        self
+    }
+    pub fn with_stdout(mut self, stdout: impl Into<std::process::Stdio>) -> Self {
+        self.stdout(stdout);
+        self
+    }
+    pub fn with_stderr(mut self, stderr: impl Into<std::process::Stdio>) -> Self {
+        self.stderr(stderr);
         self
     }
 
@@ -413,9 +443,7 @@ impl TaskHelper {
                     _ => "0",
                 },
             )
-            .env("GORGON_EVENTS", "true")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .env("GORGON_EVENTS", "true");
         let HelperChild {
             helper: _,
             mut child,

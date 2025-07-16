@@ -323,14 +323,23 @@ impl LoggerBuilder {
         self
     }
 
+    pub fn build(
+        self,
+    ) -> tracing_subscriber::layer::Layered<
+        tracing_subscriber::filter::Targets,
+        tracing_subscriber::Registry,
+    > {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::Registry::default().with(
+            tracing_subscriber::filter::Targets::new()
+                .with_targets(self.target_levels)
+                .with_default(self.level),
+        )
+    }
+
     pub fn init(self) {
         use tracing_subscriber::prelude::*;
-        tracing_subscriber::Registry::default()
-            .with(
-                tracing_subscriber::filter::Targets::new()
-                    .with_targets(self.target_levels)
-                    .with_default(self.level),
-            )
+        self.build()
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .init();
     }
