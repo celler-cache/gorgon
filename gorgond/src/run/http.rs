@@ -51,6 +51,11 @@ pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::
         .route("/repos", get(repos).post(repo_create))
         .route("/repos/{kind}", get(repos_by_kind))
         .route("/repos/{kind}/{ident}", get(repo))
+        .route("/repos/{kind}/{ident}/merges", get(repo_merges))
+        .route(
+            "/repos/{kind}/{ident}/merges/{merge_ident}",
+            put(repo_merge_put),
+        )
         .route("/projects", post(project_create))
         .route("/projects/{project}", get(project))
         .route(
@@ -232,6 +237,72 @@ async fn repo_create(
         };
         Ok(JsonResponse(api::RepositoryResponse {
             repository: repo.to_client(),
+        }))
+    })
+    .await
+}
+
+async fn repo_merges(
+    State(state): State<S>,
+    Path((repo_kind, repo_ident)): Path<(String, String)>,
+) -> Result<JsonResponse<api::RepositoryMergeRequestsResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let merge_requests = schema::gorgond::repository_merge_requests::table
+            .inner_join(schema::gorgond::repositories::table)
+            .select(models::RepositoryMergeRequest::as_select())
+            .filter(models::Repository::filter_ident(&repo_kind, &repo_ident))
+            .load(conn)
+            .await?;
+        Ok(JsonResponse(api::RepositoryMergeRequestsResponse {
+            repositories: schema::gorgond::repositories::table
+                .select(models::Repository::as_select())
+                .filter(
+                    schema::gorgond::repositories::id
+                        .eq_any(merge_requests.iter().map(|v| v.repository_id)),
+                )
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| (v.id, v.to_client()))
+                .try_collect()
+                .await?,
+            merge_requests: merge_requests.into_iter().map(|v| v.to_client()).collect(),
+        }))
+    })
+    .await
+}
+
+async fn repo_merge_put(
+    State(state): State<S>,
+    Path((repo_kind, repo_ident, merge_ident)): Path<(String, String, String)>,
+    JsonRequest(req): JsonRequest<api::RepositoryMergeRequestPutRequest<'static>>,
+) -> Result<JsonResponse<api::RepositoryMergeRequestResponse<'static>>> {
+    let req = req.get();
+    let pspec = &req.merge_request;
+    transaction!(state, async |conn: &mut _| {
+        let now = Utc::now();
+        let repo = models::Repository::get_ident(conn, &repo_kind, &repo_ident).await?;
+        let merge = diesel::insert_into(schema::gorgond::repository_merge_requests::table)
+            .values(
+                models::RepositoryMergeRequest::from_spec(
+                    &pspec.as_spec(),
+                    Uuid::now_v7(),
+                    repo.id,
+                    now,
+                )
+                .force_ident(merge_ident)?,
+            )
+            .on_conflict((
+                schema::gorgond::repository_merge_requests::repository_id,
+                schema::gorgond::repository_merge_requests::ident,
+            ))
+            .do_update()
+            .set(models::PartialRepositoryMergeRequest::from_spec(pspec))
+            .returning(models::RepositoryMergeRequest::as_returning())
+            .get_result::<models::RepositoryMergeRequest>(conn)
+            .await?;
+        Ok(JsonResponse(api::RepositoryMergeRequestResponse {
+            repository: repo.to_client(),
+            merge_request: merge.to_client(),
         }))
     })
     .await

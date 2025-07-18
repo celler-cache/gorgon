@@ -42,12 +42,11 @@ CREATE TABLE repository_merge_requests (
     ident          TEXT NOT NULL    CHECK (ident <> ''),
     UNIQUE (repository_id, ident),
 
-    is_open        BOOLEAN NOT NULL,
-
     -- Optional metadata; note the lack of `CHECK (a <> '')` constraints.
     title          TEXT    NOT NULL,
     description    TEXT    NOT NULL,
 
+    closed_at      TIMESTAMPTZ     NULL,
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -56,8 +55,7 @@ SELECT diesel_manage_updated_at('repository_merge_requests');
 
 COMMENT ON COLUMN repository_merge_requests.ident IS
     'Opaque identifier, used internally by watchers. Do not rely on the value/meaning of this field.';
-COMMENT ON COLUMN repository_merge_requests.is_open IS
-    'Whether the Merge Request is open, and thus considered for testing.';
+COMMENT ON COLUMN repository_merge_requests.closed_at IS 'Closed MRs are not considered for builds.';
 
 COMMENT ON COLUMN repository_merge_requests.title IS 'Optional, may be shown in the UI.';
 COMMENT ON COLUMN repository_merge_requests.description IS 'Optional, may be shown in the UI.';

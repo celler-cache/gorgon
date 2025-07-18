@@ -13,6 +13,7 @@ gorgond-client = { path = "../gorgond-client" }
 gorgond-diesel = { path = "../gorgond-diesel" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 gorgon-build-helper = { path = "../gorgon-build-helper" }
+gorgonctl = { path = "../gorgonctl" }
 
 chrono.workspace = true
 clap.workspace = true

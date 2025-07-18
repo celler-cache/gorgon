@@ -39,6 +39,7 @@ pub mod gorgond_github {
             emitted_at -> Timestamptz,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
+            synced_at -> Nullable<Timestamptz>,
         }
     }
 
@@ -63,6 +64,9 @@ pub mod gorgond_github {
             current_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
+            synced_at -> Nullable<Timestamptz>,
+            title -> Text,
+            body -> Text,
         }
     }
 
@@ -72,6 +76,7 @@ pub mod gorgond_github {
             ref_name -> Text,
             head -> Bytea,
             created_at -> Timestamptz,
+            synced_at -> Nullable<Timestamptz>,
         }
     }
 

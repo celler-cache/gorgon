@@ -5,6 +5,7 @@
 use chrono::prelude::*;
 use minicbor::{Decode, Encode};
 use ownable::{IntoOwned, ToOwned};
+use partially::Partial;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
@@ -285,13 +286,46 @@ pub struct RepositorySpec<'a> {
     #[serde(borrow)]
     pub storage: Cow<'a, str>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Repository<'a> {
     #[ownable(clone)]
     pub id: Uuid,
     #[serde(flatten, borrow)]
     pub spec: RepositorySpec<'a>,
+
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned, Partial)]
+#[partially(derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned))]
+pub struct RepositoryMergeRequestSpec<'a> {
+    #[serde(borrow)]
+    pub ident: Cow<'a, str>,
+    #[serde(borrow)]
+    pub title: Cow<'a, str>,
+    #[serde(borrow)]
+    pub description: Cow<'a, str>,
+    #[ownable(clone)]
+    pub closed_at: Option<DateTime<Utc>>,
+}
+impl PartialRepositoryMergeRequestSpec<'_> {
+    pub fn as_spec(&self) -> RepositoryMergeRequestSpec<'_> {
+        let mut spec = RepositoryMergeRequestSpec::default();
+        spec.apply_some(self.clone());
+        spec
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct RepositoryMergeRequest<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub repository_id: Uuid,
+    #[serde(flatten, borrow)]
+    pub spec: RepositoryMergeRequestSpec<'a>,
 
     #[ownable(clone)]
     pub created_at: DateTime<Utc>,

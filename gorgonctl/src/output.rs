@@ -11,7 +11,7 @@ use std::{
 
 use bytesize::ByteSize;
 use chrono::prelude::*;
-use comfy_table::{Cell, ColumnConstraint, Table};
+use comfy_table::{Cell, CellAlignment, ColumnConstraint, Table};
 use gorgond_client::{
     events::{
         self, BuildEvent, BuildEventKind, BuildTaskEvent, BuildTaskEventKind, BuildTaskUpdate,
@@ -119,6 +119,15 @@ impl ToCell for DateTime<Utc> {
         Cell::new(self.format("%Y-%m-%d %H:%M:%S")).set_delimiter(' ')
     }
 }
+impl ToCell for bool {
+    fn cell(&self) -> Cell {
+        Cell::new(match self {
+            true => "✅",
+            false => "❎",
+        })
+        .set_alignment(CellAlignment::Center)
+    }
+}
 to_cell!(std::borrow::Cow<'_, str>);
 to_cell!(models::BuildResult);
 to_cell!(models::BuildTaskLevel);
@@ -182,6 +191,38 @@ pub fn repo_table<'a>(repos: impl IntoIterator<Item = &'a models::Repository<'a>
                 .into_iter()
                 .map(|r| [cell(&r.id), cell(&r.spec.kind), cell(&r.spec.ident)]),
         );
+    println!("{table}");
+}
+
+pub fn merge_table<'a>(
+    merges: impl IntoIterator<
+        Item = (
+            &'a models::RepositoryMergeRequest<'a>,
+            Option<&'a models::Repository<'a>>,
+        ),
+    >,
+) {
+    let mut table = table();
+    table
+        .set_header([
+            "Merge Request ID",
+            "Repository",
+            "Ident",
+            "Title",
+            "Closed At",
+        ])
+        .set_constraints([ColumnConstraint::ContentWidth])
+        .add_rows(merges.into_iter().map(|(m, r)| {
+            [
+                cell(&m.id),
+                cell_or(&m.repository_id, &r, |r| {
+                    Cell::new(format!("{}:{}", r.spec.kind, r.spec.ident))
+                }),
+                cell(&m.spec.ident),
+                cell(&m.spec.title),
+                cell(&m.spec.closed_at),
+            ]
+        }));
     println!("{table}");
 }
 

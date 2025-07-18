@@ -105,9 +105,9 @@ pub mod gorgond {
             id -> Uuid,
             repository_id -> Uuid,
             ident -> Text,
-            is_open -> Bool,
             title -> Text,
             description -> Text,
+            closed_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }

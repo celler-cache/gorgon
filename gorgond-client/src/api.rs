@@ -177,6 +177,12 @@ pub enum ApiError {
     )]
     NoWorkAvailable,
 
+    #[serde(rename = "tag:CantUpsertAndChangeIdentifier")]
+    #[diagnostic(code("gorgond::CantUpsertAndChangeIdentifier"))]
+    #[error("Can't change identifier in an upsert request")]
+    #[diagnostic(help = "Upserts are done using `INSERT INTO ... ON CONFLICT DO UPDATE` queries.")]
+    CantUpsertAndChangeIdentifier { key: String },
+
     #[serde(untagged)]
     #[diagnostic(code("gorgond::Unknown"))]
     #[error("unknown error type: {0}")]
@@ -201,6 +207,7 @@ impl ApiError {
             }
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
             Self::NoWorkAvailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::CantUpsertAndChangeIdentifier { .. } => StatusCode::BAD_REQUEST,
             Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -422,6 +429,11 @@ impl<K: Copy + Ord, V: Clone> Default for OwnableMap<K, V> {
     }
 }
 
+impl<K: Copy + Ord, V: Clone> FromIterator<(K, V)> for OwnableMap<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self(BTreeMap::from_iter(iter))
+    }
+}
 impl<K: Copy + Ord, V: Clone> Extend<(K, V)> for OwnableMap<K, V> {
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
         self.0.extend(iter)
@@ -572,7 +584,7 @@ impl<'a> RepositoriesKindClient<'a> {
     });
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Clone, Copy, Display)]
 pub enum RepositoryPath<'a> {
     #[display("-/{_0}")]
     Id(Uuid),
@@ -584,9 +596,70 @@ pub struct RepositoryClient<'a> {
     client: &'a Client,
     repo_path: RepositoryPath<'a>,
 }
-impl RepositoryClient<'_> {
+impl<'a> RepositoryClient<'a> {
+    pub fn merges(&self) -> RepositoryMergeRequestsClient<'a> {
+        RepositoryMergeRequestsClient::new(self.client, self.repo_path)
+    }
     gen_endpoints!("repos/{repo_path}", (repo_path), {
         fn get(RepositoryGetRequest) -> (GET, "");
+    });
+}
+
+// -- Repository Merge Requests -- //
+
+mkresponse!(RepositoryMergeRequestsResponse<'a> {
+    #[serde(borrow)]
+    pub merge_requests: Vec<models::RepositoryMergeRequest<'a>>,
+    #[serde(borrow)]
+    pub repositories: OwnableMap<Uuid, models::Repository<'a>>,
+});
+mkrequest!(
+    RepositoryMergeRequestsResponse<'static>,
+    RepositoryMergeRequestsListRequest {}
+);
+
+mkresponse!(RepositoryMergeRequestResponse<'a> {
+    #[serde(borrow)]
+    pub merge_request: models::RepositoryMergeRequest<'a>,
+    #[serde(borrow)]
+    pub repository: models::Repository<'a>,
+});
+mkrequest!(
+    RepositoryMergeRequestResponse<'static>,
+    RepositoryMergeRequestGetRequest {}
+);
+mkrequest!(
+    RepositoryMergeRequestResponse<'static>,
+    RepositoryMergeRequestPutRequest<'a> {
+        #[serde(borrow)]
+        pub merge_request: models::PartialRepositoryMergeRequestSpec<'a>,
+    }
+);
+
+#[derive(Debug, Constructor)]
+pub struct RepositoryMergeRequestsClient<'a> {
+    client: &'a Client,
+    repo_path: RepositoryPath<'a>,
+}
+impl<'a> RepositoryMergeRequestsClient<'a> {
+    pub fn ident(&self, ident: &'a str) -> RepositoryMergeRequestClient<'a> {
+        RepositoryMergeRequestClient::new(self.client, self.repo_path, ident)
+    }
+    gen_endpoints!("repos/{repo_path}/merges", (repo_path), {
+        fn list(RepositoryMergeRequestsListRequest) -> (GET, "");
+    });
+}
+
+#[derive(Debug, Constructor)]
+pub struct RepositoryMergeRequestClient<'a> {
+    client: &'a Client,
+    repo_path: RepositoryPath<'a>,
+    merge_ident: &'a str,
+}
+impl RepositoryMergeRequestClient<'_> {
+    gen_endpoints!("repos/{repo_path}/merges/{merge_ident}", (repo_path, merge_ident), {
+        fn get(RepositoryMergeRequestGetRequest) -> (GET, "");
+        fn put(RepositoryMergeRequestPutRequest<'_>) -> (PUT, "");
     });
 }
 

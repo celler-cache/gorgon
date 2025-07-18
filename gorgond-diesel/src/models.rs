@@ -375,6 +375,14 @@ impl Repository {
     gen_model_with_ident_helpers!(repositories, kind as &str, ident as &str);
 
     #[auto_type(no_type_alias)]
+    pub fn filter_ident<'a>(kind: &'a str, ident: &'a str) -> _ {
+        let id: Uuid = (kind == "-")
+            .then(|| Uuid::parse_str(ident).unwrap_or_default())
+            .unwrap_or_default();
+        (schema::repositories::id.eq(id))
+            .or((schema::repositories::kind.eq(kind)).and(schema::repositories::ident.eq(ident)))
+    }
+    #[auto_type(no_type_alias)]
     pub fn with_ident<'a>(kind: &'a str, ident: &'a str) -> _ {
         let id: Uuid = (kind == "-")
             .then(|| Uuid::parse_str(ident).unwrap_or_default())
@@ -436,6 +444,26 @@ impl Commit {
     gen_model!(commits, Commit);
 }
 
+#[derive(Debug, AsChangeset)]
+#[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct PartialRepositoryMergeRequest {
+    pub ident: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub closed_at: Option<Option<DateTime<Utc>>>,
+}
+impl PartialRepositoryMergeRequest {
+    pub fn from_spec(v: &client::PartialRepositoryMergeRequestSpec<'_>) -> Self {
+        Self {
+            ident: v.ident.as_ref().map(|v| v.to_string()),
+            title: v.title.as_ref().map(|v| v.to_string()),
+            description: v.description.as_ref().map(|v| v.to_string()),
+            closed_at: v.closed_at,
+        }
+    }
+}
+
 #[derive(
     Debug,
     Serialize,
@@ -446,6 +474,7 @@ impl Commit {
     Insertable,
     Identifiable,
     Associations,
+    AsChangeset,
 )]
 #[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -455,15 +484,57 @@ pub struct RepositoryMergeRequest {
     pub repository_id: Uuid,
     pub ident: String,
 
-    pub is_open: bool,
     pub title: String,
     pub description: String,
 
+    pub closed_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 impl RepositoryMergeRequest {
     gen_model!(repository_merge_requests, RepositoryMergeRequest);
+
+    pub fn from_spec(
+        v: &client::RepositoryMergeRequestSpec<'_>,
+        id: Uuid,
+        repository_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            repository_id,
+            ident: v.ident.to_string(),
+            title: v.title.to_string(),
+            description: v.description.to_string(),
+            closed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+    pub fn to_client(self) -> client::RepositoryMergeRequest<'static> {
+        client::RepositoryMergeRequest {
+            id: self.id,
+            repository_id: self.repository_id,
+            spec: client::RepositoryMergeRequestSpec {
+                ident: self.ident.into(),
+                title: self.title.into(),
+                description: self.description.into(),
+                closed_at: self.closed_at,
+            },
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
+
+    pub fn force_ident(mut self, ident: String) -> Result<Self, api::ApiError> {
+        if !self.ident.is_empty() && self.ident != ident {
+            return Err(api::ApiError::CantUpsertAndChangeIdentifier {
+                key: "ident".into(),
+            });
+        }
+        self.ident = ident;
+        Ok(self)
+    }
 }
 
 #[derive(

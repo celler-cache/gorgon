@@ -105,8 +105,9 @@ impl Org {
     }
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable, Identifiable)]
+#[derive(Debug, Queryable, Selectable, Insertable, Identifiable, Associations)]
 #[diesel(table_name = crate::schema::gorgond_github::pull_requests, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repo))]
 pub struct PullRequest {
     pub id: i64,
     pub repo_id: i64,
@@ -114,9 +115,13 @@ pub struct PullRequest {
     pub ref_name: String,
     pub merge_request_id: Option<Uuid>,
 
+    pub title: String,
+    pub body: String,
+
     pub current_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
 }
 impl PullRequest {
     pub fn try_from_event(
@@ -131,9 +136,12 @@ impl PullRequest {
             number: sign(&pr.number).context("Invalid PR Number")?,
             ref_name: pr.head.ref_field.clone(),
             merge_request_id: None,
+            title: pr.title.clone().unwrap_or_default(),
+            body: pr.body.clone().unwrap_or_default(),
             current_at: Some(current_at),
             updated_at: now,
             created_at: now,
+            synced_at: None,
         })
     }
 }
@@ -146,6 +154,7 @@ pub struct Push {
     pub head: Vec<u8>,
 
     pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
 }
 impl Push {
     pub fn try_from_event(
@@ -157,6 +166,7 @@ impl Push {
             ref_name: p.r#ref.clone(),
             head: hex::decode(&p.head).into_diagnostic().context("head")?,
             created_at: now,
+            synced_at: None,
         })
     }
 }
@@ -178,8 +188,9 @@ impl TryFrom<events::EventType> for EventKind {
     }
 }
 
-#[derive(Debug, Queryable, Selectable, Insertable, Identifiable)]
+#[derive(Debug, Queryable, Selectable, Insertable, Identifiable, Associations)]
 #[diesel(table_name = crate::schema::gorgond_github::events, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repo))]
 pub struct Event {
     pub id: i64,
     pub repo_id: i64,
@@ -193,6 +204,7 @@ pub struct Event {
     pub emitted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
 }
 impl Event {
     pub fn try_from_event(now: DateTime<Utc>, e: &events::Event) -> Result<Self> {
@@ -228,6 +240,7 @@ impl Event {
             emitted_at: e.created_at,
             updated_at: now,
             created_at: now,
+            synced_at: None,
         })
     }
 }

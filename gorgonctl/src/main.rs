@@ -9,12 +9,11 @@
 use std::{borrow::Cow, fmt::Debug, io::Read};
 
 use clap::{Parser, Subcommand};
+use gorgonctl::output;
 use gorgond_client::{api, events::BuildEvent, models, Client, Uuid};
 use miette::{miette, Context, IntoDiagnostic, Result};
 use tracing::debug;
 use url::Url;
-
-pub mod output;
 
 fn parse_key_value(s: &str) -> Result<(Cow<'static, str>, Cow<'static, str>), clap::Error> {
     s.split_once("=")
@@ -200,6 +199,11 @@ impl RepositoriesKindCommand {
 enum RepositoryCommand {
     /// Get this repository.
     Get,
+    /// Manage Merge Requests for this Repository.
+    Merges {
+        #[command(subcommand)]
+        command: RepositoryMergeRequestsCommand,
+    },
 }
 impl RepositoryCommand {
     pub async fn run(self, args: &Args, repo: api::RepositoryClient<'_>) -> Result<()> {
@@ -207,6 +211,68 @@ impl RepositoryCommand {
             Self::Get => args.out.with(
                 |r| output::repo_table([&r.repository]),
                 repo.get(api::RepositoryGetRequest {}).await?.get(),
+            ),
+            Self::Merges { command } => command.run(args, repo.merges()).await,
+        }
+    }
+}
+
+// -- Merge Requests -- //
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoryMergeRequestsCommand {
+    /// List merge requests.
+    List,
+    /// Manage a merge requests by ident.
+    Ident {
+        ident: String,
+        #[command(subcommand)]
+        command: RepositoryMergeRequestCommand,
+    },
+}
+impl RepositoryMergeRequestsCommand {
+    pub async fn run(
+        self,
+        args: &Args,
+        merges: api::RepositoryMergeRequestsClient<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::List => args.out.with(
+                |r| {
+                    output::merge_table(
+                        r.merge_requests
+                            .iter()
+                            .map(|m| (m, r.repositories.get(&m.repository_id))),
+                    )
+                },
+                merges
+                    .list(api::RepositoryMergeRequestsListRequest {})
+                    .await?
+                    .get(),
+            ),
+            Self::Ident { ident, command } => command.run(args, merges.ident(&ident)).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum RepositoryMergeRequestCommand {
+    /// Get this merge request.
+    Get,
+}
+impl RepositoryMergeRequestCommand {
+    pub async fn run(
+        self,
+        args: &Args,
+        merge: api::RepositoryMergeRequestClient<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::Get => args.out.with(
+                |r| output::merge_table([(&r.merge_request, Some(&r.repository))]),
+                &merge
+                    .get(api::RepositoryMergeRequestGetRequest {})
+                    .await?
+                    .get(),
             ),
         }
     }
