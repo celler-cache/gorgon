@@ -9,6 +9,10 @@ pub mod gorgond_github {
         #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
         #[diesel(postgres_type(name = "event_kind", schema = "gorgond_github"))]
         pub struct EventKind;
+
+        #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
+        #[diesel(postgres_type(name = "event_pull_request_action", schema = "gorgond_github"))]
+        pub struct EventPullRequestAction;
     }
 
     diesel::table! {
@@ -26,13 +30,13 @@ pub mod gorgond_github {
     diesel::table! {
         use diesel::sql_types::*;
         use super::sql_types::EventKind;
+        use super::sql_types::EventPullRequestAction;
 
         gorgond_github.events (id) {
             id -> Int8,
             repo_id -> Int8,
             actor_id -> Int8,
             org_id -> Nullable<Int8>,
-            pull_request_id -> Nullable<Int8>,
             kind -> EventKind,
             public -> Bool,
             payload -> Jsonb,
@@ -40,6 +44,10 @@ pub mod gorgond_github {
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
             synced_at -> Nullable<Timestamptz>,
+            pull_request_id -> Nullable<Int8>,
+            pull_request_action -> Nullable<EventPullRequestAction>,
+            ref_id -> Nullable<Uuid>,
+            head -> Bytea,
         }
     }
 
@@ -59,24 +67,22 @@ pub mod gorgond_github {
             id -> Int8,
             repo_id -> Int8,
             number -> Int4,
-            ref_name -> Text,
+            ref_id -> Uuid,
             merge_request_id -> Nullable<Uuid>,
+            title -> Text,
+            body -> Text,
             current_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
             synced_at -> Nullable<Timestamptz>,
-            title -> Text,
-            body -> Text,
         }
     }
 
     diesel::table! {
-        gorgond_github.pushes (id) {
-            id -> Int8,
+        gorgond_github.refs (id) {
+            id -> Uuid,
+            repo_id -> Int8,
             ref_name -> Text,
-            head -> Bytea,
-            created_at -> Timestamptz,
-            synced_at -> Nullable<Timestamptz>,
         }
     }
 
@@ -95,15 +101,18 @@ pub mod gorgond_github {
     diesel::joinable!(events -> actors (actor_id));
     diesel::joinable!(events -> orgs (org_id));
     diesel::joinable!(events -> pull_requests (pull_request_id));
+    diesel::joinable!(events -> refs (ref_id));
     diesel::joinable!(events -> repos (repo_id));
+    diesel::joinable!(pull_requests -> refs (ref_id));
     diesel::joinable!(pull_requests -> repos (repo_id));
+    diesel::joinable!(refs -> repos (repo_id));
 
     diesel::allow_tables_to_appear_in_same_query!(
         actors,
         events,
         orgs,
         pull_requests,
-        pushes,
+        refs,
         repos,
     );
 }

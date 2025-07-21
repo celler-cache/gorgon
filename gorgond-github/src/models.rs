@@ -7,7 +7,10 @@ use diesel::prelude::*;
 use diesel_derive_enum::DbEnum;
 use gorgond_client::Uuid;
 use miette::{Context, IntoDiagnostic, Result, miette};
-use octocrab::models::events;
+use octocrab::models::{
+    self,
+    events::{self, payload::PullRequestEventAction},
+};
 use strum::AsRefStr;
 
 fn sign<T: TryFrom<u64>>(id: &u64) -> Result<T>
@@ -34,6 +37,21 @@ impl Repo {
         now: DateTime<Utc>,
         current_at: DateTime<Utc>,
         r: &events::Repository,
+    ) -> Result<Self> {
+        Ok(Self {
+            id: sign(&r.id).context("Invalid ID")?,
+            name: r.name.clone(),
+            repository_id: None,
+            polled_at: None,
+            current_at: Some(current_at),
+            updated_at: now,
+            created_at: now,
+        })
+    }
+    pub fn try_from_model(
+        now: DateTime<Utc>,
+        current_at: DateTime<Utc>,
+        r: &models::Repository,
     ) -> Result<Self> {
         Ok(Self {
             id: sign(&r.id).context("Invalid ID")?,
@@ -106,13 +124,33 @@ impl Org {
 }
 
 #[derive(Debug, Queryable, Selectable, Insertable, Identifiable, Associations)]
+#[diesel(table_name = crate::schema::gorgond_github::refs, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repo))]
+pub struct Ref {
+    pub id: Uuid,
+    pub repo_id: i64,
+    pub ref_name: String,
+}
+impl Ref {
+    pub fn new(id: Uuid, repo_id: i64, ref_name: &str) -> Self {
+        Self {
+            id,
+            repo_id,
+            ref_name: (ref_name.strip_prefix("refs/heads/"))
+                .unwrap_or(ref_name)
+                .into(),
+        }
+    }
+}
+
+#[derive(Debug, Queryable, Selectable, Insertable, Identifiable, Associations)]
 #[diesel(table_name = crate::schema::gorgond_github::pull_requests, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Repo))]
 pub struct PullRequest {
     pub id: i64,
     pub repo_id: i64,
     pub number: i32,
-    pub ref_name: String,
+    pub ref_id: Uuid,
     pub merge_request_id: Option<Uuid>,
 
     pub title: String,
@@ -128,13 +166,14 @@ impl PullRequest {
         now: DateTime<Utc>,
         current_at: DateTime<Utc>,
         repo_id: i64,
+        ref_id: Uuid,
         pr: &octocrab::models::pulls::PullRequest,
-    ) -> Result<Self> {
-        Ok(Self {
+    ) -> Result<(Self, Repo, Ref)> {
+        let v = Self {
             id: sign(&pr.id).context("Invalid ID")?,
             repo_id,
             number: sign(&pr.number).context("Invalid PR Number")?,
-            ref_name: pr.head.ref_field.clone(),
+            ref_id,
             merge_request_id: None,
             title: pr.title.clone().unwrap_or_default(),
             body: pr.body.clone().unwrap_or_default(),
@@ -142,32 +181,12 @@ impl PullRequest {
             updated_at: now,
             created_at: now,
             synced_at: None,
-        })
-    }
-}
-
-#[derive(Debug, Queryable, Selectable, Insertable, Identifiable)]
-#[diesel(table_name = crate::schema::gorgond_github::pushes, check_for_backend(diesel::pg::Pg))]
-pub struct Push {
-    pub id: i64,
-    pub ref_name: String,
-    pub head: Vec<u8>,
-
-    pub created_at: DateTime<Utc>,
-    pub synced_at: Option<DateTime<Utc>>,
-}
-impl Push {
-    pub fn try_from_event(
-        now: DateTime<Utc>,
-        p: &octocrab::models::events::payload::PushEventPayload,
-    ) -> Result<Self> {
-        Ok(Self {
-            id: sign(&p.push_id).context("Invalid ID")?,
-            ref_name: p.r#ref.clone(),
-            head: hex::decode(&p.head).into_diagnostic().context("head")?,
-            created_at: now,
-            synced_at: None,
-        })
+        };
+        let head_repo = (pr.head.repo.as_ref())
+            .ok_or(miette!("PR has no source repo?"))
+            .and_then(|r| Repo::try_from_model(now, current_at, r))?;
+        let head_ref = Ref::new(ref_id, head_repo.id, &pr.head.ref_field);
+        Ok((v, head_repo, head_ref))
     }
 }
 
@@ -188,6 +207,43 @@ impl TryFrom<events::EventType> for EventKind {
     }
 }
 
+#[derive(Debug, AsRefStr, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, DbEnum)]
+#[db_enum(existing_type_path = "crate::schema::gorgond_github::sql_types::EventPullRequestAction")]
+pub enum EventPullRequestAction {
+    Opened,
+    Closed,
+    Reopened,
+    Edited,
+    Assigned,
+    Unassigned,
+    ReviewRequested,
+    ReviewRequestRemoved,
+    Labeled,
+    Unlabeled,
+    Synchronize,
+}
+impl TryFrom<PullRequestEventAction> for EventPullRequestAction {
+    type Error = PullRequestEventAction;
+    fn try_from(a: PullRequestEventAction) -> std::result::Result<Self, Self::Error> {
+        match a {
+            PullRequestEventAction::Opened => Ok(EventPullRequestAction::Opened),
+            PullRequestEventAction::Closed => Ok(EventPullRequestAction::Closed),
+            PullRequestEventAction::Reopened => Ok(EventPullRequestAction::Reopened),
+            PullRequestEventAction::Edited => Ok(EventPullRequestAction::Edited),
+            PullRequestEventAction::Assigned => Ok(EventPullRequestAction::Assigned),
+            PullRequestEventAction::Unassigned => Ok(EventPullRequestAction::Unassigned),
+            PullRequestEventAction::ReviewRequested => Ok(EventPullRequestAction::ReviewRequested),
+            PullRequestEventAction::ReviewRequestRemoved => {
+                Ok(EventPullRequestAction::ReviewRequestRemoved)
+            }
+            PullRequestEventAction::Labeled => Ok(EventPullRequestAction::Labeled),
+            PullRequestEventAction::Unlabeled => Ok(EventPullRequestAction::Unlabeled),
+            PullRequestEventAction::Synchronize => Ok(EventPullRequestAction::Synchronize),
+            _ => Err(a),
+        }
+    }
+}
+
 #[derive(Debug, Queryable, Selectable, Insertable, Identifiable, Associations)]
 #[diesel(table_name = crate::schema::gorgond_github::events, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Repo))]
@@ -196,7 +252,6 @@ pub struct Event {
     pub repo_id: i64,
     pub actor_id: i64,
     pub org_id: Option<i64>,
-    pub pull_request_id: Option<i64>,
     pub kind: EventKind,
     pub public: bool,
     pub payload: serde_json::Value,
@@ -205,10 +260,20 @@ pub struct Event {
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub synced_at: Option<DateTime<Utc>>,
+
+    pub pull_request_id: Option<i64>,
+    pub pull_request_action: Option<EventPullRequestAction>,
+
+    pub ref_id: Option<Uuid>,
+    pub head: Vec<u8>,
 }
 impl Event {
-    pub fn try_from_event(now: DateTime<Utc>, e: &events::Event) -> Result<Self> {
-        Ok(Self {
+    pub fn try_from_event(
+        now: DateTime<Utc>,
+        ref_id: Uuid,
+        e: &events::Event,
+    ) -> Result<(Self, Option<Ref>)> {
+        let mut event = Self {
             id: e.id.parse().into_diagnostic().context("Invalid ID")?,
             repo_id: sign(&e.repo.id).context("Invalid Repo ID")?,
             actor_id: sign(&e.actor.id).context("Invalid Actor ID")?,
@@ -218,18 +283,6 @@ impl Event {
                 .map(|o| sign(&o.id))
                 .transpose()
                 .context("Invalid Org ID")?,
-            pull_request_id: e
-                .payload
-                .as_ref()
-                .and_then(|p| {
-                    p.specific.as_ref().and_then(|p| match p {
-                        events::payload::EventPayload::PullRequestEvent(p) => {
-                            Some(sign(&p.pull_request.id))
-                        }
-                        _ => None,
-                    })
-                })
-                .transpose()?,
             kind: e
                 .r#type
                 .clone()
@@ -237,10 +290,38 @@ impl Event {
                 .map_err(|t| miette!("Invalid Event Type: {t:?}"))?,
             public: e.public,
             payload: serde_json::to_value(&e.payload).into_diagnostic()?,
+
             emitted_at: e.created_at,
             updated_at: now,
             created_at: now,
             synced_at: None,
-        })
+
+            pull_request_id: None,
+            pull_request_action: None,
+            ref_id: None,
+            head: Vec::with_capacity(0),
+        };
+        let mut ref_ = None;
+
+        if let Some(p) = e.payload.as_ref() {
+            match p.specific.as_ref() {
+                Some(events::payload::EventPayload::PullRequestEvent(p)) => {
+                    event.pull_request_id = Some(sign(&p.pull_request.id)?);
+                    event.pull_request_action = Some(
+                        (p.action.clone().try_into())
+                            .map_err(|t| miette!("Invalid PR Event Action: {t:?}"))?,
+                    );
+                }
+                Some(events::payload::EventPayload::PushEvent(p)) => {
+                    ref_ = Some(Ref::new(ref_id, event.repo_id, &p.r#ref));
+                    event.head = hex::decode(&p.head)
+                        .into_diagnostic()
+                        .context("Invalid HEAD")?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok((event, ref_))
     }
 }

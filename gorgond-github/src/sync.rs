@@ -6,11 +6,12 @@ use std::{io::Write, path::PathBuf, sync::Arc};
 
 use chrono::prelude::*;
 use clap::Parser;
-use diesel::prelude::*;
+use diesel::{pg::Pg, prelude::*};
 use diesel_async::{
     AsyncPgConnection, RunQueryDsl, TransactionManager,
     pooled_connection::{PoolTransactionManager, deadpool::Object},
 };
+use futures::FutureExt;
 use gorgon_build_helper::helper::{Helper, HelperCaller};
 use gorgonctl::output;
 use gorgond_client::{Client, Url, Uuid, api, models as client};
@@ -18,7 +19,7 @@ use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result, miette};
 use rayon::prelude::*;
 use tokio::runtime::Runtime;
-use tracing::{Span, info, info_span, instrument};
+use tracing::{Span, debug, info, info_span, instrument};
 use tracing_indicatif::{span_ext::IndicatifSpanExt, suspend_tracing_indicatif};
 use with_drop::with_drop;
 
@@ -110,7 +111,7 @@ impl Args {
         repos
             .par_iter()
             .try_for_each_with((rt, pool), |(rt, pool), repo| {
-                let _enter = span.enter();
+                let _enter = info_span!(parent: &span, "repo", ident = &*repo.spec.ident).entered();
                 let _drop = with_drop((), |_| span.pb_inc(1));
 
                 let mut conn = rt
@@ -119,59 +120,45 @@ impl Args {
                     .context("Couldn't get database connection")?;
 
                 transaction(rt, &mut conn, |conn| {
-                    self.sync_github_repo(rt, conn, repo, &helper, now)
+                    // Fetch previously seen events, as inputs to `gorgon-github-events`.
+                    let last_event_ids: Vec<i64> = rt
+                        .block_on(
+                            schema::events::table
+                                .select(schema::events::id)
+                                .filter(
+                                    schema::events::repo_id.eq_any(
+                                        schema::repos::table
+                                            .select(schema::repos::id)
+                                            .filter(schema::repos::name.eq(&*repo.spec.ident)),
+                                    ),
+                                )
+                                .limit(100)
+                                .load(conn),
+                        )
+                        .into_diagnostic()
+                        .context("Couldn't fetch previous events")?;
+
+                    // Call `gorgon-github-events`...
+                    helper
+                        .call(&repo.spec.ident, last_event_ids)
+                        .context("gorgon-github-events")?;
+
+                    // ...then update the `polled_at` timestamp.
+                    rt.block_on(
+                        diesel::update(schema::repos::table)
+                            .filter(schema::repos::name.eq(&*repo.spec.ident))
+                            .set((
+                                schema::repos::repository_id.eq(repo.id),
+                                schema::repos::polled_at.eq(now),
+                            ))
+                            .execute(conn),
+                    )
+                    .into_diagnostic()
+                    .context("Couldn't update polled_at")?;
+
+                    Ok(())
                 })
             })
-    }
-
-    #[instrument(name = "repo", skip_all, fields(ident = &*repo.spec.ident))]
-    pub fn sync_github_repo(
-        &self,
-        rt: &Arc<Runtime>,
-        conn: &mut AsyncPgConnection,
-        repo: &client::Repository,
-        helper: &GorgonGithubEvents,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        // Fetch previously seen events, as inputs to `gorgon-github-events`.
-        let last_event_ids: Vec<i64> = rt
-            .block_on(
-                schema::events::table
-                    .select(schema::events::id)
-                    .filter(
-                        schema::events::repo_id.eq_any(
-                            schema::repos::table
-                                .select(schema::repos::id)
-                                .filter(schema::repos::name.eq(&*repo.spec.ident)),
-                        ),
-                    )
-                    .limit(100)
-                    .load(conn),
-            )
-            .into_diagnostic()
-            .context("Couldn't fetch previous events")?;
-
-        // Call `gorgon-github-events`...
-        info!("-> Polling...");
-        helper
-            .call(&repo.spec.ident, last_event_ids)
-            .context("gorgon-github-events")?;
-
-        // ...then update the `polled_at` timestamp.
-        info!("  -> Updating polled_at...");
-        rt.block_on(
-            diesel::update(schema::repos::table)
-                .filter(schema::repos::name.eq(&*repo.spec.ident))
-                .set((
-                    schema::repos::repository_id.eq(repo.id),
-                    schema::repos::polled_at.eq(now),
-                ))
-                .execute(conn),
-        )
-        .into_diagnostic()
-        .context("Couldn't update polled_at")?;
-
-        Ok(())
     }
 
     #[instrument(name = "pull_requests", skip_all)]
@@ -184,31 +171,88 @@ impl Args {
     ) -> Result<()> {
         let mut conn = get_conn(&rt, pool)?;
 
+        info!("Finding refs for unprocessed Events...");
+        let event_refs = rt
+            .block_on({
+                let q = schema::events::table
+                    .filter(schema::events::synced_at.is_null())
+                    .select((schema::events::pull_request_id, schema::events::ref_id))
+                    .distinct()
+                    .order_by((schema::events::pull_request_id, schema::events::ref_id));
+                debug!("{}", diesel::debug_query::<Pg, _>(&q));
+                q.load::<(Option<i64>, Option<Uuid>)>(&mut conn)
+            })
+            .into_diagnostic()
+            .context("Couldn't load unprocessed Events")?;
+
         info!("Finding stale Pull Requests...");
         let prs = rt
-            .block_on(
-                schema::pull_requests::table
+            .block_on({
+                let q = schema::pull_requests::table
                     .inner_join(schema::repos::table)
+                    // We only care about PRs to repos that gorgond wants to track.
                     .filter(schema::repos::repository_id.is_not_null())
-                    .filter(schema::pull_requests::merge_request_id.is_null())
                     .filter(
-                        (schema::pull_requests::synced_at.is_null())
-                            .or(schema::pull_requests::synced_at
-                                .lt(schema::pull_requests::updated_at.nullable())),
+                        // PRs that haven't yet been registered with gorgond.
+                        (schema::pull_requests::merge_request_id.is_null())
+                            // PRs with unprocessed events.
+                            .or(schema::pull_requests::id
+                                .eq_any(event_refs.iter().filter_map(|(pid, _)| *pid)))
+                            .or(schema::pull_requests::ref_id
+                                .eq_any(event_refs.iter().filter_map(|(_, rid)| *rid)))
+                            // PRs that have been modified since last sync.
+                            // This is a catch-all for when we've processed some events,
+                            // but couldn't inform gorgond of the changes yet.
+                            .or((schema::pull_requests::synced_at.is_null())
+                                .or(schema::pull_requests::synced_at
+                                    .lt(schema::pull_requests::updated_at.nullable()))),
                     )
                     .select((
                         models::PullRequest::as_select(),
                         schema::repos::repository_id.assume_not_null(),
+                        schema::repos::name,
                     ))
-                    .order_by((schema::repos::repository_id, schema::pull_requests::number))
-                    .load::<(models::PullRequest, Uuid)>(&mut conn),
-            )
+                    .order_by((
+                        schema::pull_requests::repo_id,
+                        schema::pull_requests::number,
+                    ));
+                debug!("{}", diesel::debug_query::<Pg, _>(&q));
+                q.load::<(models::PullRequest, Uuid, String)>(&mut conn)
+            })
             .into_diagnostic()
             .context("Couldn't load stale Pull Requests")?;
         if prs.is_empty() {
-            info!("-> None!");
+            info!("-> Nothing to do!");
             return Ok(());
         }
+        let pr_it = prs.iter().map(|(pr, _, _)| pr);
+
+        info!("Finding associated Events...");
+        let events = rt
+            .block_on({
+                let q = schema::events::table
+                    .filter(
+                        (schema::events::pull_request_id.eq_any(pr_it.clone().map(|pr| pr.id)))
+                            .or(schema::events::ref_id.eq_any(pr_it.clone().map(|pr| pr.ref_id))),
+                    )
+                    .select(models::Event::as_select())
+                    .order_by((
+                        schema::events::pull_request_id,
+                        schema::events::ref_id,
+                        schema::events::emitted_at,
+                    ));
+                debug!("{}", diesel::debug_query::<Pg, _>(&q));
+                q.load::<models::Event>(&mut conn)
+            })
+            .into_diagnostic()
+            .context("Couldn't load Events for stale Pull Requests")?;
+
+        debug!(
+            event_refs = event_refs.len(),
+            prs = prs.len(),
+            events = events.len(),
+            "-> Loaded"
+        );
 
         let span = Span::current();
         span.pb_set_style(&crate::STYLE_BAR);
@@ -216,47 +260,88 @@ impl Args {
 
         let vs = prs
             .par_iter()
-            .map(|(pr, repo_id)| {
+            .map(|(pr, repo_id, repo_name)| {
                 let _drop = with_drop((), |_| span.pb_inc(1));
-                let _enter = info_span!(parent: &span, "pr", pr.id, pr.title);
+                let _enter = info_span!(parent: &span, "pr", repo=repo_name, num=pr.number);
                 info!("Syncing PR...");
 
                 let ident = pr.number.to_string();
+                let merge_request = (events.iter())
+                    .filter(|e| e.pull_request_id == Some(pr.id) || e.ref_id == Some(pr.ref_id))
+                    .fold(
+                        client::PartialRepositoryMergeRequestSpec {
+                            ident: Some(ident.as_str().into()),
+                            title: Some(pr.title.as_str().into()),
+                            description: Some(pr.body.as_str().into()),
+                            closed_at: None,
+                        },
+                        |mut mr, event| {
+                            match event.pull_request_action {
+                                Some(models::EventPullRequestAction::Opened)
+                                | Some(models::EventPullRequestAction::Reopened) => {
+                                    mr.closed_at = Some(None)
+                                }
+                                Some(models::EventPullRequestAction::Closed) => {
+                                    mr.closed_at = Some(Some(event.emitted_at))
+                                }
+                                _ => {}
+                            }
+                            mr
+                        },
+                    );
+
                 let repo_client = client.repositories().id(*repo_id);
                 let merge_client = repo_client.merges().ident(&ident);
-                let rsp = rt.block_on(merge_client.put(api::RepositoryMergeRequestPutRequest {
-                    merge_request: client::PartialRepositoryMergeRequestSpec {
-                        ident: Some(ident.as_str().into()),
-                        title: Some(pr.title.as_str().into()),
-                        description: Some(pr.body.as_str().into()),
-                        closed_at: None,
-                    },
-                }))?;
+                let rsp = rt.block_on(
+                    merge_client.put(api::RepositoryMergeRequestPutRequest { merge_request }),
+                )?;
                 Ok((pr, rsp.get().to_owned()))
             })
             .collect::<Result<Vec<_>>>()?;
 
         transaction(&rt, &mut conn, |conn| {
-            for (pr, rsp) in vs.iter() {
-                if pr.merge_request_id.is_none() {
-                    rt.block_on(
+            rt.block_on(futures::future::try_join3(
+                // Set `merge_request_id` where it's not already in the database.
+                futures::future::try_join_all(
+                    (vs.iter().filter(|(pr, _)| pr.merge_request_id.is_none())).map(|(pr, rsp)| {
                         diesel::update(schema::pull_requests::table)
                             .set(schema::pull_requests::merge_request_id.eq(rsp.merge_request.id))
-                            .execute(conn),
-                    )
-                    .into_diagnostic()
-                    .context("Couldn't update merge_request_id")?;
-                }
-            }
-            rt.block_on(
-                diesel::update(schema::pull_requests::table)
-                    .filter(schema::pull_requests::id.eq_any(vs.iter().map(|(pr, _)| pr.id)))
-                    .set(schema::pull_requests::synced_at.eq(now))
-                    .execute(conn),
-            )
-            .into_diagnostic()
-            .context("Couldn't update synced_at")?;
-            Ok(())
+                            .filter(schema::pull_requests::id.eq(pr.id))
+                            .execute(conn)
+                            .map(|r| {
+                                (r.map(|_| ()).into_diagnostic())
+                                    .context("Couldn't set merge_request_id")
+                            })
+                    }),
+                ),
+                // Update `synced_at`.
+                {
+                    let q = diesel::update(schema::pull_requests::table)
+                        .filter(schema::pull_requests::id.eq_any(pr_it.clone().map(|pr| pr.id)))
+                        .set(schema::pull_requests::synced_at.eq(now));
+                    debug!("{}", diesel::debug_query::<Pg, _>(&q));
+                    q.execute(conn).map(|r| {
+                        (r.map(|_| ()).into_diagnostic())
+                            .context("Couldn't set Pull Requests' synced_at")
+                    })
+                },
+                {
+                    let q = diesel::update(schema::events::table)
+                        .filter(
+                            schema::events::id.eq_any(
+                                (events.iter())
+                                    .filter(|e| e.synced_at.is_none())
+                                    .map(|e| e.id),
+                            ),
+                        )
+                        .set(schema::events::synced_at.eq(now));
+                    debug!("{}", diesel::debug_query::<Pg, _>(&q));
+                    q.execute(conn).map(|r| {
+                        (r.map(|_| ()).into_diagnostic())
+                            .context("Couldn't set Pull Requests' synced_at")
+                    })
+                },
+            ))
         })?;
 
         // Everything about this is an awful bodge, and this interface needs to be fixed.
@@ -322,14 +407,13 @@ impl GorgonGithubEvents {
             .with_stdout(std::process::Stdio::null())
             .with_stderr(std::process::Stdio::piped());
         let mut child = helper.start()?;
-        {
-            let mut stdin = child.child.stdin.take().ok_or(miette!("No stdin!?"))?;
-            for id in last_event_ids {
+        (child.child.stdin.take().ok_or(miette!("No stdin!?"))).and_then(|mut stdin| {
+            last_event_ids.into_iter().try_for_each(|id| {
                 writeln!(&mut stdin, "{id}")
                     .into_diagnostic()
-                    .context("Couldn't write Event ID")?;
-            }
-        }
+                    .context("Couldn't write Event ID")
+            })
+        })?;
         child.wait_checked()?;
         Ok(())
     }

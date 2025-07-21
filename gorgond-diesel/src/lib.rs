@@ -7,15 +7,22 @@ pub mod schema;
 
 use std::error::Error as StdError;
 
-use diesel::{define_sql_function, migration::MigrationSource, pg::Pg, sql_types};
+use diesel::{
+    connection::InstrumentationEvent, define_sql_function, migration::MigrationSource, pg::Pg,
+    sql_types,
+};
 use diesel_async::{
+    AsyncConnection,
     pg::AsyncPgConnection,
-    pooled_connection::{AsyncDieselConnectionManager, deadpool::Pool},
+    pooled_connection::{
+        AsyncDieselConnectionManager,
+        deadpool::{Hook, Pool},
+    },
 };
 use diesel_migrations::MigrationHarness;
 use futures::future::TryFutureExt;
 use miette::{Context, IntoDiagnostic, Result};
-use tracing::{debug, debug_span, info, instrument};
+use tracing::{debug, debug_span, error, error_span, info, instrument, trace, warn};
 
 pub type AsyncPgPool = Pool<AsyncPgConnection>;
 
@@ -46,6 +53,31 @@ impl Args {
         debug!(db_url = self.db_url, "Connecting to database...");
         let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&self.db_url);
         let pool = Pool::builder(cfg)
+            .post_create(Hook::sync_fn(|conn: &mut AsyncPgConnection, _| {
+                fn on_event<'a>(event: InstrumentationEvent<'a>) {
+                    let _enter = error_span!("db").entered();
+                    match event {
+                        InstrumentationEvent::StartEstablishConnection { url, .. } => {
+                            trace!(url, "Connecting...")
+                        }
+                        InstrumentationEvent::FinishEstablishConnection { url, error, .. } => {
+                            match error {
+                                Some(err) => warn!(url, ?err, "Connection failed!"),
+                                None => debug!(url, "Connected!"),
+                            }
+                        }
+                        InstrumentationEvent::FinishQuery { query, error, .. } => {
+                            error_span!("query").in_scope(|| match error {
+                                Some(err) => warn!(?err, "{query}"),
+                                None => debug!("{query}"),
+                            })
+                        }
+                        _ => {}
+                    }
+                }
+                conn.set_instrumentation(on_event);
+                Ok(())
+            }))
             .build()
             .into_diagnostic()
             .context("Couldn't build database connection pool")?;

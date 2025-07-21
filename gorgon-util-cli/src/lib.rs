@@ -350,6 +350,10 @@ pub fn logger(args: Args) -> LoggerBuilder {
         level: args.level(),
         target_levels: BTreeMap::new(),
     }
+    // We have our own database instrumentation, tokio_postgres' is redundant.
+    .with_target_level("tokio_postgres::prepare", tracing::Level::INFO)
+    .with_target_level("tokio_postgres::query", tracing::Level::INFO)
+    .with_target_level("tokio_postgres::simple_query", tracing::Level::INFO)
 }
 
 pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(args: Args, f: F) {

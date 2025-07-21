@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 use clap::{Parser, Subcommand};
+use derive_more::Display;
 use diesel_migrations::{EmbeddedMigrations, embed_migrations};
 use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, Result};
@@ -20,6 +21,24 @@ pub mod schema;
 pub mod sync;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+#[derive(Debug, Display, miette::Diagnostic)]
+pub struct TransactionError(miette::Report);
+impl From<miette::Report> for TransactionError {
+    fn from(err: miette::Report) -> Self {
+        Self(err)
+    }
+}
+impl From<diesel::result::Error> for TransactionError {
+    fn from(err: diesel::result::Error) -> Self {
+        Self(miette::Report::from_err(err))
+    }
+}
+impl std::error::Error for TransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {

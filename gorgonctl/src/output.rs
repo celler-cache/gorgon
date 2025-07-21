@@ -204,17 +204,10 @@ pub fn merge_table<'a>(
 ) {
     let mut table = table();
     table
-        .set_header([
-            "Merge Request ID",
-            "Repository",
-            "Ident",
-            "Title",
-            "Closed At",
-        ])
+        .set_header(["Repository", "Ident", "Title", "Closed At"])
         .set_constraints([ColumnConstraint::ContentWidth])
         .add_rows(merges.into_iter().map(|(m, r)| {
             [
-                cell(&m.id),
                 cell_or(&m.repository_id, &r, |r| {
                     Cell::new(format!("{}:{}", r.spec.kind, r.spec.ident))
                 }),

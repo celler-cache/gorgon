@@ -5,6 +5,7 @@
 use chrono::prelude::*;
 use diesel::{prelude::*, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
+use gorgond_client::Uuid;
 use gorgond_diesel::AsyncPgPool;
 use miette::{Context, IntoDiagnostic, NamedSource, Result, SourceOffset, SourceSpan, bail};
 use octocrab::models::events::{self, payload::EventPayload};
@@ -12,7 +13,7 @@ use scoped_futures::ScopedFutureExt;
 use tokio::runtime::Runtime;
 use tracing::{Span, debug, field::Empty, info, instrument};
 
-use crate::{models, schema::gorgond_github as schema};
+use crate::{TransactionError, models, schema::gorgond_github as schema};
 
 macro_rules! excluded {
     ($($col:expr),+$(,)?) => {
@@ -93,17 +94,15 @@ impl Args {
         let span = Span::current();
         let (now, current_at) = (Utc::now(), e.created_at);
 
-        let event = models::Event::try_from_event(now, &e).context("Event")?;
+        let event = models::Event::try_from_event(now, Uuid::now_v7(), &e).context("Event")?;
         let repo = models::Repo::try_from_event(now, current_at, &e.repo).context("Repo")?;
         let actor = models::Actor::try_from_event(now, current_at, &e.actor).context("Actor")?;
-        span.record("event_id", event.id)
+        span.record("event_id", event.0.id)
             .record("repo_id", repo.id)
             .record("actor_id", actor.id)
-            .record("kind", event.kind.as_ref());
+            .record("kind", event.0.kind.as_ref());
 
-        let org = e
-            .org
-            .as_ref()
+        let org = (e.org.as_ref())
             .map(|o| models::Org::try_from_event(now, current_at, o))
             .transpose()
             .context("Org")?
@@ -111,27 +110,22 @@ impl Args {
                 span.record("org_id", org.id);
             });
 
-        let (mut pr, mut push) = (None, None);
-        match e.payload.as_ref().and_then(|p| p.specific.as_ref()) {
-            Some(EventPayload::PushEvent(p)) => {
-                let push = push.insert(models::Push::try_from_event(now, p).context("Push")?);
-                span.record("push_id", push.id);
-            }
-            Some(EventPayload::PullRequestEvent(p)) => {
-                let pr = pr.insert(
-                    models::PullRequest::try_from_event(
-                        now,
-                        current_at,
-                        event.repo_id,
-                        &p.pull_request,
-                    )
-                    .context("Pull Request")?,
-                );
+        let pr = match e.payload.as_ref().and_then(|p| p.specific.as_ref()) {
+            Some(EventPayload::PullRequestEvent(p)) => models::PullRequest::try_from_event(
+                now,
+                current_at,
+                event.0.repo_id,
+                Uuid::now_v7(),
+                &p.pull_request,
+            )
+            .inspect(|(pr, _, _)| {
                 span.record("pr_id", pr.id)
                     .record("action", format!("{:?}", p.action));
-            }
-            _ => {}
-        }
+            })
+            .map(Some)
+            .context("Pull Request")?,
+            _ => None,
+        };
 
         pool.get()
             .await
@@ -148,7 +142,9 @@ impl Args {
                             schema::repos::updated_at,
                         ))
                         .execute(conn)
-                        .await?;
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't insert Repo")?;
                     diesel::insert_into(schema::actors::table)
                         .values(&actor)
                         .on_conflict(schema::actors::id)
@@ -161,7 +157,9 @@ impl Args {
                             schema::actors::updated_at,
                         ))
                         .execute(conn)
-                        .await?;
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't insert Actor")?;
                     if let Some(org) = org {
                         diesel::insert_into(schema::orgs::table)
                             .values(&org)
@@ -174,9 +172,40 @@ impl Args {
                                 schema::orgs::updated_at,
                             ))
                             .execute(conn)
-                            .await?;
+                            .await
+                            .into_diagnostic()
+                            .context("Couldn't insert Org")?;
                     }
-                    if let Some(pr) = pr {
+                    if let Some((mut pr, pr_repo, pr_ref)) = pr {
+                        diesel::insert_into(schema::repos::table)
+                            .values(&pr_repo)
+                            .on_conflict(schema::repos::id)
+                            .do_update()
+                            .set(excluded!(
+                                schema::repos::name,
+                                schema::repos::current_at,
+                                schema::repos::updated_at,
+                            ))
+                            .execute(conn)
+                            .await
+                            .into_diagnostic()
+                            .context("Couldn't insert Repo")?;
+
+                        // TODO: ON CONFLICT DO NOTHING ... RETURNING returns nothing if
+                        // the row already exists, without some silly hacks. We can force
+                        // something to be returned by making a pointless no-op write on
+                        // every insert, but this is not ideal.
+                        pr.ref_id = diesel::insert_into(schema::refs::table)
+                            .values(&pr_ref)
+                            .on_conflict((schema::refs::repo_id, schema::refs::ref_name))
+                            .do_update()
+                            .set(excluded!(schema::refs::repo_id, schema::refs::ref_name))
+                            .returning(schema::refs::id)
+                            .get_result::<Uuid>(conn)
+                            .await
+                            .into_diagnostic()
+                            .context("Couldn't insert Pull Request Ref")?;
+
                         diesel::insert_into(schema::pull_requests::table)
                             .values(&pr)
                             .on_conflict(schema::pull_requests::id)
@@ -184,22 +213,32 @@ impl Args {
                             .set(excluded!(
                                 schema::pull_requests::repo_id,
                                 schema::pull_requests::number,
-                                schema::pull_requests::ref_name,
+                                schema::pull_requests::ref_id,
                                 schema::pull_requests::merge_request_id,
+                                schema::pull_requests::title,
+                                schema::pull_requests::body,
                                 schema::pull_requests::current_at,
                                 schema::pull_requests::updated_at,
                             ))
                             .execute(conn)
-                            .await?;
+                            .await
+                            .into_diagnostic()
+                            .context("Couldn't insert Pull Request")?;
                     }
-                    if let Some(push) = push {
-                        diesel::insert_into(schema::pushes::table)
-                            .values(&push)
-                            .on_conflict(schema::pushes::id)
+                    // TODO: Same problem with pointless writes here.
+                    let (mut event, event_ref) = event;
+                    if let Some(event_ref) = event_ref {
+                        event.ref_id = diesel::insert_into(schema::refs::table)
+                            .values(&event_ref)
+                            .on_conflict((schema::refs::repo_id, schema::refs::ref_name))
                             .do_update()
-                            .set(excluded!(schema::pushes::ref_name, schema::pushes::head))
-                            .execute(conn)
-                            .await?;
+                            .set(excluded!(schema::refs::repo_id, schema::refs::ref_name))
+                            .returning(schema::refs::id)
+                            .get_result::<Uuid>(conn)
+                            .await
+                            .map(Some)
+                            .into_diagnostic()
+                            .context("Couldn't insert Event Ref")?;
                     }
                     diesel::insert_into(schema::events::table)
                         .values(&event)
@@ -209,16 +248,21 @@ impl Args {
                             schema::events::repo_id,
                             schema::events::actor_id,
                             schema::events::org_id,
-                            schema::events::pull_request_id,
                             schema::events::kind,
                             schema::events::public,
                             schema::events::payload,
                             schema::events::emitted_at,
                             schema::events::updated_at,
+                            schema::events::pull_request_id,
+                            schema::events::pull_request_action,
+                            schema::events::ref_id,
+                            schema::events::head,
                         ))
                         .execute(conn)
-                        .await?;
-                    Ok::<_, diesel::result::Error>(())
+                        .await
+                        .into_diagnostic()
+                        .context("Couldn't insert Event")?;
+                    Ok::<_, TransactionError>(())
                 }
                 .scope_boxed()
             })
