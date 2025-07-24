@@ -4,11 +4,11 @@
 
 CREATE TABLE repositories (
     id          UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    kind        TEXT NOT NULL CHECK (kind <> ''),
-    ident       TEXT NOT NULL CHECK (kind <> ''),
+    kind        TEXT NOT NULL    CHECK (kind <> ''),
+    ident       TEXT NOT NULL    CHECK (kind <> ''),
     UNIQUE (kind, ident),
 
-    storage     TEXT NOT NULL CHECK (storage <> '') UNIQUE,
+    storage     TEXT NOT NULL    CHECK (storage <> '') UNIQUE,
 
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -27,8 +27,8 @@ COMMENT ON COLUMN repositories.storage IS
 
 CREATE TABLE commits (
     id             UUID  PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    repository_id  UUID  NOT NULL REFERENCES repositories (id) ON DELETE CASCADE,
-    hash           BYTEA NOT NULL CHECK (hash <> ''),
+    repository_id  UUID  NOT NULL    REFERENCES repositories (id) ON DELETE CASCADE,
+    hash           BYTEA NOT NULL    CHECK (hash <> ''),
     UNIQUE (repository_id, hash),
 
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -64,11 +64,14 @@ COMMENT ON COLUMN repository_merge_requests.description IS 'Optional, may be sho
 
 CREATE TABLE repository_merge_request_versions (
     id                UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    merge_request_id  UUID NOT NULL REFERENCES repository_merge_requests (id) ON DELETE CASCADE,
-    source            TEXT NOT NULL CHECK (source <> ''),
-    commit_id         UUID          REFERENCES commits (id),
+    merge_request_id  UUID NOT NULL    REFERENCES repository_merge_requests (id) ON DELETE CASCADE,
+    ident             TEXT NOT NULL    CHECK (ident <> ''),
+    UNIQUE(merge_request_id, ident),
 
-    obsolete_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source            TEXT NOT NULL    CHECK (source <> ''),
+    commit_id         UUID             REFERENCES commits (id)                   ON DELETE SET NULL,
+
+    current_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -83,9 +86,9 @@ COMMENT ON COLUMN repository_merge_request_versions.commit_id IS
 ---
 
 CREATE TABLE project_inputs (
-    id          UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    project_id  UUID NOT NULL REFERENCES projects (id),
-    key         TEXT NOT NULL CHECK (key <> ''),
+    id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    project_id     UUID NOT NULL    REFERENCES projects (id),
+    key            TEXT NOT NULL    CHECK (key <> ''),
     UNIQUE (project_id, key),
 
     -- Either "source" or "repository_id" must be set.
@@ -93,8 +96,8 @@ CREATE TABLE project_inputs (
     repository_id  UUID REFERENCES repositories (id),
     CONSTRAINT source_or CHECK ((source <> '') OR (repository_id IS NOT NULL)),
 
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 SELECT diesel_manage_updated_at('project_inputs');
@@ -104,8 +107,8 @@ COMMENT ON COLUMN project_inputs.key IS 'Value of "build_inputs.key".';
 ---
 
 CREATE TABLE project_input_commits (
-    input_id   UUID NOT NULL REFERENCES project_inputs (id) ON DELETE CASCADE,
-    commit_id  UUID NOT NULL REFERENCES commits (id) ON DELETE CASCADE,
+    input_id    UUID NOT NULL REFERENCES project_inputs (id) ON DELETE CASCADE,
+    commit_id   UUID NOT NULL REFERENCES commits (id)        ON DELETE CASCADE,
     PRIMARY KEY (input_id, commit_id),
 
     -- NOT NULL, unknown is represented by a matching row not being present at all.
@@ -130,8 +133,8 @@ CREATE TABLE rollups (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE rollup_commits (
-    rollup_id  UUID NOT NULL REFERENCES rollups (id) ON DELETE CASCADE,
-    commit_id  UUID NOT NULL REFERENCES commits (id) ON DELETE CASCADE,
+    rollup_id      UUID NOT NULL REFERENCES rollups (id)        ON DELETE CASCADE,
+    commit_id      UUID NOT NULL REFERENCES commits (id)        ON DELETE CASCADE,
     PRIMARY KEY (rollup_id, commit_id)
 );
 

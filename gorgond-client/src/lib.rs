@@ -193,4 +193,7 @@ impl Client {
     pub fn workers(&self) -> api::WorkersClient {
         api::WorkersClient::new(self)
     }
+    pub fn batch(&self) -> api::BatchClient {
+        api::BatchClient::new(self)
+    }
 }

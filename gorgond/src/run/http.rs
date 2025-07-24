@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::fmt::Debug;
+use std::{collections::BTreeSet, fmt::Debug};
 
 use axum::{
     extract::{FromRequest, Path, State},
@@ -18,8 +18,8 @@ use diesel_async::{
 };
 use futures::stream::TryStreamExt;
 use gorgond_client::{
-    api::{self, ApiError},
-    Url, Uuid, Yoke, Yokeable,
+    api::{self, ApiError, OwnableMap},
+    models as client, Url, Uuid, Yoke, Yokeable,
 };
 use gorgond_diesel::{models, schema};
 use miette::{Context, Diagnostic, IntoDiagnostic};
@@ -29,6 +29,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
+
+macro_rules! excluded {
+    ($($col:expr),+$(,)?) => {
+        ($($col.eq(diesel::upsert::excluded($col))),+)
+    };
+}
 
 #[derive(Debug, Clone, clap::Parser)]
 #[clap(next_help_heading = "HTTP Server")]
@@ -52,9 +58,10 @@ pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::
         .route("/repos/{kind}", get(repos_by_kind))
         .route("/repos/{kind}/{ident}", get(repo))
         .route("/repos/{kind}/{ident}/merges", get(repo_merges))
+        .route("/batch/repos/merges", put(batch_repo_merges_import))
         .route(
-            "/repos/{kind}/{ident}/merges/{merge_ident}",
-            put(repo_merge_put),
+            "/batch/repos/merges/versions",
+            put(batch_repo_merge_versions_import),
         )
         .route("/projects", post(project_create))
         .route("/projects/{project}", get(project))
@@ -271,38 +278,131 @@ async fn repo_merges(
     .await
 }
 
-async fn repo_merge_put(
+async fn batch_repo_merges_import(
     State(state): State<S>,
-    Path((repo_kind, repo_ident, merge_ident)): Path<(String, String, String)>,
-    JsonRequest(req): JsonRequest<api::RepositoryMergeRequestPutRequest<'static>>,
-) -> Result<JsonResponse<api::RepositoryMergeRequestResponse<'static>>> {
+    JsonRequest(req): JsonRequest<api::BatchRepositoryMergeRequestsImportRequest<'static>>,
+) -> Result<JsonResponse<api::RepositoryMergeRequestsResponse<'static>>> {
     let req = req.get();
-    let pspec = &req.merge_request;
     transaction!(state, async |conn: &mut _| {
         let now = Utc::now();
-        let repo = models::Repository::get_ident(conn, &repo_kind, &repo_ident).await?;
-        let merge = diesel::insert_into(schema::gorgond::repository_merge_requests::table)
+
+        let repo_ids: BTreeSet<Uuid> = req.merge_requests.keys().copied().collect();
+        let repos_f = models::Repository::all()
+            .filter(schema::gorgond::repositories::id.eq_any(repo_ids))
+            .load_stream(conn);
+
+        let merges_f = diesel::insert_into(schema::gorgond::repository_merge_requests::table)
             .values(
-                models::RepositoryMergeRequest::from_spec(
-                    &pspec.as_spec(),
-                    Uuid::now_v7(),
-                    repo.id,
-                    now,
-                )
-                .force_ident(merge_ident)?,
+                req.merge_requests
+                    .iter()
+                    .flat_map(|(repo_id, specs)| {
+                        specs.iter().map(|spec| {
+                            models::RepositoryMergeRequest::from_spec(
+                                spec,
+                                Uuid::now_v7(),
+                                *repo_id,
+                                now,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             )
             .on_conflict((
                 schema::gorgond::repository_merge_requests::repository_id,
                 schema::gorgond::repository_merge_requests::ident,
             ))
             .do_update()
-            .set(models::PartialRepositoryMergeRequest::from_spec(pspec))
+            .set(excluded!(
+                schema::gorgond::repository_merge_requests::ident,
+                schema::gorgond::repository_merge_requests::title,
+                schema::gorgond::repository_merge_requests::description,
+                schema::gorgond::repository_merge_requests::closed_at,
+                schema::gorgond::repository_merge_requests::updated_at,
+            ))
             .returning(models::RepositoryMergeRequest::as_returning())
-            .get_result::<models::RepositoryMergeRequest>(conn)
+            .load_stream(conn);
+
+        Ok(JsonResponse(api::RepositoryMergeRequestsResponse {
+            merge_requests: merges_f
+                .await?
+                .map_ok(|v| v.to_client())
+                .try_collect::<Vec<_>>()
+                .await?,
+            repositories: repos_f
+                .await?
+                .map_ok(|v| (v.id, v.to_client()))
+                .try_collect::<OwnableMap<Uuid, _>>()
+                .await?,
+        }))
+    })
+    .await
+}
+
+async fn batch_repo_merge_versions_import(
+    State(state): State<S>,
+    JsonRequest(req): JsonRequest<api::BatchRepositoryMergeRequestVersionsImportRequest<'static>>,
+) -> Result<JsonResponse<api::RepositoryMergeRequestVersionsResponse<'static>>> {
+    let req = req.get();
+    transaction!(state, async |conn: &mut _| {
+        let now = Utc::now();
+
+        let merge_ids: BTreeSet<Uuid> = req.merge_request_versions.keys().copied().collect();
+        let merge_requests: OwnableMap<Uuid, client::RepositoryMergeRequest> =
+            models::RepositoryMergeRequest::all()
+                .filter(schema::gorgond::repository_merge_requests::id.eq_any(merge_ids))
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| (v.id, v.to_client()))
+                .try_collect()
+                .await?;
+
+        let repo_ids: BTreeSet<Uuid> = merge_requests.values().map(|mr| mr.repository_id).collect();
+        let repositories: OwnableMap<Uuid, client::Repository> = models::Repository::all()
+            .filter(schema::gorgond::repositories::id.eq_any(repo_ids))
+            .load_stream(conn)
+            .await?
+            .map_ok(|v| (v.id, v.to_client()))
+            .try_collect()
             .await?;
-        Ok(JsonResponse(api::RepositoryMergeRequestResponse {
-            repository: repo.to_client(),
-            merge_request: merge.to_client(),
+
+        let merge_request_versions =
+            diesel::insert_into(schema::gorgond::repository_merge_request_versions::table)
+                .values(
+                    req.merge_request_versions
+                        .iter()
+                        .flat_map(|(merge_id, specs)| {
+                            specs.iter().map(|spec| {
+                                models::RepositoryMergeRequestVersion::from_spec(
+                                    spec,
+                                    Uuid::now_v7(),
+                                    *merge_id,
+                                    now,
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .on_conflict((
+                    schema::gorgond::repository_merge_request_versions::merge_request_id,
+                    schema::gorgond::repository_merge_request_versions::ident,
+                ))
+                .do_update()
+                .set(excluded!(
+                    schema::gorgond::repository_merge_request_versions::source,
+                    schema::gorgond::repository_merge_request_versions::current_at,
+                    schema::gorgond::repository_merge_request_versions::updated_at,
+                ))
+                .returning(models::RepositoryMergeRequestVersion::as_returning())
+                .load_stream(conn)
+                .await?
+                .map_ok(|v| v.to_client())
+                .try_collect::<Vec<_>>()
+                .await?;
+
+        Ok(JsonResponse(api::RepositoryMergeRequestVersionsResponse {
+            merge_requests,
+            repositories,
+            merge_request_versions,
         }))
     })
     .await

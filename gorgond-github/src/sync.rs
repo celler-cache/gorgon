@@ -210,14 +210,13 @@ impl Args {
                     .select((
                         models::PullRequest::as_select(),
                         schema::repos::repository_id.assume_not_null(),
-                        schema::repos::name,
                     ))
                     .order_by((
                         schema::pull_requests::repo_id,
                         schema::pull_requests::number,
                     ));
                 debug!("{}", diesel::debug_query::<Pg, _>(&q));
-                q.load::<(models::PullRequest, Uuid, String)>(&mut conn)
+                q.load::<(models::PullRequest, Uuid)>(&mut conn)
             })
             .into_diagnostic()
             .context("Couldn't load stale Pull Requests")?;
@@ -225,24 +224,29 @@ impl Args {
             info!("-> Nothing to do!");
             return Ok(());
         }
-        let pr_it = prs.iter().map(|(pr, _, _)| pr);
+        let pr_it = prs.iter().map(|(pr, _)| pr);
 
         info!("Finding associated Events...");
         let events = rt
             .block_on({
                 let q = schema::events::table
+                    .left_join(schema::refs::table)
+                    .left_join(schema::repos::table.on(schema::refs::repo_id.eq(schema::repos::id)))
                     .filter(
                         (schema::events::pull_request_id.eq_any(pr_it.clone().map(|pr| pr.id)))
                             .or(schema::events::ref_id.eq_any(pr_it.clone().map(|pr| pr.ref_id))),
                     )
-                    .select(models::Event::as_select())
+                    .select((
+                        models::Event::as_select(),
+                        (schema::repos::name, schema::refs::ref_name).nullable(),
+                    ))
                     .order_by((
                         schema::events::pull_request_id,
                         schema::events::ref_id,
                         schema::events::emitted_at,
                     ));
                 debug!("{}", diesel::debug_query::<Pg, _>(&q));
-                q.load::<models::Event>(&mut conn)
+                q.load::<(models::Event, Option<(String, String)>)>(&mut conn)
             })
             .into_diagnostic()
             .context("Couldn't load Events for stale Pull Requests")?;
@@ -254,58 +258,80 @@ impl Args {
             "-> Loaded"
         );
 
-        let span = Span::current();
-        span.pb_set_style(&crate::STYLE_BAR);
-        span.pb_set_length(prs.len() as u64);
-
-        let vs = prs
-            .par_iter()
-            .map(|(pr, repo_id, repo_name)| {
-                let _drop = with_drop((), |_| span.pb_inc(1));
-                let _enter = info_span!(parent: &span, "pr", repo=repo_name, num=pr.number);
-                info!("Syncing PR...");
-
-                let ident = pr.number.to_string();
-                let merge_request = (events.iter())
-                    .filter(|e| e.pull_request_id == Some(pr.id) || e.ref_id == Some(pr.ref_id))
-                    .fold(
-                        client::PartialRepositoryMergeRequestSpec {
-                            ident: Some(ident.as_str().into()),
-                            title: Some(pr.title.as_str().into()),
-                            description: Some(pr.body.as_str().into()),
-                            closed_at: None,
-                        },
-                        |mut mr, event| {
-                            match event.pull_request_action {
-                                Some(models::EventPullRequestAction::Opened)
-                                | Some(models::EventPullRequestAction::Reopened) => {
-                                    mr.closed_at = Some(None)
-                                }
-                                Some(models::EventPullRequestAction::Closed) => {
-                                    mr.closed_at = Some(Some(event.emitted_at))
-                                }
-                                _ => {}
-                            }
-                            mr
-                        },
-                    );
-
-                let repo_client = client.repositories().id(*repo_id);
-                let merge_client = repo_client.merges().ident(&ident);
-                let rsp = rt.block_on(
-                    merge_client.put(api::RepositoryMergeRequestPutRequest { merge_request }),
-                )?;
-                Ok((pr, rsp.get().to_owned()))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let repo_rsp = rt.block_on(
+            client.batch().repositories().merges().import(
+                api::BatchRepositoryMergeRequestsImportRequest {
+                    merge_requests: (prs.iter())
+                        .map(|(pr, repo_id)| {
+                            (*repo_id, {
+                                (events.iter())
+                                .filter(|(e, _)|  e.pull_request_id == Some(pr.id))
+                                .fold(
+                                    client::RepositoryMergeRequestSpec {
+                                        ident: pr.number.to_string().into(),
+                                        title: pr.title.as_str().into(),
+                                        description: pr.body.as_str().into(),
+                                        closed_at: None,
+                                    },
+                                    |mut mr, (event, _)| {
+                                        match event.pull_request_action {
+                                            Some(models::EventPullRequestAction::Opened)
+                                            | Some(models::EventPullRequestAction::Reopened) => {
+                                                mr.closed_at = None
+                                            }
+                                            Some(models::EventPullRequestAction::Closed) => {
+                                                mr.closed_at = Some(event.emitted_at)
+                                            }
+                                            _ => {}
+                                        }
+                                        mr
+                                    },
+                                )
+                            })
+                        })
+                        .collect(),
+                },
+            ),
+        )?;
+        let version_rsp = rt.block_on(
+            client.batch().repositories().merges().versions().import(
+                api::BatchRepositoryMergeRequestVersionsImportRequest {
+                    merge_request_versions: (pr_it.clone())
+                        .zip(repo_rsp.get().merge_requests.iter())
+                        .flat_map(|(pr, mr)| {
+                            (events.iter())
+                                .filter(|(e, _)| e.ref_id == Some(pr.ref_id) && !e.head.is_empty())
+                                .filter_map(|(e, r)| r.as_ref().map(|r| (e, r)))
+                                .map(|(e, (fork_name, _))| {
+                                    let head = hex::encode(&e.head);
+                                    (
+                                        mr.id,
+                                        client::RepositoryMergeRequestVersionSpec {
+                                            source: format!(
+                                                "git+https://github.com/{fork_name}?rev={head}"
+                                            )
+                                            .into(),
+                                            ident: head.into(),
+                                            current_at: e.emitted_at,
+                                        },
+                                    )
+                                })
+                        })
+                        .collect(),
+                },
+            ),
+        )?;
 
         transaction(&rt, &mut conn, |conn| {
             rt.block_on(futures::future::try_join3(
                 // Set `merge_request_id` where it's not already in the database.
                 futures::future::try_join_all(
-                    (vs.iter().filter(|(pr, _)| pr.merge_request_id.is_none())).map(|(pr, rsp)| {
+                    ((pr_it.clone())
+                        .zip(repo_rsp.get().merge_requests.iter())
+                        .filter(|(pr, _)| pr.merge_request_id.is_none()))
+                    .map(|(pr, mr)| {
                         diesel::update(schema::pull_requests::table)
-                            .set(schema::pull_requests::merge_request_id.eq(rsp.merge_request.id))
+                            .set(schema::pull_requests::merge_request_id.eq(mr.id))
                             .filter(schema::pull_requests::id.eq(pr.id))
                             .execute(conn)
                             .map(|r| {
@@ -330,8 +356,8 @@ impl Args {
                         .filter(
                             schema::events::id.eq_any(
                                 (events.iter())
-                                    .filter(|e| e.synced_at.is_none())
-                                    .map(|e| e.id),
+                                    .filter(|(e, _)| e.synced_at.is_none())
+                                    .map(|(e, _)| e.id),
                             ),
                         )
                         .set(schema::events::synced_at.eq(now));
@@ -344,16 +370,10 @@ impl Args {
             ))
         })?;
 
-        // Everything about this is an awful bodge, and this interface needs to be fixed.
         suspend_tracing_indicatif(|| {
             self.output.with(
-                |vs| {
-                    output::merge_table(
-                        vs.iter()
-                            .map(|rsp| (&rsp.merge_request, Some(&rsp.repository))),
-                    )
-                },
-                &vs.into_iter().map(|(_, rsp)| rsp).collect::<Vec<_>>(),
+                |repo_rsp| output::merge_table(repo_rsp.table_iter()),
+                repo_rsp.get(),
             )
         })
     }

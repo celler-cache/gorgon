@@ -444,26 +444,6 @@ impl Commit {
     gen_model!(commits, Commit);
 }
 
-#[derive(Debug, AsChangeset)]
-#[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct PartialRepositoryMergeRequest {
-    pub ident: Option<String>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub closed_at: Option<Option<DateTime<Utc>>>,
-}
-impl PartialRepositoryMergeRequest {
-    pub fn from_spec(v: &client::PartialRepositoryMergeRequestSpec<'_>) -> Self {
-        Self {
-            ident: v.ident.as_ref().map(|v| v.to_string()),
-            title: v.title.as_ref().map(|v| v.to_string()),
-            description: v.description.as_ref().map(|v| v.to_string()),
-            closed_at: v.closed_at,
-        }
-    }
-}
-
 #[derive(
     Debug,
     Serialize,
@@ -554,10 +534,12 @@ impl RepositoryMergeRequest {
 pub struct RepositoryMergeRequestVersion {
     pub id: Uuid,
     pub merge_request_id: Uuid,
+    pub ident: String,
+
     pub source: String,
     pub commit_id: Option<Uuid>,
 
-    pub obsolete_at: DateTime<Utc>,
+    pub current_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -566,4 +548,36 @@ impl RepositoryMergeRequestVersion {
         repository_merge_request_versions,
         RepositoryMergeRequestVersion
     );
+
+    pub fn from_spec(
+        v: &client::RepositoryMergeRequestVersionSpec<'_>,
+        id: Uuid,
+        merge_request_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            merge_request_id,
+            ident: v.ident.to_string(),
+            source: v.source.to_string(),
+            commit_id: None,
+            current_at: v.current_at,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+    pub fn to_client(self) -> client::RepositoryMergeRequestVersion<'static> {
+        client::RepositoryMergeRequestVersion {
+            id: self.id,
+            merge_request_id: self.merge_request_id,
+            commit_id: self.commit_id,
+            spec: client::RepositoryMergeRequestVersionSpec {
+                ident: self.ident.into(),
+                source: self.source.into(),
+                current_at: self.current_at,
+            },
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }

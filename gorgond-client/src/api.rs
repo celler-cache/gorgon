@@ -440,6 +440,21 @@ impl<K: Copy + Ord, V: Clone> Extend<(K, V)> for OwnableMap<K, V> {
     }
 }
 
+impl<K: Copy + Ord, V: Clone> FromIterator<(K, V)> for OwnableMap<K, Vec<V>> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let mut m = Self::default();
+        m.extend(iter);
+        m
+    }
+}
+impl<K: Copy + Ord, V: Clone> Extend<(K, V)> for OwnableMap<K, Vec<V>> {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        for (k, v) in iter {
+            self.0.entry(k).or_default().push(v);
+        }
+    }
+}
+
 impl<K: Copy + Ord, V: Clone + ToOwned> ToOwned for OwnableMap<K, V>
 where
     V::Owned: Clone,
@@ -530,6 +545,18 @@ macro_rules! gen_endpoints {
     };
 }
 
+// -- Batches -- //
+
+#[derive(Debug, Constructor)]
+pub struct BatchClient<'a> {
+    client: &'a Client,
+}
+impl<'a> BatchClient<'a> {
+    pub fn repositories(&self) -> BatchRepositoriesClient<'a> {
+        BatchRepositoriesClient::new(self.client)
+    }
+}
+
 // -- Root -- //
 
 mkresponse!(RootResponse {});
@@ -605,6 +632,16 @@ impl<'a> RepositoryClient<'a> {
     });
 }
 
+#[derive(Debug, Constructor)]
+pub struct BatchRepositoriesClient<'a> {
+    client: &'a Client,
+}
+impl<'a> BatchRepositoriesClient<'a> {
+    pub fn merges(&self) -> BatchRepositoryMergeRequestsClient<'a> {
+        BatchRepositoryMergeRequestsClient::new(self.client)
+    }
+}
+
 // -- Repository Merge Requests -- //
 
 mkresponse!(RepositoryMergeRequestsResponse<'a> {
@@ -613,6 +650,21 @@ mkresponse!(RepositoryMergeRequestsResponse<'a> {
     #[serde(borrow)]
     pub repositories: OwnableMap<Uuid, models::Repository<'a>>,
 });
+impl<'a> RepositoryMergeRequestsResponse<'a> {
+    pub fn table_iter(
+        &'a self,
+    ) -> impl Iterator<
+        Item = (
+            &'a models::RepositoryMergeRequest<'a>,
+            Option<&'a models::Repository<'a>>,
+        ),
+    > {
+        self.merge_requests
+            .iter()
+            .map(|mr| (mr, self.repositories.get(&mr.repository_id)))
+    }
+}
+
 mkrequest!(
     RepositoryMergeRequestsResponse<'static>,
     RepositoryMergeRequestsListRequest {}
@@ -627,13 +679,6 @@ mkresponse!(RepositoryMergeRequestResponse<'a> {
 mkrequest!(
     RepositoryMergeRequestResponse<'static>,
     RepositoryMergeRequestGetRequest {}
-);
-mkrequest!(
-    RepositoryMergeRequestResponse<'static>,
-    RepositoryMergeRequestPutRequest<'a> {
-        #[serde(borrow)]
-        pub merge_request: models::PartialRepositoryMergeRequestSpec<'a>,
-    }
 );
 
 #[derive(Debug, Constructor)]
@@ -659,7 +704,58 @@ pub struct RepositoryMergeRequestClient<'a> {
 impl RepositoryMergeRequestClient<'_> {
     gen_endpoints!("repos/{repo_path}/merges/{merge_ident}", (repo_path, merge_ident), {
         fn get(RepositoryMergeRequestGetRequest) -> (GET, "");
-        fn put(RepositoryMergeRequestPutRequest<'_>) -> (PUT, "");
+    });
+}
+
+mkrequest!(
+    RepositoryMergeRequestsResponse<'static>,
+    BatchRepositoryMergeRequestsImportRequest<'a> {
+        /// { repository_id: [ ... ] }
+        #[serde(borrow)]
+        pub merge_requests: OwnableMap<Uuid, Vec<models::RepositoryMergeRequestSpec<'a>>>,
+    }
+);
+
+#[derive(Debug, Constructor)]
+pub struct BatchRepositoryMergeRequestsClient<'a> {
+    client: &'a Client,
+}
+impl<'a> BatchRepositoryMergeRequestsClient<'a> {
+    pub fn versions(&self) -> BatchRepositoryMergeRequestVersionsClient<'a> {
+        BatchRepositoryMergeRequestVersionsClient::new(self.client)
+    }
+    gen_endpoints!("batch/repos/merges", (), {
+        fn import(BatchRepositoryMergeRequestsImportRequest<'_>) -> (PUT, "");
+    });
+}
+
+// -- Repository Merge Request Versions -- //
+mkresponse!(RepositoryMergeRequestVersionsResponse<'a> {
+    #[serde(borrow)]
+    pub merge_request_versions: Vec<models::RepositoryMergeRequestVersion<'a>>,
+    #[serde(borrow)]
+    pub merge_requests: OwnableMap<Uuid, models::RepositoryMergeRequest<'a>>,
+    #[serde(borrow)]
+    pub repositories: OwnableMap<Uuid, models::Repository<'a>>,
+});
+
+mkrequest!(
+    RepositoryMergeRequestVersionsResponse<'static>,
+    BatchRepositoryMergeRequestVersionsImportRequest<'a> {
+        /// { merge_request_id: [ ... ] }
+        #[serde(borrow)]
+        pub merge_request_versions:
+            OwnableMap<Uuid, Vec<models::RepositoryMergeRequestVersionSpec<'a>>>,
+    }
+);
+
+#[derive(Debug, Constructor)]
+pub struct BatchRepositoryMergeRequestVersionsClient<'a> {
+    client: &'a Client,
+}
+impl BatchRepositoryMergeRequestVersionsClient<'_> {
+    gen_endpoints!("batch/repos/merges/versions", (), {
+        fn import(BatchRepositoryMergeRequestVersionsImportRequest<'_>) -> (PUT, "");
     });
 }
 

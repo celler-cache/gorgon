@@ -92,9 +92,10 @@ pub mod gorgond {
         gorgond.repository_merge_request_versions (id) {
             id -> Uuid,
             merge_request_id -> Uuid,
+            ident -> Text,
             source -> Text,
             commit_id -> Nullable<Uuid>,
-            obsolete_at -> Timestamptz,
+            current_at -> Timestamptz,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
