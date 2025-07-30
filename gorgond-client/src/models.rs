@@ -5,20 +5,21 @@
 use chrono::prelude::*;
 use minicbor::{Decode, Encode};
 use ownable::{IntoOwned, ToOwned};
+use partially::Partial;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
-use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+use strum::{AsRefStr, Display, EnumString, EnumTryAs, IntoStaticStr};
 use uuid::Uuid;
 use yoke::Yokeable;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned, Partial)]
+#[partially(derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned))]
 pub struct ProjectSpec<'a> {
     #[serde(borrow)]
     pub slug: Cow<'a, str>,
     #[serde(borrow)]
     pub name: Cow<'a, str>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Project<'a> {
     #[ownable(clone)]
@@ -33,13 +34,64 @@ pub struct Project<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct BuildTemplateSpec<'a> {
+    #[serde(borrow)]
+    pub kind: Cow<'a, str>,
+    #[serde(borrow)]
+    pub expr: Cow<'a, str>,
+    #[serde(borrow)]
+    pub inputs: BTreeMap<Cow<'a, str>, BuildTemplateInputSource<'a>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct BuildTemplate<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub project_id: Uuid,
+    #[serde(flatten, borrow)]
+    pub spec: BuildTemplateSpec<'a>,
+
+    #[ownable(clone)]
+    pub updated_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned, EnumTryAs)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildTemplateInputSource<'a> {
+    Url(Cow<'a, str>),
+    Repository(#[serde(borrow)] RepositorySpec<'a>),
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct BuildTemplateInputSpec<'a> {
+    #[serde(borrow)]
+    pub key: Cow<'a, str>,
+    #[serde(borrow)]
+    pub source: BuildTemplateInputSource<'a>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct BuildTemplateInput<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub template_id: Uuid,
+    #[serde(flatten, borrow)]
+    pub spec: BuildTemplateInputSpec<'a>,
+
+    #[ownable(clone)]
+    pub updated_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct WorkerSpec<'a> {
     #[serde(borrow)]
     pub slug: Cow<'a, str>,
     #[serde(borrow)]
     pub name: Cow<'a, str>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Worker<'a> {
     #[ownable(clone)]
@@ -75,7 +127,6 @@ pub struct BuildSpec<'a> {
     #[serde(borrow)]
     pub expr: Cow<'a, str>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Build<'a> {
     #[ownable(clone)]
@@ -282,8 +333,6 @@ pub struct RepositorySpec<'a> {
     pub kind: Cow<'a, str>,
     #[serde(borrow)]
     pub ident: Cow<'a, str>,
-    #[serde(borrow)]
-    pub storage: Cow<'a, str>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct Repository<'a> {
@@ -291,6 +340,8 @@ pub struct Repository<'a> {
     pub id: Uuid,
     #[serde(flatten, borrow)]
     pub spec: RepositorySpec<'a>,
+    #[serde(borrow)]
+    pub storage: Cow<'a, str>,
 
     #[ownable(clone)]
     pub created_at: DateTime<Utc>,

@@ -4,8 +4,9 @@
 
 DROP TABLE rollup_commits;
 DROP TABLE rollups;
-DROP TABLE project_input_commits;
-DROP TABLE project_inputs;
+DROP TABLE build_template_input_commits;
+DROP TABLE build_template_inputs;
+DROP TABLE build_templates;
 DROP TABLE repository_merge_request_versions;
 DROP TABLE repository_merge_requests;
 DROP TABLE commits;

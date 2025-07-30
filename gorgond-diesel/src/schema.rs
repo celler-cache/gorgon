@@ -17,6 +17,40 @@ pub mod gorgond {
     }
 
     diesel::table! {
+        gorgond.build_template_input_commits (input_id, commit_id) {
+            input_id -> Uuid,
+            commit_id -> Uuid,
+            result -> Bool,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.build_template_inputs (id) {
+            id -> Uuid,
+            template_id -> Uuid,
+            key -> Text,
+            source -> Text,
+            repository_id -> Nullable<Uuid>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.build_templates (id) {
+            id -> Uuid,
+            project_id -> Uuid,
+            slug -> Text,
+            kind -> Text,
+            expr -> Text,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
         use diesel::sql_types::*;
         use super::sql_types::BuildResult;
 
@@ -41,28 +75,6 @@ pub mod gorgond {
             id -> Uuid,
             repository_id -> Uuid,
             hash -> Bytea,
-            created_at -> Timestamptz,
-        }
-    }
-
-    diesel::table! {
-        gorgond.project_input_commits (input_id, commit_id) {
-            input_id -> Uuid,
-            commit_id -> Uuid,
-            result -> Bool,
-            updated_at -> Timestamptz,
-            created_at -> Timestamptz,
-        }
-    }
-
-    diesel::table! {
-        gorgond.project_inputs (id) {
-            id -> Uuid,
-            project_id -> Uuid,
-            key -> Text,
-            source -> Text,
-            repository_id -> Nullable<Uuid>,
-            updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
     }
@@ -145,28 +157,30 @@ pub mod gorgond {
     }
 
     diesel::joinable!(build_inputs -> builds (build_id));
+    diesel::joinable!(build_template_input_commits -> build_template_inputs (input_id));
+    diesel::joinable!(build_template_input_commits -> commits (commit_id));
+    diesel::joinable!(build_template_inputs -> build_templates (template_id));
+    diesel::joinable!(build_template_inputs -> repositories (repository_id));
+    diesel::joinable!(build_templates -> projects (project_id));
     diesel::joinable!(builds -> projects (project_id));
     diesel::joinable!(builds -> workers (worker_id));
     diesel::joinable!(commits -> repositories (repository_id));
-    diesel::joinable!(project_input_commits -> commits (commit_id));
-    diesel::joinable!(project_input_commits -> project_inputs (input_id));
-    diesel::joinable!(project_inputs -> projects (project_id));
-    diesel::joinable!(project_inputs -> repositories (repository_id));
     diesel::joinable!(repository_merge_request_versions -> commits (commit_id));
     diesel::joinable!(repository_merge_request_versions -> repository_merge_requests (merge_request_id));
     diesel::joinable!(repository_merge_requests -> repositories (repository_id));
     diesel::joinable!(rollup_commits -> commits (commit_id));
     diesel::joinable!(rollup_commits -> rollups (rollup_id));
     diesel::joinable!(rollups -> build_inputs (build_input_id));
+    diesel::joinable!(rollups -> build_template_inputs (input_id));
     diesel::joinable!(rollups -> commits (commit_id));
-    diesel::joinable!(rollups -> project_inputs (input_id));
 
     diesel::allow_tables_to_appear_in_same_query!(
         build_inputs,
+        build_template_input_commits,
+        build_template_inputs,
+        build_templates,
         builds,
         commits,
-        project_input_commits,
-        project_inputs,
         projects,
         repositories,
         repository_merge_request_versions,

@@ -63,7 +63,7 @@ fn init_runtime() -> tokio::runtime::Runtime {
         .thread_name_fn(|| {
             static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
             let id = THREAD_ID.fetch_add(1, Ordering::SeqCst);
-            format!("gorgond-tokio-{id}")
+            format!("gorgond-tokio-{id:02}")
         })
         .build()
         .expect("Couldn't build tokio runtime")

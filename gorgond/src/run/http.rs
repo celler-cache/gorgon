@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::BTreeSet, fmt::Debug};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+};
 
 use axum::{
     extract::{FromRequest, Path, State},
@@ -69,6 +72,11 @@ pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::
             "/projects/{project}/builds",
             get(project_builds).post(project_build_create),
         )
+        .route(
+            "/projects/{project}/build-templates/{template}",
+            put(build_template_put),
+        )
+        .route("/projects/{project}/build-templates", get(build_templates))
         .route("/builds", get(builds))
         .route("/builds/{build_id}", get(build))
         .route("/builds/{build_id}/events", get(build_events))
@@ -412,15 +420,15 @@ async fn project_create(
     State(state): State<S>,
     JsonRequest(req): JsonRequest<api::ProjectCreateRequest<'static>>,
 ) -> Result<JsonResponse<api::ProjectCreateResponse<'static>>> {
+    let spec = &req.get().project.to_owned();
     transaction!(state, async |conn: &mut _| {
         let now = Utc::now();
-        let project = models::Project::from_spec(req.get().project.to_owned(), Uuid::now_v7(), now);
-        let project = {
-            diesel::insert_into(schema::gorgond::projects::table)
-                .values(&project)
-                .get_result::<models::Project>(conn)
-                .await?
-        };
+        let project = diesel::insert_into(schema::gorgond::projects::table)
+            .values(&models::Project::from_spec(spec, Uuid::now_v7(), now))
+            .returning(models::Project::as_returning())
+            .get_result::<models::Project>(conn)
+            .await?;
+
         Ok(JsonResponse(api::ProjectCreateResponse {
             project: project.to_client(),
         }))
@@ -433,10 +441,152 @@ async fn project(
     Path(project): Path<String>,
 ) -> Result<JsonResponse<api::ProjectGetResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
+        let project = models::Project::get_ident(conn, &project).await?;
         Ok(JsonResponse(api::ProjectGetResponse {
-            project: models::Project::get_ident(conn, &project)
-                .await?
-                .to_client(),
+            project: project.to_client(),
+        }))
+    })
+    .await
+}
+
+async fn build_templates(
+    State(state): State<S>,
+    Path(project): Path<String>,
+) -> Result<JsonResponse<api::ProjectBuildTemplatesResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let project = models::Project::get_ident(conn, &project).await?;
+        let templates = models::BuildTemplate::belonging_to(&project)
+            .load::<models::BuildTemplate>(conn)
+            .await?;
+        let inputs = models::BuildTemplateInput::belonging_to(&templates)
+            .load::<models::BuildTemplateInput>(conn)
+            .await?;
+        let repos = models::Repository::all()
+            .filter(
+                schema::gorgond::repositories::id
+                    .eq_any(inputs.iter().filter_map(|i| i.repository_id)),
+            )
+            .load_stream::<models::Repository>(conn)
+            .await?
+            .map_ok(|r| (r.id, r))
+            .try_collect::<BTreeMap<Uuid, models::Repository>>()
+            .await?;
+        let inputs = inputs.grouped_by(&templates);
+        Ok(JsonResponse(api::ProjectBuildTemplatesResponse {
+            templates: (templates.into_iter().zip(inputs))
+                .map(|(t, is)| {
+                    t.to_client(
+                        is.into_iter()
+                            .map(|i| (i.repository_id.and_then(|id| repos.get(&id)), i))
+                            .map(|(r, i)| i.to_client(r)),
+                    )
+                })
+                .collect(),
+            project: project.to_client(),
+        }))
+    })
+    .await
+}
+async fn build_template_put(
+    State(state): State<S>,
+    Path((project, template)): Path<(String, String)>,
+    JsonRequest(req): JsonRequest<api::BuildTemplateSetRequest<'static>>,
+) -> Result<JsonResponse<api::BuildTemplateResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let now = Utc::now();
+        let spec = req.get().template.to_owned();
+        let project = models::Project::get_ident(conn, &project).await?;
+        let template = diesel::insert_into(schema::gorgond::build_templates::table)
+            .values(&models::BuildTemplate::from_spec(
+                &spec,
+                template,
+                Uuid::now_v7(),
+                project.id,
+                now,
+            ))
+            .on_conflict((
+                schema::gorgond::build_templates::project_id,
+                schema::gorgond::build_templates::slug,
+            ))
+            .do_update()
+            .set(excluded!(
+                schema::gorgond::build_templates::kind,
+                schema::gorgond::build_templates::expr,
+            ))
+            .returning(models::BuildTemplate::as_returning())
+            .get_result::<models::BuildTemplate>(conn)
+            .await?;
+        let repos = (spec.inputs.iter())
+            .filter_map(|(_, i)| i.try_as_repository_ref().map(|r| r.to_owned()))
+            .map(|r| models::Repository::from_spec(r.to_owned(), Uuid::now_v7(), now))
+            .collect::<Vec<_>>();
+        let repos = diesel::insert_into(schema::gorgond::repositories::table)
+            .values(repos)
+            .on_conflict((
+                schema::gorgond::repositories::kind,
+                schema::gorgond::repositories::ident,
+            ))
+            // TODO: Pointless write to force RETURNING.
+            .do_update()
+            .set(
+                schema::gorgond::repositories::updated_at.eq(diesel::upsert::excluded(
+                    schema::gorgond::repositories::updated_at,
+                )),
+            )
+            .returning(models::Repository::as_returning())
+            .load_stream::<models::Repository>(conn)
+            .await?
+            .map_ok(|r| (r.id, r))
+            .try_collect::<BTreeMap<Uuid, models::Repository>>()
+            .await?;
+        let inputs = diesel::insert_into(schema::gorgond::build_template_inputs::table)
+            .values(
+                &(spec.inputs.into_iter())
+                    .map(|(k, i)| {
+                        let rid = i.try_as_repository_ref().and_then(|rs| {
+                            repos
+                                .values()
+                                .find(|r| r.kind == rs.kind && r.ident == rs.ident)
+                                .map(|r| r.id)
+                        });
+                        models::BuildTemplateInput::from_spec(
+                            &client::BuildTemplateInputSpec {
+                                key: k,
+                                source: i.clone().into_owned(),
+                            },
+                            Uuid::now_v7(),
+                            template.id,
+                            rid,
+                            now,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .on_conflict((
+                schema::gorgond::build_template_inputs::template_id,
+                schema::gorgond::build_template_inputs::key,
+            ))
+            .do_update()
+            .set(excluded!(
+                schema::gorgond::build_template_inputs::source,
+                schema::gorgond::build_template_inputs::repository_id,
+                schema::gorgond::build_template_inputs::updated_at,
+            ))
+            .returning(models::BuildTemplateInput::as_returning())
+            .load::<models::BuildTemplateInput>(conn)
+            .await?;
+        diesel::delete(schema::gorgond::build_template_inputs::table)
+            .filter(schema::gorgond::build_template_inputs::id.ne_all(inputs.iter().map(|i| i.id)))
+            .execute(conn)
+            .await?;
+        Ok(JsonResponse(api::BuildTemplateResponse {
+            template: template.to_client(
+                inputs
+                    .into_iter()
+                    .map(|i| (i.repository_id.and_then(|id| repos.get(&id)), i))
+                    .map(|(r, i)| i.to_client(r)),
+            ),
+            project: project.to_client(),
         }))
     })
     .await
@@ -640,8 +790,7 @@ async fn worker_internal_allocate_build(
             worker_id
         };
 
-        // If worker has an unfinished task, remind it to get back on it.
-        // This is also our idempotency mechanism for this endpoint.
+        // Try to find or create a build for the worker to do.
         let build = if let Some(build) = models::Build::all()
             .filter(builds::result.is_null())
             .filter(builds::worker_id.eq(worker_id))
@@ -651,24 +800,17 @@ async fn worker_internal_allocate_build(
         {
             info!("Worker has an unfinished build, reminding it");
             build
-        } else {
-            // If not, try to find an unallocated task...
-            let build_id = if let Some(build_id) = builds::table
-                .filter(builds::worker_id.is_null())
-                .select(builds::id)
-                .limit(1)
-                .order_by(builds::created_at.asc())
-                .for_no_key_update() // No race conditions pls.
-                .get_result::<Uuid>(conn)
-                .await
-                .optional()?
-            {
-                info!("Found an unallocated build, allocating it");
-                build_id
-            } else {
-                warn!("No work available!");
-                return Err(ApiError::NoWorkAvailable.into());
-            };
+        } else if let Some(build_id) = builds::table
+            .filter(builds::worker_id.is_null())
+            .select(builds::id)
+            .limit(1)
+            .order_by(builds::created_at.asc())
+            .for_no_key_update() // No race conditions pls.
+            .get_result::<Uuid>(conn)
+            .await
+            .optional()?
+        {
+            info!("Found an unallocated build, allocating it");
 
             // ...and allocate it to this worker.
             debug!("Allocating build...");
@@ -678,6 +820,9 @@ async fn worker_internal_allocate_build(
                 .returning(models::Build::as_returning())
                 .get_result(conn)
                 .await?
+        } else {
+            warn!("No work available!");
+            return Err(ApiError::NoWorkAvailable.into());
         };
 
         let inputs = build_inputs::table

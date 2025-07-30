@@ -108,11 +108,11 @@ impl Project {
     gen_model!(projects, Project);
     gen_model_with_ident_slug!(projects);
 
-    pub fn from_spec(v: client::ProjectSpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
+    pub fn from_spec(v: &client::ProjectSpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
         Self {
             id,
-            slug: v.slug.into(),
-            name: v.name.into(),
+            slug: v.slug.to_string(),
+            name: v.name.to_string(),
             created_at: now,
             updated_at: now,
         }
@@ -141,21 +141,57 @@ impl Project {
     Identifiable,
     Associations,
 )]
-#[diesel(table_name = crate::schema::gorgond::project_inputs, check_for_backend(diesel::pg::Pg))]
+#[diesel(table_name = crate::schema::gorgond::build_templates, check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Project))]
-pub struct ProjectInput {
+pub struct BuildTemplate {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub key: String,
-
-    pub source: String,
-    pub repository_id: Option<Uuid>,
+    pub slug: String,
+    pub kind: String,
+    pub expr: String,
 
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
-impl ProjectInput {
-    gen_model!(project_inputs, ProjectInput);
+impl BuildTemplate {
+    gen_model!(build_templates, BuildTemplate);
+
+    pub fn from_spec(
+        spec: &client::BuildTemplateSpec<'_>,
+        slug: String,
+        id: Uuid,
+        project_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            project_id,
+            slug,
+            kind: spec.kind.to_owned().into(),
+            expr: spec.expr.to_owned().into(),
+            updated_at: now,
+            created_at: now,
+        }
+    }
+    pub fn to_client(
+        self,
+        inputs: impl IntoIterator<Item = client::BuildTemplateInput<'static>>,
+    ) -> client::BuildTemplate<'static> {
+        client::BuildTemplate {
+            id: self.id,
+            project_id: self.project_id,
+            spec: client::BuildTemplateSpec {
+                kind: self.kind.into(),
+                expr: self.expr.into(),
+                inputs: inputs
+                    .into_iter()
+                    .map(|i| (i.spec.key, i.spec.source))
+                    .collect(),
+            },
+            updated_at: self.updated_at,
+            created_at: self.created_at,
+        }
+    }
 }
 
 #[derive(
@@ -169,11 +205,79 @@ impl ProjectInput {
     Identifiable,
     Associations,
 )]
-#[diesel(table_name = crate::schema::gorgond::project_input_commits)]
+#[diesel(table_name = crate::schema::gorgond::build_template_inputs, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(BuildTemplate, foreign_key = template_id))]
+pub struct BuildTemplateInput {
+    pub id: Uuid,
+    pub template_id: Uuid,
+    pub key: String,
+
+    pub source: String,
+    pub repository_id: Option<Uuid>,
+
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl BuildTemplateInput {
+    gen_model!(build_template_inputs, BuildTemplateInput);
+
+    pub fn from_spec(
+        spec: &client::BuildTemplateInputSpec<'static>,
+        id: Uuid,
+        template_id: Uuid,
+        repository_id: Option<Uuid>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            template_id,
+            key: spec.key.to_string(),
+            source: match &spec.source {
+                client::BuildTemplateInputSource::Url(u) => u.to_string(),
+                _ => String::new(),
+            },
+            repository_id,
+            updated_at: now,
+            created_at: now,
+        }
+    }
+    pub fn to_client(self, repository: Option<&Repository>) -> client::BuildTemplateInput<'static> {
+        client::BuildTemplateInput {
+            id: self.id,
+            template_id: self.template_id,
+            spec: client::BuildTemplateInputSpec {
+                key: self.key.into(),
+                source: if let Some(repo) = repository {
+                    client::BuildTemplateInputSource::Repository(client::RepositorySpec {
+                        kind: repo.kind.clone().into(),
+                        ident: repo.ident.clone().into(),
+                    })
+                } else {
+                    client::BuildTemplateInputSource::Url(self.source.into())
+                },
+            },
+            updated_at: self.updated_at,
+            created_at: self.created_at,
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::build_template_input_commits)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 #[diesel(primary_key(input_id, commit_id))]
-#[diesel(belongs_to(ProjectInput, foreign_key = input_id))]
-pub struct ProjectInputCommit {
+#[diesel(belongs_to(BuildTemplateInput, foreign_key = input_id))]
+pub struct BuildTemplateInputCommit {
     pub input_id: Uuid,
     pub commit_id: Uuid,
     pub result: bool,
@@ -401,7 +505,7 @@ impl Repository {
             id,
             kind: v.kind.into(),
             ident: v.ident.into(),
-            storage: v.storage.into(),
+            storage: String::new(),
             created_at: now,
             updated_at: now,
         }
@@ -412,8 +516,8 @@ impl Repository {
             spec: client::RepositorySpec {
                 kind: self.kind.into(),
                 ident: self.ident.into(),
-                storage: self.storage.into(),
             },
+            storage: self.storage.into(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

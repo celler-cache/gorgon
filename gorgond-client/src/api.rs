@@ -30,8 +30,9 @@ fn percent_encode(s: &str) -> percent_encoding::PercentEncode {
 #[derive(Debug, EnumDisplay, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Model {
     Project,
-    ProjectInput,
     Worker,
+    BuildTemplate,
+    BuildTemplateInput,
     Build,
     BuildInput,
     BuildTask,
@@ -768,6 +769,11 @@ mkmodelrequest_pair_old!(
     ProjectCreateResponse<Project>
 );
 
+mkrequest!(ProjectBuildsResponse<'static>, ProjectBuildUpsertRequest<'a>{
+    #[serde(borrow)]
+    pub project: models::ProjectSpec<'a>,
+});
+
 #[derive(Debug, Constructor)]
 pub struct ProjectsClient<'a> {
     client: &'a Client,
@@ -787,8 +793,11 @@ pub struct ProjectClient<'a> {
     project_slug: &'a str,
 }
 impl<'a> ProjectClient<'a> {
-    pub fn builds(&self) -> ProjectsBuildsClient<'a> {
-        ProjectsBuildsClient::new(self.client, self.project_slug)
+    pub fn builds(&self) -> ProjectBuildsClient<'a> {
+        ProjectBuildsClient::new(self.client, self.project_slug)
+    }
+    pub fn build_templates(&self) -> ProjectBuildTemplatesClient<'a> {
+        ProjectBuildTemplatesClient::new(self.client, self.project_slug)
     }
     gen_endpoints!("projects/{project_slug}", (project_slug), {
         fn get(ProjectGetRequest) -> (GET, "");
@@ -810,14 +819,66 @@ mkresponse!(ProjectBuildsResponse<'a> {
 });
 
 #[derive(Debug, Constructor)]
-pub struct ProjectsBuildsClient<'a> {
+pub struct ProjectBuildsClient<'a> {
     client: &'a Client,
     project_slug: &'a str,
 }
-impl ProjectsBuildsClient<'_> {
+impl ProjectBuildsClient<'_> {
     gen_endpoints!("projects/{project_slug}/builds", (project_slug), {
         fn list(ProjectBuildsRequest) -> (GET, "");
         fn create(ProjectBuildCreateRequest<'_>) -> (POST, "");
+    });
+}
+
+// -- Build Template -- //
+
+mkrequest!(BuildTemplateResponse<'static>, BuildTemplateSetRequest<'a> {
+    #[serde(borrow)]
+    pub template: models::BuildTemplateSpec<'a>,
+});
+mkresponse!(BuildTemplateResponse<'a> {
+    #[serde(borrow)]
+    pub template: models::BuildTemplate<'a>,
+    #[serde(borrow)]
+    pub project: models::Project<'a>,
+});
+
+mkrequest!(
+    ProjectBuildTemplatesResponse<'static>,
+    BuildTemplatesListRequest {}
+);
+mkresponse!(ProjectBuildTemplatesResponse<'a> {
+    #[serde(borrow)]
+    pub templates: Vec<models::BuildTemplate<'a>>,
+    #[serde(borrow)]
+    pub project: models::Project<'a>,
+});
+
+#[derive(Debug, Constructor)]
+pub struct ProjectBuildTemplatesClient<'a> {
+    client: &'a Client,
+    project_slug: &'a str,
+}
+impl<'a> ProjectBuildTemplatesClient<'a> {
+    pub fn slug(&self, template_slug: &'a str) -> ProjectBuildTemplateClient<'a> {
+        ProjectBuildTemplateClient::new(self.client, self.project_slug, template_slug)
+    }
+    gen_endpoints!("projects/{project_slug}/build-templates", (project_slug), {
+        fn list(BuildTemplatesListRequest) -> (GET, "");
+    });
+}
+
+#[derive(Debug, Constructor)]
+pub struct ProjectBuildTemplateClient<'a> {
+    client: &'a Client,
+    project_slug: &'a str,
+    template_slug: &'a str,
+}
+impl ProjectBuildTemplateClient<'_> {
+    gen_endpoints!(
+        "projects/{project_slug}/build-templates/{template_slug}",
+        (project_slug, template_slug), {
+        fn set(BuildTemplateSetRequest<'_>) -> (PUT, "");
     });
 }
 

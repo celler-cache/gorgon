@@ -81,7 +81,7 @@ enum Command {
     /// Manage Projects.
     Project {
         #[command(subcommand)]
-        cmd: ProjectCommand,
+        cmd: ProjectsCommand,
     },
     /// Manage Builds.
     Build {
@@ -113,17 +113,16 @@ impl Ping {
 // -- Repositories -- //
 
 #[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Repository")]
 struct RepositoryArgs {
     pub kind: String,
     pub ident: String,
-    pub storage: String,
 }
 impl From<RepositoryArgs> for models::RepositorySpec<'static> {
     fn from(args: RepositoryArgs) -> Self {
         Self {
             kind: args.kind.into(),
             ident: args.ident.into(),
-            storage: args.storage.into(),
         }
     }
 }
@@ -280,49 +279,184 @@ impl RepositoryMergeRequestCommand {
 
 // -- Projects -- //
 
+#[derive(Debug, Clone, Parser)]
+struct ProjectArgs {
+    pub slug: Cow<'static, str>,
+    pub name: Cow<'static, str>,
+}
+
 #[derive(Debug, Clone, Subcommand)]
-enum ProjectCommand {
-    /// Create a new project.
+enum ProjectsCommand {
+    /// Create a project.
     Create {
         #[command(flatten)]
         project: ProjectArgs,
     },
-    /// Get a new project.
-    Get { slug: String },
-    /// Manage builds for this projects.
-    Builds {
+    /// Manage a project by slug.
+    Slug {
         slug: String,
         #[command(subcommand)]
-        cmd: ProjectBuildCommand,
+        cmd: ProjectCommand,
     },
 }
-#[derive(Debug, Clone, Parser)]
-struct ProjectArgs {
-    pub slug: String,
-    pub name: String,
-}
-impl ProjectCommand {
+impl ProjectsCommand {
     pub async fn run(self, args: &Args, projects: api::ProjectsClient<'_>) -> Result<()> {
         match self {
             Self::Create { project } => args.out.dump(
                 projects
                     .create(api::ProjectCreateRequest {
                         project: models::ProjectSpec {
-                            slug: project.slug.as_str().into(),
-                            name: project.name.as_str().into(),
+                            slug: project.slug,
+                            name: project.name,
                         },
                     })
                     .await?
                     .get(),
             ),
-            Self::Get { slug } => args.out.dump(
-                projects
-                    .slug(&slug)
-                    .get(api::ProjectGetRequest {})
+            Self::Slug { slug, cmd } => cmd.run(args, projects.slug(&slug)).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectCommand {
+    /// Get this project.
+    Get,
+    /// Manage builds.
+    Build {
+        #[command(subcommand)]
+        cmd: ProjectBuildCommand,
+    },
+    /// Manage build templates.
+    BuildTemplate {
+        #[command(subcommand)]
+        cmd: ProjectBuildTemplatesCommand,
+    },
+}
+impl ProjectCommand {
+    pub async fn run(self, args: &Args, project: api::ProjectClient<'_>) -> Result<()> {
+        match self {
+            Self::Get => args
+                .out
+                .dump(project.get(api::ProjectGetRequest {}).await?.get()),
+            Self::Build { cmd } => cmd.run(args, project.builds()).await,
+            Self::BuildTemplate { cmd } => cmd.run(args, project.build_templates()).await,
+        }
+    }
+}
+
+// -- Build Templates -- //
+
+#[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Build Template")]
+struct BuildTemplateArgs {
+    /// Builder used for the resulting builds, eg. "nix".
+    #[arg(long, short, required = true)]
+    pub kind: Option<Cow<'static, str>>,
+
+    /// Builder expression.
+    #[arg(long, short, required = true)]
+    pub expr: Option<Cow<'static, str>>,
+
+    /// Specify a tracked repository input:
+    ///
+    /// nixpkgs=github:NixOS/nixpkgs
+    #[arg(
+        short = 'r', long,
+        value_parser = parse_key_value
+    )]
+    pub input_repo: Vec<(Cow<'static, str>, Cow<'static, str>)>,
+    // Specify a static input:
+    //
+    // nixpkgs=git+https://github.com/NixOS/nixpkgs?rev=cf05413ba4d3a4a26c08aca1fbf30ca9d7f94b29
+    //
+    // FIXME: Why does this get stuck as required!?
+    //
+    // #[arg(
+    //     short = 'u', long, required = false,
+    //     default_values = Vec::<&std::ffi::OsStr>::with_capacity(0),
+    //     value_parser = parse_key_value
+    // )]
+    // pub input_url: BTreeMap<Cow<'static, str>, Cow<'static, str>>,
+}
+impl TryFrom<BuildTemplateArgs> for models::BuildTemplateSpec<'static> {
+    type Error = miette::Report;
+    fn try_from(args: BuildTemplateArgs) -> Result<Self> {
+        // let input_url = (args.input_url.into_iter())
+        //     .map(|(k, u)| (k, models::BuildTemplateInputSource::Url(u)));
+        let input_repo = (args.input_repo.into_iter()).map(|(k, spec)| {
+            spec.split_once(":")
+                .ok_or(miette!("Repo spec not in 'kind:ident' format: {spec}"))
+                .map(|(kind, ident)| {
+                    (
+                        k,
+                        models::BuildTemplateInputSource::Repository(models::RepositorySpec {
+                            kind: kind.to_string().into(),
+                            ident: ident.to_string().into(),
+                        }),
+                    )
+                })
+        });
+        Ok(models::BuildTemplateSpec {
+            kind: args.kind.unwrap_or_default(),
+            expr: args.expr.unwrap_or_default(),
+            inputs: input_repo.collect::<Result<_>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectBuildTemplatesCommand {
+    /// List build templates.
+    List,
+    /// Manage a build template by slug.
+    Slug {
+        slug: String,
+        #[command(subcommand)]
+        cmd: ProjectBuildTemplateCommand,
+    },
+}
+impl ProjectBuildTemplatesCommand {
+    pub async fn run(
+        self,
+        args: &Args,
+        templates: api::ProjectBuildTemplatesClient<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::List => args.out.dump(
+                templates
+                    .list(api::BuildTemplatesListRequest {})
                     .await?
                     .get(),
             ),
-            Self::Builds { slug, cmd } => cmd.run(args, projects.slug(&slug).builds()).await,
+            Self::Slug { slug, cmd } => cmd.run(args, templates.slug(&slug)).await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ProjectBuildTemplateCommand {
+    /// Create or update a build template.
+    Set {
+        #[command(flatten)]
+        t: BuildTemplateArgs,
+    },
+}
+impl ProjectBuildTemplateCommand {
+    pub async fn run(
+        self,
+        args: &Args,
+        template: api::ProjectBuildTemplateClient<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::Set { t } => args.out.dump(
+                template
+                    .set(api::BuildTemplateSetRequest {
+                        template: t.try_into()?,
+                    })
+                    .await?
+                    .get(),
+            ),
         }
     }
 }
@@ -330,6 +464,7 @@ impl ProjectCommand {
 // -- Builds -- //
 
 #[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Build")]
 struct BuildArgs {
     #[arg(short, long)]
     pub kind: Cow<'static, str>,
@@ -359,7 +494,7 @@ enum ProjectBuildCommand {
     },
 }
 impl ProjectBuildCommand {
-    pub async fn run(self, args: &Args, builds: api::ProjectsBuildsClient<'_>) -> Result<()> {
+    pub async fn run(self, args: &Args, builds: api::ProjectBuildsClient<'_>) -> Result<()> {
         match self {
             Self::List => args.out.with(
                 |r| output::build_table(r.builds.iter().map(|b| (b, Some(&r.project), None))),

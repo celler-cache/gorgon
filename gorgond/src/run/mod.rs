@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, future::Future, num::NonZero};
 
 use clap::Parser;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
@@ -24,6 +24,14 @@ pub struct EventsArgs {
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
+    /// Number of worker threads to use.
+    #[arg(
+        long,
+        short,
+        default_value_t = std::thread::available_parallelism().unwrap(),
+    )]
+    worker_threads: NonZero<usize>,
+
     #[command(flatten)]
     db: gorgond_diesel::Args,
     #[command(flatten)]
@@ -83,9 +91,11 @@ impl Tasks {
 struct TaskErrors(#[related] Vec<miette::Report>);
 
 pub async fn run(args: Args) -> Result<()> {
+    // Connect to database, run migrations.
     const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
     let pool = args.db.init(MIGRATIONS, "gorgond").await?;
 
+    // Spawn tasks.
     let token = CancellationToken::new();
     let mut tasks = Tasks::default();
     tasks.spawn_named("Ctrl+C", wait_for_ctrlc(token.clone()));

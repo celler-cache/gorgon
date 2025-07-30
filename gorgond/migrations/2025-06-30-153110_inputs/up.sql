@@ -8,11 +8,12 @@ CREATE TABLE repositories (
     ident       TEXT NOT NULL    CHECK (kind <> ''),
     UNIQUE (kind, ident),
 
-    storage     TEXT NOT NULL    CHECK (storage <> '') UNIQUE,
+    storage     TEXT NOT NULL,
 
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE UNIQUE INDEX repositories_storage_unique ON repositories (storage) WHERE storage <> '';
 
 SELECT diesel_manage_updated_at('repositories');
 
@@ -85,11 +86,27 @@ COMMENT ON COLUMN repository_merge_request_versions.commit_id IS
 
 ---
 
-CREATE TABLE project_inputs (
+CREATE TABLE build_templates (
+    id              UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    project_id      UUID NOT NULL REFERENCES projects (id),
+    slug            TEXT NOT NULL CHECK (slug <> ''),
+    UNIQUE (project_id, slug),
+    kind            TEXT NOT NULL CHECK (kind <> ''),
+    expr            TEXT NOT NULL CHECK (expr <> ''),
+
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+SELECT diesel_manage_updated_at('build_templates');
+
+---
+
+CREATE TABLE build_template_inputs (
     id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    project_id     UUID NOT NULL    REFERENCES projects (id),
+    template_id    UUID NOT NULL    REFERENCES build_templates (id),
     key            TEXT NOT NULL    CHECK (key <> ''),
-    UNIQUE (project_id, key),
+    UNIQUE (template_id, key),
 
     -- Either "source" or "repository_id" must be set.
     source         TEXT NOT NULL,
@@ -100,15 +117,15 @@ CREATE TABLE project_inputs (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-SELECT diesel_manage_updated_at('project_inputs');
+SELECT diesel_manage_updated_at('build_template_inputs');
 
-COMMENT ON COLUMN project_inputs.key IS 'Value of "build_inputs.key".';
+COMMENT ON COLUMN build_template_inputs.key IS 'Value of "build_inputs.key".';
 
 ---
 
-CREATE TABLE project_input_commits (
-    input_id    UUID NOT NULL REFERENCES project_inputs (id) ON DELETE CASCADE,
-    commit_id   UUID NOT NULL REFERENCES commits (id)        ON DELETE CASCADE,
+CREATE TABLE build_template_input_commits (
+    input_id    UUID NOT NULL REFERENCES build_template_inputs (id) ON DELETE CASCADE,
+    commit_id   UUID NOT NULL REFERENCES commits (id)               ON DELETE CASCADE,
     PRIMARY KEY (input_id, commit_id),
 
     -- NOT NULL, unknown is represented by a matching row not being present at all.
@@ -118,16 +135,16 @@ CREATE TABLE project_input_commits (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-SELECT diesel_manage_updated_at('project_input_commits');
+SELECT diesel_manage_updated_at('build_template_input_commits');
 
 ---
 
 CREATE TABLE rollups (
     id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    parent_id      UUID          REFERENCES rollups (id)        ON DELETE CASCADE,
-    input_id       UUID NOT NULL REFERENCES project_inputs (id) ON DELETE CASCADE,
-    commit_id      UUID NOT NULL REFERENCES commits (id)        ON DELETE CASCADE,
-    build_input_id UUID          REFERENCES build_inputs (id)   ON DELETE CASCADE,
+    parent_id      UUID          REFERENCES rollups (id)               ON DELETE CASCADE,
+    input_id       UUID NOT NULL REFERENCES build_template_inputs (id) ON DELETE CASCADE,
+    commit_id      UUID NOT NULL REFERENCES commits (id)               ON DELETE CASCADE,
+    build_input_id UUID          REFERENCES build_inputs (id)          ON DELETE CASCADE,
 
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
