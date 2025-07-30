@@ -189,7 +189,7 @@ impl Args {
         let prs = rt
             .block_on({
                 let q = schema::pull_requests::table
-                    .inner_join(schema::repos::table)
+                    .left_join(schema::repos::table)
                     // We only care about PRs to repos that gorgond wants to track.
                     .filter(schema::repos::repository_id.is_not_null())
                     .filter(
