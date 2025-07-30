@@ -293,7 +293,7 @@ impl Args {
                 },
             ),
         )?;
-        let version_rsp = rt.block_on(
+        let _version_rsp = rt.block_on(
             client.batch().repositories().merges().versions().import(
                 api::BatchRepositoryMergeRequestVersionsImportRequest {
                     merge_request_versions: (pr_it.clone())
