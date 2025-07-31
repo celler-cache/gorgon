@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::BTreeMap, fmt::Display};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
 
 use chrono::prelude::*;
 use derive_more::{Constructor, Deref, DerefMut, Display};
@@ -574,6 +574,10 @@ mkrequest!(RepositoryResponse<'static>, RepositoryCreateRequest<'a> {
     #[serde(borrow)]
     pub repository: models::RepositorySpec<'a>,
 });
+mkrequest!(RepositoryResponse<'static>, RepositorySetStorageRequest<'a> {
+    #[serde(borrow)]
+    pub storage: Cow<'a, str>,
+});
 
 mkresponse!(RepositoriesResponse<'a> {
     #[serde(borrow)]
@@ -630,6 +634,7 @@ impl<'a> RepositoryClient<'a> {
     }
     gen_endpoints!("repos/{repo_path}", (repo_path), {
         fn get(RepositoryGetRequest) -> (GET, "");
+        fn set_storage(RepositorySetStorageRequest<'_>) -> (PUT, "storage");
     });
 }
 

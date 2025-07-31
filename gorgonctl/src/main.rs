@@ -198,7 +198,9 @@ impl RepositoriesKindCommand {
 enum RepositoryCommand {
     /// Get this repository.
     Get,
-    /// Manage Merge Requests for this Repository.
+    /// Set the storage URL.
+    SetStorage { storage: String },
+    /// Manage Merge Requests.
     Merges {
         #[command(subcommand)]
         command: RepositoryMergeRequestsCommand,
@@ -210,6 +212,14 @@ impl RepositoryCommand {
             Self::Get => args.out.with(
                 |r| output::repo_table([&r.repository]),
                 repo.get(api::RepositoryGetRequest {}).await?.get(),
+            ),
+            Self::SetStorage { storage } => args.out.with(
+                |r| output::repo_table([&r.repository]),
+                repo.set_storage(api::RepositorySetStorageRequest {
+                    storage: storage.into(),
+                })
+                .await?
+                .get(),
             ),
             Self::Merges { command } => command.run(args, repo.merges()).await,
         }

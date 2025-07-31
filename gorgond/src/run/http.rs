@@ -60,6 +60,7 @@ pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::
         .route("/repos", get(repos).post(repo_create))
         .route("/repos/{kind}", get(repos_by_kind))
         .route("/repos/{kind}/{ident}", get(repo))
+        .route("/repos/{kind}/{ident}/storage", put(repo_set_storage))
         .route("/repos/{kind}/{ident}/merges", get(repo_merges))
         .route("/batch/repos/merges", put(batch_repo_merges_import))
         .route(
@@ -231,6 +232,25 @@ async fn repo(
             repository: models::Repository::get_ident(conn, &repo_kind, &repo_ident)
                 .await?
                 .to_client(),
+        }))
+    })
+    .await
+}
+
+async fn repo_set_storage(
+    State(state): State<S>,
+    Path((repo_kind, repo_ident)): Path<(String, String)>,
+    JsonRequest(req): JsonRequest<api::RepositorySetStorageRequest<'static>>,
+) -> Result<JsonResponse<api::RepositoryResponse<'static>>> {
+    transaction!(state, async |conn: &mut _| {
+        let repo = diesel::update(schema::gorgond::repositories::table)
+            .filter(models::Repository::filter_ident(&repo_kind, &repo_ident))
+            .set(schema::gorgond::repositories::storage.eq(&req.get().storage))
+            .returning(models::Repository::as_select())
+            .get_result::<models::Repository>(conn)
+            .await?;
+        Ok(JsonResponse(api::RepositoryResponse {
+            repository: repo.to_client(),
         }))
     })
     .await
