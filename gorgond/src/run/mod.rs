@@ -10,7 +10,7 @@ use gorgond_client::Url;
 use miette::{Context, IntoDiagnostic, Result};
 use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, enabled, info, instrument, Level};
+use tracing::{debug, enabled, field::Empty, info, instrument, Level};
 
 pub mod http;
 
@@ -40,7 +40,7 @@ pub struct Args {
     http: http::HttpArgs,
 }
 
-#[instrument(name = "ctrl_c", skip_all)]
+#[instrument(name = "ctrl_c", skip_all, fields(indicatif.pb_hide = Empty))]
 async fn wait_for_ctrlc(token: CancellationToken) -> Result<()> {
     debug!("Waiting for Ctrl+C...");
     token
@@ -95,6 +95,14 @@ pub async fn run(args: Args) -> Result<()> {
     const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
     let pool = args.db.init(MIGRATIONS, "gorgond").await?;
 
+    // Set up the Rayon thread pool.
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.worker_threads.into())
+        .thread_name(|idx| format!("gorgond-rayon{}", idx + 1))
+        .build_global()
+        .into_diagnostic()
+        .context("Couldn't create thread pool")?;
+
     // Spawn tasks.
     let token = CancellationToken::new();
     let mut tasks = Tasks::default();
@@ -102,9 +110,9 @@ pub async fn run(args: Args) -> Result<()> {
     tasks.spawn_named(
         "HTTP Server",
         http::run(
-            token.child_token(),
             args.http,
             http::S {
+                token: token.child_token(),
                 pool: pool.clone(),
                 events_base: args.events.event_base_url,
             },

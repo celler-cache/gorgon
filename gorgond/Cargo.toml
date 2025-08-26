@@ -12,6 +12,7 @@ license = "EUPL-1.2"
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgond-client = { path = "../gorgond-client", features = ["axum", "diesel"] }
 gorgond-diesel = { path = "../gorgond-diesel" }
+gorgon-util = { path = "../gorgon-util", features = ["source_url"] }
 
 axum-extra = { workspace = true, features = ["erased-json"] }
 axum = { workspace = true, features = ["macros", "http1", "tokio"] }
@@ -43,3 +44,9 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 yoke = { workspace = true, features = ["derive"] }
+rayon = "1.10.0"
+tokio-rayon = "2.1.0"
+git2 = "0.20.2"
+tempfile.workspace = true
+tracing-indicatif = "0.3.12"
+directories = "6.0.0"

@@ -65,7 +65,8 @@ CREATE TABLE pull_requests (
     id                BIGINT PRIMARY KEY,
     repo_id           BIGINT NOT NULL REFERENCES repos (id) ON DELETE CASCADE,
     number            INT    NOT NULL,
-    ref_id            UUID   NOT NULL REFERENCES refs (id) ON DELETE CASCADE,
+    head_ref_id       UUID   NOT NULL REFERENCES refs (id) ON DELETE CASCADE,
+    base_ref_id       UUID   NOT NULL REFERENCES refs (id) ON DELETE CASCADE,
     merge_request_id  UUID       NULL REFERENCES gorgond.repository_merge_requests ON DELETE SET NULL,
 
     title             TEXT   NOT NULL DEFAULT '',

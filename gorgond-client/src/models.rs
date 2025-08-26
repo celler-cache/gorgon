@@ -354,6 +354,8 @@ pub struct RepositoryMergeRequestSpec<'a> {
     #[serde(borrow)]
     pub ident: Cow<'a, str>,
     #[serde(borrow)]
+    pub base: Cow<'a, str>,
+    #[serde(borrow)]
     pub title: Cow<'a, str>,
     #[serde(borrow)]
     pub description: Cow<'a, str>,

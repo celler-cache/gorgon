@@ -1121,6 +1121,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1443,9 +1464,9 @@ checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
 
 [[package]]
 name = "git2"
-version = "0.20.1"
+version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5220b8ba44c68a9a7f7a7659e864dd73692e417ef0211bea133c7b74e031eeb9"
+checksum = "2deb07a133b1520dc1a5690e9bd08950108873d7ed5de38dcc74d3b5ebffa110"
 dependencies = [
  "bitflags 2.9.1",
  "libc",
@@ -1574,6 +1595,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gorgon-util"
+version = "0.1.0"
+dependencies = [
+ "miette",
+ "thiserror 2.0.11",
+ "url",
+]
+
+[[package]]
 name = "gorgon-util-cli"
 version = "0.1.0"
 dependencies = [
@@ -1638,8 +1668,11 @@ dependencies = [
  "diesel",
  "diesel-async",
  "diesel_migrations",
+ "directories",
  "futures",
+ "git2",
  "gorgon-build-helper",
+ "gorgon-util",
  "gorgond-client",
  "gorgond-diesel",
  "humantime",
@@ -1647,16 +1680,20 @@ dependencies = [
  "minicbor",
  "minicbor-io",
  "ownable",
+ "rayon",
  "scoped-futures",
  "serde",
  "serde_json",
  "syntect",
+ "tempfile",
  "thiserror 2.0.11",
  "tokio",
+ "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "tower-http 0.6.2",
  "tracing",
+ "tracing-indicatif",
  "tracing-subscriber",
  "uuid",
  "yoke 0.8.0",
@@ -2426,6 +2463,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
+name = "libredox"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "391290121bad3d37fbddad76d8f5d1c1c314cfc646d143d7e07a3086ddff0ce3"
+dependencies = [
+ "bitflags 2.9.1",
+ "libc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3056,6 +3103,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3552,6 +3605,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469052894dcb553421e483e4209ee581a45100d31b4018de03e5a7ad86374a7e"
 dependencies = [
  "bitflags 2.9.1",
+]
+
+[[package]]
+name = "redox_users"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
+dependencies = [
+ "getrandom 0.2.15",
+ "libredox",
+ "thiserror 2.0.11",
 ]
 
 [[package]]
@@ -5014,6 +5078,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-rayon"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cf33a76e0b1dd03b778f83244137bd59887abf25c0e87bc3e7071105f457693"
+dependencies = [
+ "rayon",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-rustls"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5231,9 +5305,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-indicatif"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c714cc8fc46db04fcfddbd274c6ef59bebb1b435155984e7c6e89c3ce66f200"
+checksum = "e1983afead46ff13a3c93581e0cec31d20b29efdd22cbdaa8b9f850eccf2c352"
 dependencies = [
  "indicatif",
  "tracing",

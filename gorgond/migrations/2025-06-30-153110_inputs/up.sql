@@ -43,6 +43,8 @@ CREATE TABLE repository_merge_requests (
     ident          TEXT NOT NULL    CHECK (ident <> ''),
     UNIQUE (repository_id, ident),
 
+    base           TEXT NOT NULL    CHECK (base <> ''),
+
     -- Optional metadata; note the lack of `CHECK (a <> '')` constraints.
     title          TEXT    NOT NULL,
     description    TEXT    NOT NULL,

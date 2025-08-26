@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgon-util"
+version = "0.1.0"
+edition = "2024"
+license = "EUPL-1.2"
+
+[dependencies]
+miette.workspace = true
+thiserror.workspace = true
+url = { workspace = true, optional = true }
+
+[features]
+source_url = ["dep:url"]

@@ -7,6 +7,7 @@ use std::{
     fmt::Debug,
 };
 
+use crate::builds::Mirror;
 use axum::{
     extract::{FromRequest, Path, State},
     response::IntoResponse,
@@ -20,16 +21,20 @@ use diesel_async::{
     pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
 use futures::stream::TryStreamExt;
+use gorgon_util::source_url::SourceUrl;
 use gorgond_client::{
     api::{self, ApiError, OwnableMap},
     models as client, Url, Uuid, Yoke, Yokeable,
 };
 use gorgond_diesel::{models, schema};
-use miette::{Context, Diagnostic, IntoDiagnostic};
+use miette::{miette, Context, Diagnostic, IntoDiagnostic};
+use rayon::iter::IntoParallelIterator;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, info_span, instrument, warn, Span};
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 
@@ -49,12 +54,17 @@ pub struct HttpArgs {
 
 #[derive(Clone)]
 pub struct S {
+    pub token: CancellationToken,
     pub pool: Pool<AsyncPgConnection>,
     pub events_base: Url,
 }
 
 #[instrument(name = "http", level = "ERROR", skip_all)]
-pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::Result<()> {
+pub async fn run(args: HttpArgs, state: S) -> miette::Result<()> {
+    let span = Span::current();
+    span.pb_set_style(&crate::PB_STYLE_BLANK);
+
+    let token = state.token.clone();
     let app = Router::new()
         .route("/", get(root))
         .route("/repos", get(repos).post(repo_create))
@@ -92,7 +102,14 @@ pub async fn run(token: CancellationToken, args: HttpArgs, state: S) -> miette::
         )
         .fallback(error_not_found)
         .method_not_allowed_fallback(error_method_not_allowed)
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::trace::TraceLayer::new_for_http().make_span_with(
+                move |req: &axum::http::Request<axum::body::Body>| {
+                    let (method, path) = (req.method().as_str(), req.uri().path());
+                    info_span!(parent: &span, "req", method, path)
+                },
+            ),
+        )
         .with_state(state);
 
     debug!(http_addr = args.http_addr, "Binding HTTP listener...");
@@ -342,6 +359,7 @@ async fn batch_repo_merges_import(
             .do_update()
             .set(excluded!(
                 schema::gorgond::repository_merge_requests::ident,
+                schema::gorgond::repository_merge_requests::base,
                 schema::gorgond::repository_merge_requests::title,
                 schema::gorgond::repository_merge_requests::description,
                 schema::gorgond::repository_merge_requests::closed_at,
@@ -781,7 +799,11 @@ async fn worker_internal_allocate_build(
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
-        use schema::gorgond::{build_inputs, builds, workers};
+        use schema::gorgond::{
+            build_inputs, build_template_inputs as inputs, build_templates as templates, builds,
+            repositories as repos, repository_merge_request_versions as versions,
+            repository_merge_requests as merges, workers,
+        };
         let now = Utc::now();
 
         // Resolve the worker slug to an ID, or create it if it doesn't exist.
@@ -840,6 +862,104 @@ async fn worker_internal_allocate_build(
                 .returning(models::Build::as_returning())
                 .get_result(conn)
                 .await?
+        } else if let Some((template_id, _)) = templates::table
+            .inner_join(inputs::table.on(templates::id.eq(inputs::template_id)))
+            .inner_join(repos::table.on(inputs::repository_id.assume_not_null().eq(repos::id)))
+            .filter(repos::storage.ne(""))
+            .inner_join(
+                merges::table
+                    .on((inputs::repository_id.assume_not_null()).eq(merges::repository_id)),
+            )
+            .inner_join(versions::table.on(merges::id.eq(versions::merge_request_id)))
+            .group_by(templates::id)
+            .select((templates::id, diesel::dsl::count_distinct(merges::id)))
+            .order((templates::id, diesel::dsl::count_distinct(merges::id)))
+            .first::<(Uuid, i64)>(conn)
+            .await
+            .optional()?
+            .filter(|(_, count)| *count > 0)
+        {
+            info!("Found a template, instantiating it...");
+
+            let inputs = inputs::table
+                .filter(inputs::template_id.eq(template_id))
+                // We can only do rollups for repos with storage.
+                .inner_join(repos::table.on(inputs::repository_id.assume_not_null().eq(repos::id)))
+                .filter(repos::storage.ne(""))
+                // This also cuts out merge requests without versions.
+                .inner_join(
+                    merges::table
+                        .on((inputs::repository_id.assume_not_null()).eq(merges::repository_id)),
+                )
+                .inner_join(versions::table.on(merges::id.eq(versions::merge_request_id)))
+                // Choose only the latest version for each merge request.
+                .distinct_on((inputs::id, merges::id))
+                .order((inputs::id, merges::id, versions::current_at.desc()))
+                .select((
+                    models::BuildTemplateInput::as_select(),
+                    models::RepositoryMergeRequest::as_select(),
+                    models::RepositoryMergeRequestVersion::as_select(),
+                ))
+                .load::<(
+                    models::BuildTemplateInput,
+                    models::RepositoryMergeRequest,
+                    models::RepositoryMergeRequestVersion,
+                )>(conn)
+                .await?;
+            let repos = repos::table
+                .filter(repos::id.eq_any(inputs.iter().map(|(_, merge, _)| merge.repository_id)))
+                .select(models::Repository::as_select())
+                .load::<models::Repository>(conn)
+                .await?;
+
+            let span = Span::current();
+            let token = state.token.child_token();
+            let _drop = token.clone().drop_guard();
+            tokio_rayon::spawn_fifo(move || {
+                repos.into_par_iter().try_for_each(|repo| {
+                    let _enter =
+                        info_span!(parent: &span, "repo", kind = repo.kind, ident = repo.ident)
+                            .entered();
+
+                    // Everything about this sucks.
+                    let mirror = Mirror::init_repo(&repo)?;
+                    let mut bases = BTreeMap::<String, SourceUrl>::new();
+                    let mut refs = BTreeMap::<String, SourceUrl>::new();
+                    for (_, m, v) in (inputs.iter())
+                        .filter(|(_, _, v)| v.commit_id.is_none())
+                        .filter(|(i, _, _)| i.repository_id == Some(repo.id))
+                    {
+                        match SourceUrl::parse(&m.base).context("Couldn't parse base")? {
+                            SourceUrl::Git(base) => bases.insert(
+                                format!(
+                                    "refs/gorgon/bases/{}{}/{}",
+                                    base.base_url.domain().ok_or(miette!("No domain in base"))?,
+                                    base.base_url.path(),
+                                    base.ref_.as_ref().ok_or(miette!("No ref= in base"))?,
+                                ),
+                                SourceUrl::Git(base),
+                            ),
+                        };
+                        refs.insert(
+                            format!("refs/gorgon/merges/{}/versions/{}", m.ident, v.ident),
+                            SourceUrl::parse(&v.source).context("Couldn't parse source")?,
+                        );
+                    }
+                    info_span!("bases")
+                        .in_scope(|| mirror.fetch_sources(&token, bases))
+                        .context("Couldn't fetch bases")?;
+                    info_span!("refs")
+                        .in_scope(|| mirror.fetch_sources(&token, refs))
+                        .context("Couldn't fetch refs")?;
+                    Ok::<_, miette::Report>(())
+                })
+            })
+            .await
+            .map_err(|err| api::ApiError::Git {
+                error: api::ApiError::wrap(&*err),
+            })?;
+
+            return Err(ApiError::NoWorkAvailable.into());
         } else {
             warn!("No work available!");
             return Err(ApiError::NoWorkAvailable.into());

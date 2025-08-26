@@ -118,6 +118,7 @@ pub mod gorgond {
             id -> Uuid,
             repository_id -> Uuid,
             ident -> Text,
+            base -> Text,
             title -> Text,
             description -> Text,
             closed_at -> Nullable<Timestamptz>,

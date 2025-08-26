@@ -7,7 +7,9 @@ use diesel::{prelude::*, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use gorgond_client::Uuid;
 use gorgond_diesel::AsyncPgPool;
-use miette::{Context, IntoDiagnostic, NamedSource, Result, SourceOffset, SourceSpan, bail};
+use miette::{
+    Context, IntoDiagnostic, NamedSource, Result, SourceOffset, SourceSpan, bail, miette,
+};
 use octocrab::models::events::{self, payload::EventPayload};
 use scoped_futures::ScopedFutureExt;
 use tokio::runtime::Runtime;
@@ -116,6 +118,7 @@ impl Args {
                 current_at,
                 event.0.repo_id,
                 Uuid::now_v7(),
+                Uuid::now_v7(),
                 &p.pull_request,
             )
             .inspect(|(pr, _, _)| {
@@ -132,8 +135,17 @@ impl Args {
             .into_diagnostic()?
             .transaction(|conn| {
                 async move {
+                    let repos = ([&repo].into_iter())
+                        .chain(
+                            (pr.as_ref().iter())
+                                .flat_map(|(_, (head_repo, _), (base_repo, _))| {
+                                    [head_repo, base_repo]
+                                })
+                                .filter(|r| r.id != repo.id),
+                        )
+                        .collect::<Vec<_>>();
                     diesel::insert_into(schema::repos::table)
-                        .values(&repo)
+                        .values(repos)
                         .on_conflict(schema::repos::id)
                         .do_update()
                         .set(excluded!(
@@ -176,35 +188,24 @@ impl Args {
                             .into_diagnostic()
                             .context("Couldn't insert Org")?;
                     }
-                    if let Some((mut pr, pr_repo, pr_ref)) = pr {
-                        diesel::insert_into(schema::repos::table)
-                            .values(&pr_repo)
-                            .on_conflict(schema::repos::id)
-                            .do_update()
-                            .set(excluded!(
-                                schema::repos::name,
-                                schema::repos::current_at,
-                                schema::repos::updated_at,
-                            ))
-                            .execute(conn)
-                            .await
-                            .into_diagnostic()
-                            .context("Couldn't insert Repo")?;
-
+                    if let Some((mut pr, (_, head_ref), (_, base_ref))) = pr {
                         // TODO: ON CONFLICT DO NOTHING ... RETURNING returns nothing if
                         // the row already exists, without some silly hacks. We can force
                         // something to be returned by making a pointless no-op write on
                         // every insert, but this is not ideal.
-                        pr.ref_id = diesel::insert_into(schema::refs::table)
-                            .values(&pr_ref)
+                        let mut ref_ids = diesel::insert_into(schema::refs::table)
+                            .values([&head_ref, &base_ref])
                             .on_conflict((schema::refs::repo_id, schema::refs::ref_name))
                             .do_update()
                             .set(excluded!(schema::refs::repo_id, schema::refs::ref_name))
                             .returning(schema::refs::id)
-                            .get_result::<Uuid>(conn)
+                            .load::<Uuid>(conn)
                             .await
                             .into_diagnostic()
-                            .context("Couldn't insert Pull Request Ref")?;
+                            .context("Couldn't insert Pull Request Ref")?
+                            .into_iter();
+                        pr.head_ref_id = ref_ids.next().ok_or(miette!("Missing head_ref_id"))?;
+                        pr.base_ref_id = ref_ids.next().ok_or(miette!("Missing base_ref_id"))?;
 
                         diesel::insert_into(schema::pull_requests::table)
                             .values(&pr)
@@ -213,7 +214,8 @@ impl Args {
                             .set(excluded!(
                                 schema::pull_requests::repo_id,
                                 schema::pull_requests::number,
-                                schema::pull_requests::ref_id,
+                                schema::pull_requests::head_ref_id,
+                                schema::pull_requests::base_ref_id,
                                 schema::pull_requests::merge_request_id,
                                 schema::pull_requests::title,
                                 schema::pull_requests::body,

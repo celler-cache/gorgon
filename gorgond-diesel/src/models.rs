@@ -567,6 +567,7 @@ pub struct RepositoryMergeRequest {
     pub id: Uuid,
     pub repository_id: Uuid,
     pub ident: String,
+    pub base: String,
 
     pub title: String,
     pub description: String,
@@ -588,6 +589,7 @@ impl RepositoryMergeRequest {
             id,
             repository_id,
             ident: v.ident.to_string(),
+            base: v.base.to_string(),
             title: v.title.to_string(),
             description: v.description.to_string(),
             closed_at: None,
@@ -601,6 +603,7 @@ impl RepositoryMergeRequest {
             repository_id: self.repository_id,
             spec: client::RepositoryMergeRequestSpec {
                 ident: self.ident.into(),
+                base: self.base.into(),
                 title: self.title.into(),
                 description: self.description.into(),
                 closed_at: self.closed_at,

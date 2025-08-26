@@ -150,7 +150,8 @@ pub struct PullRequest {
     pub id: i64,
     pub repo_id: i64,
     pub number: i32,
-    pub ref_id: Uuid,
+    pub head_ref_id: Uuid,
+    pub base_ref_id: Uuid,
     pub merge_request_id: Option<Uuid>,
 
     pub title: String,
@@ -166,14 +167,16 @@ impl PullRequest {
         now: DateTime<Utc>,
         current_at: DateTime<Utc>,
         repo_id: i64,
-        ref_id: Uuid,
+        head_ref_id: Uuid,
+        base_ref_id: Uuid,
         pr: &octocrab::models::pulls::PullRequest,
-    ) -> Result<(Self, Repo, Ref)> {
+    ) -> Result<(Self, (Repo, Ref), (Repo, Ref))> {
         let v = Self {
             id: sign(&pr.id).context("Invalid ID")?,
             repo_id,
             number: sign(&pr.number).context("Invalid PR Number")?,
-            ref_id,
+            head_ref_id,
+            base_ref_id,
             merge_request_id: None,
             title: pr.title.clone().unwrap_or_default(),
             body: pr.body.clone().unwrap_or_default(),
@@ -185,8 +188,12 @@ impl PullRequest {
         let head_repo = (pr.head.repo.as_ref())
             .ok_or(miette!("PR has no source repo?"))
             .and_then(|r| Repo::try_from_model(now, current_at, r))?;
-        let head_ref = Ref::new(ref_id, head_repo.id, &pr.head.ref_field);
-        Ok((v, head_repo, head_ref))
+        let head_ref = Ref::new(head_ref_id, head_repo.id, &pr.head.ref_field);
+        let base_repo = (pr.base.repo.as_ref())
+            .ok_or(miette!("PR has no base repo?"))
+            .and_then(|r| Repo::try_from_model(now, current_at, r))?;
+        let base_ref = Ref::new(base_ref_id, base_repo.id, &pr.base.ref_field);
+        Ok((v, (head_repo, head_ref), (base_repo, base_ref)))
     }
 }
 

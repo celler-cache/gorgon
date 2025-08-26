@@ -63,7 +63,8 @@ pub mod gorgond_github {
             id -> Int8,
             repo_id -> Int8,
             number -> Int4,
-            ref_id -> Uuid,
+            head_ref_id -> Uuid,
+            base_ref_id -> Uuid,
             merge_request_id -> Nullable<Uuid>,
             title -> Text,
             body -> Text,
@@ -99,7 +100,6 @@ pub mod gorgond_github {
     diesel::joinable!(events -> pull_requests (pull_request_id));
     diesel::joinable!(events -> refs (ref_id));
     diesel::joinable!(events -> repos (repo_id));
-    diesel::joinable!(pull_requests -> refs (ref_id));
     diesel::joinable!(pull_requests -> repos (repo_id));
     diesel::joinable!(refs -> repos (repo_id));
 

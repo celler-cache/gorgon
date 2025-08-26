@@ -169,6 +169,15 @@ pub enum ApiError {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         key: Option<String>,
     },
+
+    #[serde(rename = "tag:Git")]
+    #[diagnostic(code("gorgond::Git"))]
+    #[error("Git operation failed")]
+    Git {
+        #[source]
+        error: ApiErrorSource,
+    },
+
     #[serde(rename = "tag:NoWorkAvailable")]
     #[diagnostic(code("gorgond::NoWorkAvailable"))]
     #[error("No work available")]
@@ -207,6 +216,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::ModelNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Git { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NoWorkAvailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::CantUpsertAndChangeIdentifier { .. } => StatusCode::BAD_REQUEST,
             Self::Unknown(_) => StatusCode::INTERNAL_SERVER_ERROR,

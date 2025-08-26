@@ -186,19 +186,31 @@ impl Args {
             .context("Couldn't load unprocessed Events")?;
 
         info!("Finding stale Pull Requests...");
+        let (base_repo, head_repo, base_ref) = diesel::alias!(
+            schema::repos as base_repo,
+            schema::repos as head_repo,
+            schema::refs as base_ref,
+        );
         let prs = rt
             .block_on({
                 let q = schema::pull_requests::table
-                    .left_join(schema::repos::table)
+                    .inner_join(base_ref.on(
+                        (base_ref.field(schema::refs::id)).eq(schema::pull_requests::base_ref_id),
+                    ))
+                    .inner_join(
+                        base_repo.on((base_repo.field(schema::repos::id))
+                            .eq(base_ref.field(schema::refs::repo_id))),
+                    )
+                    .left_join(head_repo)
                     // We only care about PRs to repos that gorgond wants to track.
-                    .filter(schema::repos::repository_id.is_not_null())
+                    .filter(head_repo.field(schema::repos::repository_id).is_not_null())
                     .filter(
                         // PRs that haven't yet been registered with gorgond.
                         (schema::pull_requests::merge_request_id.is_null())
                             // PRs with unprocessed events.
                             .or(schema::pull_requests::id
                                 .eq_any(event_refs.iter().filter_map(|(pid, _)| *pid)))
-                            .or(schema::pull_requests::ref_id
+                            .or(schema::pull_requests::head_ref_id
                                 .eq_any(event_refs.iter().filter_map(|(_, rid)| *rid)))
                             // PRs that have been modified since last sync.
                             // This is a catch-all for when we've processed some events,
@@ -209,14 +221,18 @@ impl Args {
                     )
                     .select((
                         models::PullRequest::as_select(),
-                        schema::repos::repository_id.assume_not_null(),
+                        (
+                            base_repo.field(schema::repos::name),
+                            base_ref.field(schema::refs::ref_name),
+                        ),
+                        (head_repo.field(schema::repos::repository_id)).assume_not_null(),
                     ))
                     .order_by((
                         schema::pull_requests::repo_id,
                         schema::pull_requests::number,
                     ));
                 debug!("{}", diesel::debug_query::<Pg, _>(&q));
-                q.load::<(models::PullRequest, Uuid)>(&mut conn)
+                q.load::<(models::PullRequest, (String, String), Uuid)>(&mut conn)
             })
             .into_diagnostic()
             .context("Couldn't load stale Pull Requests")?;
@@ -224,27 +240,31 @@ impl Args {
             info!("-> Nothing to do!");
             return Ok(());
         }
-        let pr_it = prs.iter().map(|(pr, _)| pr);
+        let pr_it = prs.iter().map(|(pr, _, _)| pr);
 
         info!("Finding associated Events...");
         let events = rt
             .block_on({
-                let q = schema::events::table
-                    .left_join(schema::refs::table)
-                    .left_join(schema::repos::table.on(schema::refs::repo_id.eq(schema::repos::id)))
-                    .filter(
-                        (schema::events::pull_request_id.eq_any(pr_it.clone().map(|pr| pr.id)))
-                            .or(schema::events::ref_id.eq_any(pr_it.clone().map(|pr| pr.ref_id))),
-                    )
-                    .select((
-                        models::Event::as_select(),
-                        (schema::repos::name, schema::refs::ref_name).nullable(),
-                    ))
-                    .order_by((
-                        schema::events::pull_request_id,
-                        schema::events::ref_id,
-                        schema::events::emitted_at,
-                    ));
+                let q =
+                    schema::events::table
+                        .left_join(schema::refs::table)
+                        .left_join(
+                            schema::repos::table.on(schema::refs::repo_id.eq(schema::repos::id)),
+                        )
+                        .filter(
+                            (schema::events::pull_request_id.eq_any(pr_it.clone().map(|p| p.id)))
+                                .or(schema::events::ref_id
+                                    .eq_any(pr_it.clone().map(|p| p.head_ref_id))),
+                        )
+                        .select((
+                            models::Event::as_select(),
+                            (schema::repos::name, schema::refs::ref_name).nullable(),
+                        ))
+                        .order_by((
+                            schema::events::pull_request_id,
+                            schema::events::ref_id,
+                            schema::events::emitted_at,
+                        ));
                 debug!("{}", diesel::debug_query::<Pg, _>(&q));
                 q.load::<(models::Event, Option<(String, String)>)>(&mut conn)
             })
@@ -262,13 +282,17 @@ impl Args {
             client.batch().repositories().merges().import(
                 api::BatchRepositoryMergeRequestsImportRequest {
                     merge_requests: (prs.iter())
-                        .map(|(pr, repo_id)| {
+                        .map(|(pr, (base_repo, base_ref), repo_id)| {
                             (*repo_id, {
                                 (events.iter())
-                                .filter(|(e, _)|  e.pull_request_id == Some(pr.id))
+                                .filter(|(e, _)| e.pull_request_id == Some(pr.id))
                                 .fold(
                                     client::RepositoryMergeRequestSpec {
                                         ident: pr.number.to_string().into(),
+                                        base: format!(
+                                            "git+https://github.com/{base_repo}?ref={base_ref}"
+                                        )
+                                        .into(),
                                         title: pr.title.as_str().into(),
                                         description: pr.body.as_str().into(),
                                         closed_at: None,
@@ -300,7 +324,9 @@ impl Args {
                         .zip(repo_rsp.get().merge_requests.iter())
                         .flat_map(|(pr, mr)| {
                             (events.iter())
-                                .filter(|(e, _)| e.ref_id == Some(pr.ref_id) && !e.head.is_empty())
+                                .filter(|(e, _)| {
+                                    e.ref_id == Some(pr.head_ref_id) && !e.head.is_empty()
+                                })
                                 .filter_map(|(e, r)| r.as_ref().map(|r| (e, r)))
                                 .map(|(e, (fork_name, _))| {
                                     let head = hex::encode(&e.head);
