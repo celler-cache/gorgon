@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::{collections::HashMap, future::Future, num::NonZero};
+use std::{collections::HashMap, future::Future};
 
 use clap::Parser;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
@@ -24,14 +24,6 @@ pub struct EventsArgs {
 
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
-    /// Number of worker threads to use.
-    #[arg(
-        long,
-        short,
-        default_value_t = std::thread::available_parallelism().unwrap(),
-    )]
-    worker_threads: NonZero<usize>,
-
     #[command(flatten)]
     db: gorgond_diesel::Args,
     #[command(flatten)]
@@ -94,14 +86,6 @@ pub async fn run(args: Args) -> Result<()> {
     // Connect to database, run migrations.
     const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
     let pool = args.db.init(MIGRATIONS, "gorgond").await?;
-
-    // Set up the Rayon thread pool.
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.worker_threads.into())
-        .thread_name(|idx| format!("gorgond-rayon{}", idx + 1))
-        .build_global()
-        .into_diagnostic()
-        .context("Couldn't create thread pool")?;
 
     // Spawn tasks.
     let token = CancellationToken::new();

@@ -31,8 +31,7 @@ pub mod gorgond {
             id -> Uuid,
             template_id -> Uuid,
             key -> Text,
-            source -> Text,
-            repository_id -> Nullable<Uuid>,
+            repository_id -> Uuid,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
@@ -65,6 +64,18 @@ pub mod gorgond {
             heartbeat_at -> Nullable<Timestamptz>,
             started_at -> Nullable<Timestamptz>,
             ended_at -> Nullable<Timestamptz>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
+        }
+    }
+
+    diesel::table! {
+        gorgond.commit_sources (id) {
+            id -> Uuid,
+            repository_id -> Uuid,
+            commit_id -> Nullable<Uuid>,
+            source -> Text,
+            fetched_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
@@ -105,11 +116,11 @@ pub mod gorgond {
             id -> Uuid,
             merge_request_id -> Uuid,
             ident -> Text,
-            source -> Text,
             commit_id -> Nullable<Uuid>,
             current_at -> Timestamptz,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
+            source_id -> Uuid,
         }
     }
 
@@ -118,12 +129,12 @@ pub mod gorgond {
             id -> Uuid,
             repository_id -> Uuid,
             ident -> Text,
-            base -> Text,
             title -> Text,
             description -> Text,
             closed_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
+            base_id -> Uuid,
         }
     }
 
@@ -165,9 +176,13 @@ pub mod gorgond {
     diesel::joinable!(build_templates -> projects (project_id));
     diesel::joinable!(builds -> projects (project_id));
     diesel::joinable!(builds -> workers (worker_id));
+    diesel::joinable!(commit_sources -> commits (commit_id));
+    diesel::joinable!(commit_sources -> repositories (repository_id));
     diesel::joinable!(commits -> repositories (repository_id));
+    diesel::joinable!(repository_merge_request_versions -> commit_sources (source_id));
     diesel::joinable!(repository_merge_request_versions -> commits (commit_id));
     diesel::joinable!(repository_merge_request_versions -> repository_merge_requests (merge_request_id));
+    diesel::joinable!(repository_merge_requests -> commit_sources (base_id));
     diesel::joinable!(repository_merge_requests -> repositories (repository_id));
     diesel::joinable!(rollup_commits -> commits (commit_id));
     diesel::joinable!(rollup_commits -> rollups (rollup_id));
@@ -181,6 +196,7 @@ pub mod gorgond {
         build_template_inputs,
         build_templates,
         builds,
+        commit_sources,
         commits,
         projects,
         repositories,

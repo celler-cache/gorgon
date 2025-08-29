@@ -167,8 +167,8 @@ impl BuildTemplate {
             id,
             project_id,
             slug,
-            kind: spec.kind.to_owned().into(),
-            expr: spec.expr.to_owned().into(),
+            kind: spec.kind.clone().into_owned(),
+            expr: spec.expr.clone().into_owned(),
             updated_at: now,
             created_at: now,
         }
@@ -212,8 +212,7 @@ pub struct BuildTemplateInput {
     pub template_id: Uuid,
     pub key: String,
 
-    pub source: String,
-    pub repository_id: Option<Uuid>,
+    pub repository_id: Uuid,
 
     pub updated_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -225,36 +224,28 @@ impl BuildTemplateInput {
         spec: &client::BuildTemplateInputSpec<'static>,
         id: Uuid,
         template_id: Uuid,
-        repository_id: Option<Uuid>,
+        repository_id: Uuid,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
             id,
             template_id,
             key: spec.key.to_string(),
-            source: match &spec.source {
-                client::BuildTemplateInputSource::Url(u) => u.to_string(),
-                _ => String::new(),
-            },
             repository_id,
             updated_at: now,
             created_at: now,
         }
     }
-    pub fn to_client(self, repository: Option<&Repository>) -> client::BuildTemplateInput<'static> {
+    pub fn to_client(self, repo: &Repository) -> client::BuildTemplateInput<'static> {
         client::BuildTemplateInput {
             id: self.id,
             template_id: self.template_id,
             spec: client::BuildTemplateInputSpec {
                 key: self.key.into(),
-                source: if let Some(repo) = repository {
-                    client::BuildTemplateInputSource::Repository(client::RepositorySpec {
-                        kind: repo.kind.clone().into(),
-                        ident: repo.ident.clone().into(),
-                    })
-                } else {
-                    client::BuildTemplateInputSource::Url(self.source.into())
-                },
+                source: client::BuildTemplateInputSource::Repository(client::RepositorySpec {
+                    kind: repo.kind.clone().into(),
+                    ident: repo.ident.clone().into(),
+                }),
             },
             updated_at: self.updated_at,
             created_at: self.created_at,
@@ -500,11 +491,11 @@ impl Repository {
         Self::not_found(format!("{kind}:{ident}"))
     }
 
-    pub fn from_spec(v: client::RepositorySpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
+    pub fn from_spec(v: &client::RepositorySpec<'static>, id: Uuid, now: DateTime<Utc>) -> Self {
         Self {
             id,
-            kind: v.kind.into(),
-            ident: v.ident.into(),
+            kind: v.kind.to_string(),
+            ident: v.ident.to_string(),
             storage: String::new(),
             created_at: now,
             updated_at: now,
@@ -558,6 +549,57 @@ impl Commit {
     Insertable,
     Identifiable,
     Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::commit_sources, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Commit))]
+pub struct CommitSource {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub commit_id: Option<Uuid>,
+    pub source: String,
+
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl CommitSource {
+    gen_model!(commit_sources, CommitSource);
+
+    pub fn new(id: Uuid, repository_id: Uuid, source: String, now: DateTime<Utc>) -> Self {
+        Self {
+            id,
+            repository_id,
+            commit_id: None,
+            source,
+            fetched_at: None,
+            updated_at: now,
+            created_at: now,
+        }
+    }
+
+    pub fn to_client(self) -> client::CommitSource<'static> {
+        client::CommitSource {
+            id: self.id,
+            repository_id: self.repository_id,
+            commit_id: self.commit_id,
+            source: self.source.into(),
+            fetched_at: self.fetched_at,
+            updated_at: self.updated_at,
+            created_at: self.created_at,
+        }
+    }
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
     AsChangeset,
 )]
 #[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
@@ -567,7 +609,7 @@ pub struct RepositoryMergeRequest {
     pub id: Uuid,
     pub repository_id: Uuid,
     pub ident: String,
-    pub base: String,
+    pub base_id: Uuid,
 
     pub title: String,
     pub description: String,
@@ -582,6 +624,7 @@ impl RepositoryMergeRequest {
     pub fn from_spec(
         v: &client::RepositoryMergeRequestSpec<'_>,
         id: Uuid,
+        base_id: Uuid,
         repository_id: Uuid,
         now: DateTime<Utc>,
     ) -> Self {
@@ -589,7 +632,7 @@ impl RepositoryMergeRequest {
             id,
             repository_id,
             ident: v.ident.to_string(),
-            base: v.base.to_string(),
+            base_id,
             title: v.title.to_string(),
             description: v.description.to_string(),
             closed_at: None,
@@ -597,17 +640,18 @@ impl RepositoryMergeRequest {
             updated_at: now,
         }
     }
-    pub fn to_client(self) -> client::RepositoryMergeRequest<'static> {
+    pub fn to_client(self, base: &CommitSource) -> client::RepositoryMergeRequest<'static> {
         client::RepositoryMergeRequest {
             id: self.id,
             repository_id: self.repository_id,
             spec: client::RepositoryMergeRequestSpec {
                 ident: self.ident.into(),
-                base: self.base.into(),
+                base: base.source.clone().into(),
                 title: self.title.into(),
                 description: self.description.into(),
                 closed_at: self.closed_at,
             },
+            base_id: base.id,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -642,9 +686,7 @@ pub struct RepositoryMergeRequestVersion {
     pub id: Uuid,
     pub merge_request_id: Uuid,
     pub ident: String,
-
-    pub source: String,
-    pub commit_id: Option<Uuid>,
+    pub source_id: Uuid,
 
     pub current_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -660,29 +702,32 @@ impl RepositoryMergeRequestVersion {
         v: &client::RepositoryMergeRequestVersionSpec<'_>,
         id: Uuid,
         merge_request_id: Uuid,
+        source_id: Uuid,
         now: DateTime<Utc>,
     ) -> Self {
         Self {
             id,
             merge_request_id,
             ident: v.ident.to_string(),
-            source: v.source.to_string(),
-            commit_id: None,
+            source_id,
             current_at: v.current_at,
             created_at: now,
             updated_at: now,
         }
     }
-    pub fn to_client(self) -> client::RepositoryMergeRequestVersion<'static> {
+    pub fn to_client(
+        self,
+        source: &CommitSource,
+    ) -> client::RepositoryMergeRequestVersion<'static> {
         client::RepositoryMergeRequestVersion {
             id: self.id,
             merge_request_id: self.merge_request_id,
-            commit_id: self.commit_id,
             spec: client::RepositoryMergeRequestVersionSpec {
                 ident: self.ident.into(),
-                source: self.source.into(),
+                source: source.source.clone().into(),
                 current_at: self.current_at,
             },
+            source_id: source.id,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

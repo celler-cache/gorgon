@@ -40,6 +40,7 @@ pub enum Model {
     BuildLog,
     Repository,
     Commit,
+    CommitSource,
     RepositoryMergeRequest,
     RepositoryMergeRequestVersion,
     #[serde(untagged)]

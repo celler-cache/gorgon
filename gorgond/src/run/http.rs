@@ -7,7 +7,6 @@ use std::{
     fmt::Debug,
 };
 
-use crate::builds::Mirror;
 use axum::{
     extract::{FromRequest, Path, State},
     response::IntoResponse,
@@ -21,15 +20,12 @@ use diesel_async::{
     pooled_connection::deadpool::Pool, AsyncConnection, AsyncPgConnection, RunQueryDsl,
 };
 use futures::stream::TryStreamExt;
-use gorgon_util::source_url::SourceUrl;
 use gorgond_client::{
     api::{self, ApiError, OwnableMap},
     models as client, Url, Uuid, Yoke, Yokeable,
 };
 use gorgond_diesel::{models, schema};
-use miette::{miette, Context, Diagnostic, IntoDiagnostic};
-use rayon::iter::IntoParallelIterator;
-use rayon::prelude::*;
+use miette::{Context, Diagnostic, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +35,9 @@ use tracing_indicatif::span_ext::IndicatifSpanExt;
 pub type Result<T, E = ApiErrorAdapter> = std::result::Result<T, E>;
 
 macro_rules! excluded {
+    ($col:expr) => {
+        $col.eq(diesel::upsert::excluded($col))
+    };
     ($($col:expr),+$(,)?) => {
         ($($col.eq(diesel::upsert::excluded($col))),+)
     };
@@ -280,7 +279,7 @@ async fn repo_create(
     transaction!(state, async |conn: &mut _| {
         let now = Utc::now();
         let repo =
-            models::Repository::from_spec(req.get().repository.to_owned(), Uuid::now_v7(), now);
+            models::Repository::from_spec(&req.get().repository.to_owned(), Uuid::now_v7(), now);
         let repo = {
             diesel::insert_into(schema::gorgond::repositories::table)
                 .values(&repo)
@@ -305,6 +304,12 @@ async fn repo_merges(
             .filter(models::Repository::filter_ident(&repo_kind, &repo_ident))
             .load(conn)
             .await?;
+        let sources = models::CommitSource::ids(merge_requests.iter().map(|mr| mr.base_id))
+            .load_stream(conn)
+            .await?
+            .map_ok(|src| (src.id, src))
+            .try_collect::<BTreeMap<_, _>>()
+            .await?;
         Ok(JsonResponse(api::RepositoryMergeRequestsResponse {
             repositories: schema::gorgond::repositories::table
                 .select(models::Repository::as_select())
@@ -317,7 +322,9 @@ async fn repo_merges(
                 .map_ok(|v| (v.id, v.to_client()))
                 .try_collect()
                 .await?,
-            merge_requests: merge_requests.into_iter().map(|v| v.to_client()).collect(),
+            merge_requests: (merge_requests.into_iter())
+                .filter_map(|v| sources.get(&v.base_id).map(|src| v.to_client(src)))
+                .collect(),
         }))
     })
     .await
@@ -336,22 +343,55 @@ async fn batch_repo_merges_import(
             .filter(schema::gorgond::repositories::id.eq_any(repo_ids))
             .load_stream(conn);
 
-        let merges_f = diesel::insert_into(schema::gorgond::repository_merge_requests::table)
-            .values(
-                req.merge_requests
-                    .iter()
-                    .flat_map(|(repo_id, specs)| {
-                        specs.iter().map(|spec| {
-                            models::RepositoryMergeRequest::from_spec(
-                                spec,
-                                Uuid::now_v7(),
-                                *repo_id,
-                                now,
-                            )
-                        })
+        // Deduplicate base strings, then upsert them. Postgres doesn't like it if an
+        // ON CONFLICT DO UPDATE affects the same row twice in the same query.
+        let bases: BTreeSet<(Uuid, &str)> = (req.merge_requests.iter())
+            .flat_map(|(repo_id, specs)| specs.iter().map(|spec| (*repo_id, &*spec.base)))
+            .collect();
+        let bases = (bases.into_iter())
+            .map(|(repo_id, base)| {
+                models::CommitSource::new(Uuid::now_v7(), repo_id, base.to_string(), now)
+            })
+            .collect::<Vec<_>>();
+        let bases: BTreeMap<String, models::CommitSource> =
+            diesel::insert_into(schema::gorgond::commit_sources::table)
+                .values(bases)
+                .on_conflict((
+                    schema::gorgond::commit_sources::repository_id,
+                    schema::gorgond::commit_sources::source,
+                ))
+                .do_update()
+                // TODO: Pointless write to force RETURNING.
+                .set(excluded!(schema::gorgond::commit_sources::updated_at))
+                .returning(models::CommitSource::as_returning())
+                .load_stream(conn)
+                .await?
+                .map_ok(|base| (base.source.clone(), base))
+                .try_collect()
+                .await?;
+
+        // Insert merge requests.
+        let merges = (req.merge_requests.iter())
+            .flat_map(|(repo_id, specs)| specs.iter().map(|spec| (*repo_id, spec)))
+            .map(|(repo_id, spec)| {
+                (bases.get(&*spec.base))
+                    .ok_or_else(|| ApiError::ModelNotFound {
+                        model: api::Model::CommitSource,
+                        key: Some(spec.base.to_string()),
                     })
-                    .collect::<Vec<_>>(),
-            )
+                    .map(|base| {
+                        models::RepositoryMergeRequest::from_spec(
+                            spec,
+                            Uuid::now_v7(),
+                            base.id,
+                            repo_id,
+                            now,
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let merges = diesel::insert_into(schema::gorgond::repository_merge_requests::table)
+            .values(merges)
             .on_conflict((
                 schema::gorgond::repository_merge_requests::repository_id,
                 schema::gorgond::repository_merge_requests::ident,
@@ -359,21 +399,31 @@ async fn batch_repo_merges_import(
             .do_update()
             .set(excluded!(
                 schema::gorgond::repository_merge_requests::ident,
-                schema::gorgond::repository_merge_requests::base,
+                schema::gorgond::repository_merge_requests::base_id,
                 schema::gorgond::repository_merge_requests::title,
                 schema::gorgond::repository_merge_requests::description,
                 schema::gorgond::repository_merge_requests::closed_at,
                 schema::gorgond::repository_merge_requests::updated_at,
             ))
             .returning(models::RepositoryMergeRequest::as_returning())
-            .load_stream(conn);
+            .load(conn)
+            .await?;
+
+        // Re-map bases by ID.
+        let bases: BTreeMap<Uuid, models::CommitSource> =
+            bases.into_values().map(|base| (base.id, base)).collect();
 
         Ok(JsonResponse(api::RepositoryMergeRequestsResponse {
-            merge_requests: merges_f
-                .await?
-                .map_ok(|v| v.to_client())
-                .try_collect::<Vec<_>>()
-                .await?,
+            merge_requests: (merges.into_iter())
+                .map(|mr| {
+                    (bases.get(&mr.base_id))
+                        .ok_or_else(|| ApiError::ModelNotFound {
+                            model: api::Model::CommitSource,
+                            key: Some(mr.base_id.to_string()),
+                        })
+                        .map(|base| mr.to_client(base))
+                })
+                .collect::<Result<_, _>>()?,
             repositories: repos_f
                 .await?
                 .map_ok(|v| (v.id, v.to_client()))
@@ -393,16 +443,16 @@ async fn batch_repo_merge_versions_import(
         let now = Utc::now();
 
         let merge_ids: BTreeSet<Uuid> = req.merge_request_versions.keys().copied().collect();
-        let merge_requests: OwnableMap<Uuid, client::RepositoryMergeRequest> =
+        let merges: BTreeMap<Uuid, models::RepositoryMergeRequest> =
             models::RepositoryMergeRequest::all()
                 .filter(schema::gorgond::repository_merge_requests::id.eq_any(merge_ids))
                 .load_stream(conn)
                 .await?
-                .map_ok(|v| (v.id, v.to_client()))
+                .map_ok(|mr| (mr.id, mr))
                 .try_collect()
                 .await?;
 
-        let repo_ids: BTreeSet<Uuid> = merge_requests.values().map(|mr| mr.repository_id).collect();
+        let repo_ids: BTreeSet<Uuid> = merges.values().map(|mr| mr.repository_id).collect();
         let repositories: OwnableMap<Uuid, client::Repository> = models::Repository::all()
             .filter(schema::gorgond::repositories::id.eq_any(repo_ids))
             .load_stream(conn)
@@ -411,44 +461,114 @@ async fn batch_repo_merge_versions_import(
             .try_collect()
             .await?;
 
-        let merge_request_versions =
-            diesel::insert_into(schema::gorgond::repository_merge_request_versions::table)
-                .values(
-                    req.merge_request_versions
-                        .iter()
-                        .flat_map(|(merge_id, specs)| {
-                            specs.iter().map(|spec| {
-                                models::RepositoryMergeRequestVersion::from_spec(
-                                    spec,
-                                    Uuid::now_v7(),
-                                    *merge_id,
-                                    now,
-                                )
-                            })
+        // Cache for source strings. Start it off with merge bases.
+        let sources: BTreeMap<String, models::CommitSource> =
+            models::CommitSource::ids(merges.values().map(|mr| mr.base_id))
+                .load_stream(conn)
+                .await?
+                .map_ok(|src| (src.source.clone(), src))
+                .try_collect()
+                .await?;
+
+        // Then insert sources that aren't in that set.
+        let mut new_sources = BTreeSet::<(Uuid, &str)>::new();
+        for (merge_id, specs) in req.merge_request_versions.iter() {
+            let merge = (merges.get(merge_id)).ok_or_else(|| ApiError::ModelNotFound {
+                model: api::Model::RepositoryMergeRequest,
+                key: Some(merge_id.to_string()),
+            })?;
+            new_sources.extend(
+                (specs.iter())
+                    .filter(|spec| !sources.contains_key(&*spec.source))
+                    .map(|spec| (merge.repository_id, &*spec.source)),
+            );
+        }
+        let new_sources = (new_sources.into_iter())
+            .map(|(repo_id, src)| {
+                models::CommitSource::new(Uuid::now_v7(), repo_id, src.to_string(), now)
+            })
+            .collect::<Vec<_>>();
+        let sources = diesel::insert_into(schema::gorgond::commit_sources::table)
+            .values(new_sources)
+            .on_conflict((
+                schema::gorgond::commit_sources::repository_id,
+                schema::gorgond::commit_sources::source,
+            ))
+            .do_update()
+            .set(excluded!(schema::gorgond::commit_sources::updated_at))
+            .returning(models::CommitSource::as_returning())
+            .load_stream(conn)
+            .await?
+            .try_fold(sources, async |mut sources, src| {
+                sources.insert(src.source.clone(), src);
+                Ok(sources)
+            })
+            .await?;
+
+        // Insert merge request versions.
+        let versions = (req.merge_request_versions.iter())
+            .flat_map(|(merge_id, specs)| {
+                specs.iter().map(|spec| {
+                    (sources.get(&*spec.source))
+                        .ok_or_else(|| ApiError::ModelNotFound {
+                            model: api::Model::CommitSource,
+                            key: Some(spec.source.to_string()),
                         })
-                        .collect::<Vec<_>>(),
-                )
+                        .map(|src| {
+                            models::RepositoryMergeRequestVersion::from_spec(
+                                spec,
+                                Uuid::now_v7(),
+                                *merge_id,
+                                src.id,
+                                now,
+                            )
+                        })
+                })
+            })
+            .collect::<Result<Vec<models::RepositoryMergeRequestVersion>, _>>()?;
+        let versions =
+            diesel::insert_into(schema::gorgond::repository_merge_request_versions::table)
+                .values(versions)
                 .on_conflict((
                     schema::gorgond::repository_merge_request_versions::merge_request_id,
                     schema::gorgond::repository_merge_request_versions::ident,
                 ))
                 .do_update()
                 .set(excluded!(
-                    schema::gorgond::repository_merge_request_versions::source,
+                    schema::gorgond::repository_merge_request_versions::source_id,
                     schema::gorgond::repository_merge_request_versions::current_at,
                     schema::gorgond::repository_merge_request_versions::updated_at,
                 ))
                 .returning(models::RepositoryMergeRequestVersion::as_returning())
-                .load_stream(conn)
-                .await?
-                .map_ok(|v| v.to_client())
-                .try_collect::<Vec<_>>()
+                .load(conn)
                 .await?;
 
+        // Re-map sources by ID.
+        let sources: BTreeMap<Uuid, models::CommitSource> =
+            sources.into_values().map(|src| (src.id, src)).collect();
+
         Ok(JsonResponse(api::RepositoryMergeRequestVersionsResponse {
-            merge_requests,
+            merge_request_versions: (versions.into_iter())
+                .map(|v| {
+                    (sources.get(&v.source_id))
+                        .ok_or_else(|| ApiError::ModelNotFound {
+                            model: api::Model::CommitSource,
+                            key: Some(v.source_id.to_string()),
+                        })
+                        .map(|src| v.to_client(src))
+                })
+                .collect::<Result<_, _>>()?,
+            merge_requests: (merges.into_values())
+                .map(|mr| {
+                    (sources.get(&mr.base_id))
+                        .ok_or_else(|| ApiError::ModelNotFound {
+                            model: api::Model::CommitSource,
+                            key: Some(mr.base_id.to_string()),
+                        })
+                        .map(|src| (mr.id, mr.to_client(src)))
+                })
+                .collect::<Result<_, _>>()?,
             repositories,
-            merge_request_versions,
         }))
     })
     .await
@@ -501,8 +621,7 @@ async fn build_templates(
             .await?;
         let repos = models::Repository::all()
             .filter(
-                schema::gorgond::repositories::id
-                    .eq_any(inputs.iter().filter_map(|i| i.repository_id)),
+                schema::gorgond::repositories::id.eq_any(inputs.iter().map(|i| i.repository_id)),
             )
             .load_stream::<models::Repository>(conn)
             .await?
@@ -515,8 +634,7 @@ async fn build_templates(
                 .map(|(t, is)| {
                     t.to_client(
                         is.into_iter()
-                            .map(|i| (i.repository_id.and_then(|id| repos.get(&id)), i))
-                            .map(|(r, i)| i.to_client(r)),
+                            .filter_map(|i| repos.get(&i.repository_id).map(|r| i.to_client(r))),
                     )
                 })
                 .collect(),
@@ -554,9 +672,10 @@ async fn build_template_put(
             .returning(models::BuildTemplate::as_returning())
             .get_result::<models::BuildTemplate>(conn)
             .await?;
+
         let repos = (spec.inputs.iter())
             .filter_map(|(_, i)| i.try_as_repository_ref().map(|r| r.to_owned()))
-            .map(|r| models::Repository::from_spec(r.to_owned(), Uuid::now_v7(), now))
+            .map(|r| models::Repository::from_spec(&r.to_owned(), Uuid::now_v7(), now))
             .collect::<Vec<_>>();
         let repos = diesel::insert_into(schema::gorgond::repositories::table)
             .values(repos)
@@ -577,16 +696,18 @@ async fn build_template_put(
             .map_ok(|r| (r.id, r))
             .try_collect::<BTreeMap<Uuid, models::Repository>>()
             .await?;
+
         let inputs = diesel::insert_into(schema::gorgond::build_template_inputs::table)
             .values(
-                &(spec.inputs.into_iter())
-                    .map(|(k, i)| {
-                        let rid = i.try_as_repository_ref().and_then(|rs| {
-                            repos
-                                .values()
+                (spec.inputs.into_iter())
+                    .filter_map(|(k, i)| {
+                        i.try_as_repository_ref().and_then(|rs| {
+                            (repos.values())
                                 .find(|r| r.kind == rs.kind && r.ident == rs.ident)
-                                .map(|r| r.id)
-                        });
+                                .map(|r| (k, i.clone(), r.id))
+                        })
+                    })
+                    .map(|(k, i, rid)| {
                         models::BuildTemplateInput::from_spec(
                             &client::BuildTemplateInputSpec {
                                 key: k,
@@ -598,7 +719,7 @@ async fn build_template_put(
                             now,
                         )
                     })
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<models::BuildTemplateInput>>(),
             )
             .on_conflict((
                 schema::gorgond::build_template_inputs::template_id,
@@ -606,7 +727,6 @@ async fn build_template_put(
             ))
             .do_update()
             .set(excluded!(
-                schema::gorgond::build_template_inputs::source,
                 schema::gorgond::build_template_inputs::repository_id,
                 schema::gorgond::build_template_inputs::updated_at,
             ))
@@ -619,10 +739,8 @@ async fn build_template_put(
             .await?;
         Ok(JsonResponse(api::BuildTemplateResponse {
             template: template.to_client(
-                inputs
-                    .into_iter()
-                    .map(|i| (i.repository_id.and_then(|id| repos.get(&id)), i))
-                    .map(|(r, i)| i.to_client(r)),
+                (inputs.into_iter())
+                    .filter_map(|i| (repos.get(&i.repository_id).map(|r| i.to_client(r)))),
             ),
             project: project.to_client(),
         }))
@@ -799,11 +917,7 @@ async fn worker_internal_allocate_build(
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
-        use schema::gorgond::{
-            build_inputs, build_template_inputs as inputs, build_templates as templates, builds,
-            repositories as repos, repository_merge_request_versions as versions,
-            repository_merge_requests as merges, workers,
-        };
+        use schema::gorgond::{build_inputs, builds, workers};
         let now = Utc::now();
 
         // Resolve the worker slug to an ID, or create it if it doesn't exist.
@@ -862,104 +976,6 @@ async fn worker_internal_allocate_build(
                 .returning(models::Build::as_returning())
                 .get_result(conn)
                 .await?
-        } else if let Some((template_id, _)) = templates::table
-            .inner_join(inputs::table.on(templates::id.eq(inputs::template_id)))
-            .inner_join(repos::table.on(inputs::repository_id.assume_not_null().eq(repos::id)))
-            .filter(repos::storage.ne(""))
-            .inner_join(
-                merges::table
-                    .on((inputs::repository_id.assume_not_null()).eq(merges::repository_id)),
-            )
-            .inner_join(versions::table.on(merges::id.eq(versions::merge_request_id)))
-            .group_by(templates::id)
-            .select((templates::id, diesel::dsl::count_distinct(merges::id)))
-            .order((templates::id, diesel::dsl::count_distinct(merges::id)))
-            .first::<(Uuid, i64)>(conn)
-            .await
-            .optional()?
-            .filter(|(_, count)| *count > 0)
-        {
-            info!("Found a template, instantiating it...");
-
-            let inputs = inputs::table
-                .filter(inputs::template_id.eq(template_id))
-                // We can only do rollups for repos with storage.
-                .inner_join(repos::table.on(inputs::repository_id.assume_not_null().eq(repos::id)))
-                .filter(repos::storage.ne(""))
-                // This also cuts out merge requests without versions.
-                .inner_join(
-                    merges::table
-                        .on((inputs::repository_id.assume_not_null()).eq(merges::repository_id)),
-                )
-                .inner_join(versions::table.on(merges::id.eq(versions::merge_request_id)))
-                // Choose only the latest version for each merge request.
-                .distinct_on((inputs::id, merges::id))
-                .order((inputs::id, merges::id, versions::current_at.desc()))
-                .select((
-                    models::BuildTemplateInput::as_select(),
-                    models::RepositoryMergeRequest::as_select(),
-                    models::RepositoryMergeRequestVersion::as_select(),
-                ))
-                .load::<(
-                    models::BuildTemplateInput,
-                    models::RepositoryMergeRequest,
-                    models::RepositoryMergeRequestVersion,
-                )>(conn)
-                .await?;
-            let repos = repos::table
-                .filter(repos::id.eq_any(inputs.iter().map(|(_, merge, _)| merge.repository_id)))
-                .select(models::Repository::as_select())
-                .load::<models::Repository>(conn)
-                .await?;
-
-            let span = Span::current();
-            let token = state.token.child_token();
-            let _drop = token.clone().drop_guard();
-            tokio_rayon::spawn_fifo(move || {
-                repos.into_par_iter().try_for_each(|repo| {
-                    let _enter =
-                        info_span!(parent: &span, "repo", kind = repo.kind, ident = repo.ident)
-                            .entered();
-
-                    // Everything about this sucks.
-                    let mirror = Mirror::init_repo(&repo)?;
-                    let mut bases = BTreeMap::<String, SourceUrl>::new();
-                    let mut refs = BTreeMap::<String, SourceUrl>::new();
-                    for (_, m, v) in (inputs.iter())
-                        .filter(|(_, _, v)| v.commit_id.is_none())
-                        .filter(|(i, _, _)| i.repository_id == Some(repo.id))
-                    {
-                        match SourceUrl::parse(&m.base).context("Couldn't parse base")? {
-                            SourceUrl::Git(base) => bases.insert(
-                                format!(
-                                    "refs/gorgon/bases/{}{}/{}",
-                                    base.base_url.domain().ok_or(miette!("No domain in base"))?,
-                                    base.base_url.path(),
-                                    base.ref_.as_ref().ok_or(miette!("No ref= in base"))?,
-                                ),
-                                SourceUrl::Git(base),
-                            ),
-                        };
-                        refs.insert(
-                            format!("refs/gorgon/merges/{}/versions/{}", m.ident, v.ident),
-                            SourceUrl::parse(&v.source).context("Couldn't parse source")?,
-                        );
-                    }
-                    info_span!("bases")
-                        .in_scope(|| mirror.fetch_sources(&token, bases))
-                        .context("Couldn't fetch bases")?;
-                    info_span!("refs")
-                        .in_scope(|| mirror.fetch_sources(&token, refs))
-                        .context("Couldn't fetch refs")?;
-                    Ok::<_, miette::Report>(())
-                })
-            })
-            .await
-            .map_err(|err| api::ApiError::Git {
-                error: api::ApiError::wrap(&*err),
-            })?;
-
-            return Err(ApiError::NoWorkAvailable.into());
         } else {
             warn!("No work available!");
             return Err(ApiError::NoWorkAvailable.into());

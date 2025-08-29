@@ -1680,7 +1680,6 @@ dependencies = [
  "minicbor",
  "minicbor-io",
  "ownable",
- "rayon",
  "scoped-futures",
  "serde",
  "serde_json",
@@ -1688,7 +1687,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.11",
  "tokio",
- "tokio-rayon",
  "tokio-stream",
  "tokio-util",
  "tower-http 0.6.2",
@@ -1780,6 +1778,20 @@ dependencies = [
  "tracing-indicatif",
  "tracing-subscriber",
  "with_drop",
+]
+
+[[package]]
+name = "gorgond-work"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "gorgon-util-cli",
+ "gorgond-client",
+ "rayon",
+ "tokio",
+ "tracing",
+ "tracing-indicatif",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -5075,16 +5087,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "whoami",
-]
-
-[[package]]
-name = "tokio-rayon"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cf33a76e0b1dd03b778f83244137bd59887abf25c0e87bc3e7071105f457693"
-dependencies = [
- "rayon",
- "tokio",
 ]
 
 [[package]]

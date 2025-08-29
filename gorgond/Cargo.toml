@@ -44,8 +44,6 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 yoke = { workspace = true, features = ["derive"] }
-rayon = "1.10.0"
-tokio-rayon = "2.1.0"
 git2 = "0.20.2"
 tempfile.workspace = true
 tracing-indicatif = "0.3.12"

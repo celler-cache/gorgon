@@ -60,7 +60,6 @@ pub struct BuildTemplate<'a> {
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned, EnumTryAs)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildTemplateInputSource<'a> {
-    Url(Cow<'a, str>),
     Repository(#[serde(borrow)] RepositorySpec<'a>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
@@ -349,6 +348,37 @@ pub struct Repository<'a> {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct Commit<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub repository_id: Uuid,
+    #[serde(borrow)]
+    pub hash: Cow<'a, str>,
+
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
+pub struct CommitSource<'a> {
+    #[ownable(clone)]
+    pub id: Uuid,
+    #[ownable(clone)]
+    pub repository_id: Uuid,
+    #[ownable(clone)]
+    pub commit_id: Option<Uuid>,
+    #[serde(borrow)]
+    pub source: Cow<'a, str>,
+
+    #[ownable(clone)]
+    pub fetched_at: Option<DateTime<Utc>>,
+    #[ownable(clone)]
+    pub updated_at: DateTime<Utc>,
+    #[ownable(clone)]
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, Yokeable, ToOwned, IntoOwned)]
 pub struct RepositoryMergeRequestSpec<'a> {
     #[serde(borrow)]
@@ -370,6 +400,8 @@ pub struct RepositoryMergeRequest<'a> {
     pub repository_id: Uuid,
     #[serde(flatten, borrow)]
     pub spec: RepositoryMergeRequestSpec<'a>,
+    #[ownable(clone)]
+    pub base_id: Uuid,
 
     #[ownable(clone)]
     pub created_at: DateTime<Utc>,
@@ -392,10 +424,10 @@ pub struct RepositoryMergeRequestVersion<'a> {
     pub id: Uuid,
     #[ownable(clone)]
     pub merge_request_id: Uuid,
-    #[ownable(clone)]
-    pub commit_id: Option<Uuid>,
     #[serde(flatten, borrow)]
     pub spec: RepositoryMergeRequestVersionSpec<'a>,
+    #[ownable(clone)]
+    pub source_id: Uuid,
 
     #[ownable(clone)]
     pub created_at: DateTime<Utc>,
