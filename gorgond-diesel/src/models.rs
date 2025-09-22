@@ -551,7 +551,7 @@ impl Commit {
     Associations,
 )]
 #[diesel(table_name = crate::schema::gorgond::commit_sources, check_for_backend(diesel::pg::Pg))]
-#[diesel(belongs_to(Commit))]
+#[diesel(belongs_to(Repository), belongs_to(Commit))]
 pub struct CommitSource {
     pub id: Uuid,
     pub repository_id: Uuid,

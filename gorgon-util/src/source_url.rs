@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use url::{Position, Url};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -34,6 +36,17 @@ impl SourceUrl {
             f => Err(Error::UnknownFetcher(f.into())),
         }
     }
+    pub fn is_fixed(&self) -> bool {
+        match self {
+            Self::Git(v) => v.is_fixed(),
+        }
+    }
+}
+impl FromStr for SourceUrl {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,6 +76,15 @@ impl GitUrl {
             rev,
             ref_,
         })
+    }
+    pub fn is_fixed(&self) -> bool {
+        self.rev.is_some()
+    }
+}
+impl FromStr for GitUrl {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 

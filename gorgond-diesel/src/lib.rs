@@ -12,16 +12,17 @@ use diesel::{
     sql_types,
 };
 use diesel_async::{
-    AsyncConnection,
+    AsyncConnection, TransactionManager,
     pg::AsyncPgConnection,
     pooled_connection::{
-        AsyncDieselConnectionManager,
-        deadpool::{Hook, Pool},
+        AsyncDieselConnectionManager, PoolTransactionManager,
+        deadpool::{Hook, Object, Pool},
     },
 };
 use diesel_migrations::MigrationHarness;
 use futures::future::TryFutureExt;
 use miette::{Context, IntoDiagnostic, Result};
+use tokio::runtime::Runtime;
 use tracing::{debug, debug_span, error, error_span, info, instrument, trace, warn};
 
 pub type AsyncPgPool = Pool<AsyncPgConnection>;
@@ -35,6 +36,51 @@ define_sql_function! {
     ) -> sql_types::Text;
 }
 
+#[derive(Debug, miette::Diagnostic)]
+pub struct TransactionError(miette::Report);
+impl From<miette::Report> for TransactionError {
+    fn from(err: miette::Report) -> Self {
+        Self(err)
+    }
+}
+impl From<diesel::result::Error> for TransactionError {
+    fn from(err: diesel::result::Error) -> Self {
+        Self(miette::Report::from_err(err))
+    }
+}
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for TransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// Replicates the behaviour of `AsyncConnection::transaction()`, but without
+/// blocking the entire thread on an async closure.
+pub fn transaction<T, F: FnOnce(&mut AsyncPgConnection) -> Result<T>>(
+    rt: &Runtime,
+    conn: &mut Object<AsyncPgConnection>,
+    f: F,
+) -> Result<T> {
+    rt.block_on(PoolTransactionManager::begin_transaction(conn))
+        .into_diagnostic()
+        .context("Couldn't begin transaction")?;
+    match f(conn) {
+        Ok(v) => rt
+            .block_on(PoolTransactionManager::commit_transaction(conn))
+            .into_diagnostic()
+            .map(|_| v),
+        Err(err) => match rt.block_on(PoolTransactionManager::rollback_transaction(conn)) {
+            Ok(()) | Err(diesel::result::Error::BrokenTransactionManager) => Err(err),
+            Err(err) => Err(err).into_diagnostic(),
+        },
+    }
+}
+
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "db")]
 #[command(next_help_heading = "Database Connection")]
@@ -44,15 +90,11 @@ pub struct Args {
     db_url: String,
 }
 impl Args {
-    #[instrument(name = "db", level = "DEBUG", skip_all)]
-    pub async fn init(
-        &self,
-        migrations: impl MigrationSource<Pg> + Send + 'static,
-        schema: &'static str,
-    ) -> Result<Pool<AsyncPgConnection>> {
+    #[instrument(name = "connect", level = "DEBUG", skip_all)]
+    pub async fn connect(&self) -> Result<Pool<AsyncPgConnection>> {
         debug!(db_url = self.db_url, "Connecting to database...");
         let cfg = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&self.db_url);
-        let pool = Pool::builder(cfg)
+        Pool::builder(cfg)
             .post_create(Hook::sync_fn(|conn: &mut AsyncPgConnection, _| {
                 fn on_event<'a>(event: InstrumentationEvent<'a>) {
                     let _enter = error_span!("db").entered();
@@ -80,7 +122,16 @@ impl Args {
             }))
             .build()
             .into_diagnostic()
-            .context("Couldn't build database connection pool")?;
+            .context("Couldn't build database connection pool")
+    }
+
+    #[instrument(name = "db", level = "DEBUG", skip_all)]
+    pub async fn init(
+        &self,
+        migrations: impl MigrationSource<Pg> + Send + 'static,
+        schema: &'static str,
+    ) -> Result<Pool<AsyncPgConnection>> {
+        let pool = self.connect().await?;
         pool.get()
             .map_err(miette::Report::from_err)
             .and_then(|conn| migrate(conn, migrations, schema))

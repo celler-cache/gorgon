@@ -946,7 +946,7 @@ async fn worker_internal_allocate_build(
             worker_id
         };
 
-        // Try to find or create a build for the worker to do.
+        // Try to find a build for the worker to do.
         let build = if let Some(build) = models::Build::all()
             .filter(builds::result.is_null())
             .filter(builds::worker_id.eq(worker_id))

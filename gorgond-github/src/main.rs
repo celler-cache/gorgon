@@ -22,6 +22,10 @@ pub mod sync;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// Wrapper around a miette::Report, that also accepts a diesel::result::Error.
+///
+/// This is necessary because `transaction()` needs the closure to return an error type
+/// with `From<diesel::result::Error>`; there's nowhere to shove `into_diagnostic()`.
 #[derive(Debug, Display, miette::Diagnostic)]
 pub struct TransactionError(miette::Report);
 impl From<miette::Report> for TransactionError {

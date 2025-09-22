@@ -16,6 +16,7 @@ members = [
     "gorgond-client",
     "gorgond-diesel",
     "gorgond-github",
+    "gorgond-worker",
     "gorgon-github-events",
     "gorgon-rollup",
     "gorgon-util",
@@ -48,6 +49,7 @@ object_store = "0.12.0"
 ownable = "0.6.2"
 owo-colors = { version = "4.2.0", features = ["supports-colors"] }
 parking_lot = "0.12.3"
+rayon = "1.11.0"
 reqwest = "0.12.12"
 scoped-futures = "0.1.4"
 serde = "1.0.217"
@@ -61,7 +63,7 @@ terminal_size = "0.4.1"
 textwrap = { version = "0.16.2", features = ["terminal_size"] }
 thiserror = "2.0.11"
 tokio-stream = "0.1.17"
-tokio-util = "0.7.15"
+tokio-util = "0.7.16"
 tokio = { version = "1.43.0", features = ["parking_lot"] }
 tracing = "0.1.41"
 tracing-serde-structured = "0.4.0"

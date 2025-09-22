@@ -16,7 +16,6 @@ use miette::Result;
 use tracing::error_span;
 use tracing_indicatif::style::ProgressStyle;
 
-pub mod builds;
 pub mod events;
 pub mod run;
 
