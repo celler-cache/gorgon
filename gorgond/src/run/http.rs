@@ -63,6 +63,19 @@ pub async fn run(args: HttpArgs, state: S) -> miette::Result<()> {
     let span = Span::current();
     span.pb_set_style(&crate::PB_STYLE_BLANK);
 
+    debug!(http_addr = args.http_addr, "Binding HTTP listener...");
+    let listener = TcpListener::bind(&args.http_addr)
+        .await
+        .into_diagnostic()
+        .context("Couldn't bind socket")?;
+    let addr = listener
+        .local_addr()
+        .into_diagnostic()
+        .context("Couldn't get local address")?
+        .to_string();
+    span.pb_set_message(&addr);
+    info!("Running on: http://{addr}/");
+
     let token = state.token.clone();
     let app = Router::new()
         .route("/", get(root))
@@ -110,17 +123,6 @@ pub async fn run(args: HttpArgs, state: S) -> miette::Result<()> {
             ),
         )
         .with_state(state);
-
-    debug!(http_addr = args.http_addr, "Binding HTTP listener...");
-    let listener = TcpListener::bind(&args.http_addr)
-        .await
-        .into_diagnostic()
-        .context("Couldn't bind socket")?;
-    let addr = listener
-        .local_addr()
-        .into_diagnostic()
-        .context("Couldn't get local address")?;
-    info!("Running on: http://{}/", addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(token.cancelled_owned())
