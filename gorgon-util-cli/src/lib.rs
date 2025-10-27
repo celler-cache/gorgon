@@ -5,9 +5,10 @@
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    future::Future,
     io::Write,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use clap::Parser;
@@ -367,7 +368,7 @@ pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(args: Args, f
         Box::new(
             miette::MietteHandlerOpts::new()
                 .with_syntax_highlighting(miette::highlighters::SyntectHighlighter::default())
-                .context_lines(6)
+                .context_lines(100)
                 .build(),
         )
     }))
@@ -404,4 +405,23 @@ pub fn main<E: Into<miette::Report>, F: FnOnce() -> Result<(), E>>(args: Args, f
             std::process::exit(0);
         }
     }
+}
+
+pub fn tokio_rt() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name_fn({
+            static THREAD_ID: AtomicUsize = AtomicUsize::new(1);
+            move || format!("tokio-{:02}", THREAD_ID.fetch_add(1, Ordering::Relaxed))
+        })
+        .build()
+        .into_diagnostic()
+        .context("Couldn't init Tokio runtime")
+}
+
+pub fn main_async<E: Into<miette::Report>, F: Future<Output = Result<(), E>>>(args: Args, f: F) {
+    main(args, || -> Result<()> {
+        let rt = tokio_rt()?;
+        rt.block_on(f).map_err(|err| err.into())
+    })
 }

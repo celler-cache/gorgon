@@ -43,6 +43,10 @@ pub enum Model {
     CommitSource,
     RepositoryMergeRequest,
     RepositoryMergeRequestVersion,
+    Bisection,
+    BisectionCommit,
+    BisectionStep,
+    BisectionStepCommit,
     #[serde(untagged)]
     Unknown(String),
 }

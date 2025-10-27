@@ -38,6 +38,11 @@ define_sql_function! {
 
 #[derive(Debug, miette::Diagnostic)]
 pub struct TransactionError(miette::Report);
+impl TransactionError {
+    pub fn new<E: miette::Diagnostic + Send + Sync + 'static>(err: E) -> Self {
+        Self(miette::Report::new(err))
+    }
+}
 impl From<miette::Report> for TransactionError {
     fn from(err: miette::Report) -> Self {
         Self(err)

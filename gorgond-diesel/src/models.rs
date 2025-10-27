@@ -15,6 +15,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_derive_enum::DbEnum;
 use gorgond_client::{api, models as client};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use uuid::Uuid;
 use yoke::Yokeable;
 
@@ -515,6 +516,7 @@ impl Repository {
     }
 }
 
+#[serde_as]
 #[derive(
     Debug,
     Serialize,
@@ -531,6 +533,7 @@ impl Repository {
 pub struct Commit {
     pub id: Uuid,
     pub repository_id: Uuid,
+    #[serde_as(as = "serde_with::hex::Hex")]
     pub hash: Vec<u8>,
 
     pub created_at: DateTime<Utc>,
@@ -732,4 +735,108 @@ impl RepositoryMergeRequestVersion {
             updated_at: self.updated_at,
         }
     }
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::bisections)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repository, foreign_key = repository_id))]
+pub struct Bisection {
+    pub id: Uuid,
+    pub idempotency_hash: Vec<u8>,
+    pub repository_id: Option<Uuid>,
+
+    pub template_id: Option<Uuid>,
+    pub template_kind: String,
+    pub template_expr: String,
+
+    pub input_id: Option<Uuid>,
+    pub input_key: String,
+
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl Bisection {
+    gen_model!(bisections, Bisection);
+}
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::bisection_commits)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(primary_key(bisection_id, commit_id))]
+#[diesel(belongs_to(Bisection, foreign_key = bisection_id))]
+pub struct BisectionCommit {
+    pub bisection_id: Uuid,
+    pub commit_id: Uuid,
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::bisection_steps)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Bisection, foreign_key = bisection_id))]
+pub struct BisectionStep {
+    pub id: Uuid,
+    pub idempotency_hash: Vec<u8>,
+    pub bisection_id: Uuid,
+    pub commit_id: Option<Uuid>,
+    pub build_id: Option<Uuid>,
+    pub result: Option<BuildResult>,
+
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl BisectionStep {
+    gen_model!(bisection_steps, BisectionStep);
+}
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::bisection_step_commits)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(primary_key(step_id, commit_id))]
+#[diesel(belongs_to(BisectionStep, foreign_key = step_id))]
+pub struct BisectionStepCommit {
+    pub step_id: Uuid,
+    pub commit_id: Uuid,
 }

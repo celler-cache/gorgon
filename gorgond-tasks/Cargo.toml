@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2025 embr <git@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+[package]
+name = "gorgond-tasks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gorgon-util-cli = { path = "../gorgon-util-cli" }
+gorgond-diesel = { path = "../gorgond-diesel" }
+
+clap.workspace = true
+colored_json.workspace = true
+diesel-async.workspace = true
+diesel = { workspace = true, features = ["chrono", "uuid", "serde_json", "postgres_backend", "with-deprecated"] }
+futures.workspace = true
+itertools = "0.14.0"
+miette.workspace = true
+scoped-futures.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tracing.workspace = true
+uuid.workspace = true
+sha2 = "0.10.9"
+chrono.workspace = true

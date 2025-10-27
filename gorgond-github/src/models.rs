@@ -55,7 +55,7 @@ impl Repo {
     ) -> Result<Self> {
         Ok(Self {
             id: sign(&r.id).context("Invalid ID")?,
-            name: (r.full_name.clone()).ok_or(miette!("No Repository.full_name"))?,
+            name: (r.full_name.as_ref()).unwrap_or(&r.name).clone(),
             repository_id: None,
             polled_at: None,
             current_at: Some(current_at),

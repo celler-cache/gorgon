@@ -17,6 +17,7 @@ members = [
     "gorgond-diesel",
     "gorgond-github",
     "gorgond-worker",
+    "gorgond-tasks",
     "gorgon-github-events",
     "gorgon-rollup",
     "gorgon-util",
