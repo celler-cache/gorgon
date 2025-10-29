@@ -603,6 +603,96 @@ impl CommitSource {
     Insertable,
     Identifiable,
     Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::rollups, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Repository))]
+pub struct Rollup {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub idempotency_hash: Vec<u8>,
+
+    pub rolled_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+impl Rollup {
+    gen_model!(rollups, Rollup);
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::rollup_inputs)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(primary_key(rollup_id, commit_id))]
+#[diesel(belongs_to(Rollup), belongs_to(Commit))]
+pub struct RollupInput {
+    pub rollup_id: Uuid,
+    pub commit_id: Uuid,
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::rollup_batches, check_for_backend(diesel::pg::Pg))]
+#[diesel(belongs_to(Rollup))]
+pub struct RollupBatch {
+    pub id: Uuid,
+    pub rollup_id: Uuid,
+    pub commit_id: Uuid,
+
+    pub created_at: DateTime<Utc>,
+}
+impl RollupBatch {
+    gen_model!(rollup_batches, RollupBatch);
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
+)]
+#[diesel(table_name = crate::schema::gorgond::rollup_batch_inputs)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[diesel(primary_key(batch_id, commit_id))]
+#[diesel(belongs_to(RollupBatch, foreign_key = batch_id), belongs_to(Commit))]
+pub struct RollupBatchInput {
+    pub batch_id: Uuid,
+    pub commit_id: Uuid,
+}
+
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Yokeable,
+    Queryable,
+    Selectable,
+    Insertable,
+    Identifiable,
+    Associations,
     AsChangeset,
 )]
 #[diesel(table_name = crate::schema::gorgond::repository_merge_requests)]
@@ -750,11 +840,10 @@ impl RepositoryMergeRequestVersion {
 )]
 #[diesel(table_name = crate::schema::gorgond::bisections)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-#[diesel(belongs_to(Repository, foreign_key = repository_id))]
+#[diesel(belongs_to(Rollup, foreign_key = rollup_id))]
 pub struct Bisection {
     pub id: Uuid,
-    pub idempotency_hash: Vec<u8>,
-    pub repository_id: Option<Uuid>,
+    pub rollup_id: Uuid,
 
     pub template_id: Option<Uuid>,
     pub template_kind: String,
@@ -770,25 +859,6 @@ pub struct Bisection {
 }
 impl Bisection {
     gen_model!(bisections, Bisection);
-}
-#[derive(
-    Debug,
-    Serialize,
-    Deserialize,
-    Yokeable,
-    Queryable,
-    Selectable,
-    Insertable,
-    Identifiable,
-    Associations,
-)]
-#[diesel(table_name = crate::schema::gorgond::bisection_commits)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-#[diesel(primary_key(bisection_id, commit_id))]
-#[diesel(belongs_to(Bisection, foreign_key = bisection_id))]
-pub struct BisectionCommit {
-    pub bisection_id: Uuid,
-    pub commit_id: Uuid,
 }
 
 #[derive(
@@ -807,9 +877,8 @@ pub struct BisectionCommit {
 #[diesel(belongs_to(Bisection, foreign_key = bisection_id))]
 pub struct BisectionStep {
     pub id: Uuid,
-    pub idempotency_hash: Vec<u8>,
     pub bisection_id: Uuid,
-    pub commit_id: Option<Uuid>,
+    pub batch_id: Uuid,
     pub build_id: Option<Uuid>,
     pub result: Option<BuildResult>,
 

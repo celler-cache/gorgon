@@ -41,12 +41,12 @@ pub enum Model {
     Repository,
     Commit,
     CommitSource,
+    Rollup,
+    RollupBatch,
     RepositoryMergeRequest,
     RepositoryMergeRequestVersion,
     Bisection,
-    BisectionCommit,
     BisectionStep,
-    BisectionStepCommit,
     #[serde(untagged)]
     Unknown(String),
 }

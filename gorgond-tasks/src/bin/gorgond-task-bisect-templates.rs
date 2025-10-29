@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: EUPL-1.2
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::prelude::*;
 use clap::Parser;
@@ -126,20 +126,53 @@ async fn poll(_args: &Args, conn: &mut AsyncPgConnection) -> Result<(), Transact
         for (_, InputData { input, merges }) in inputs {
             info!(%input.id, input.key, merges = merges.len(), "--> Input...");
 
-            let mut commit_ids = merges.values().map(|m| m.commit.id).collect::<Vec<_>>();
-            commit_ids.sort();
-            commit_ids.dedup();
+            // The idempotency hash is a SHA256 of the UUIDs (not hashes) of the commits,
+            // in binary form, sorted and deduplicated.
+            let commit_ids: BTreeSet<Uuid> = merges.values().map(|m| m.commit.id).collect();
             let idempotency_hash = (commit_ids.iter())
-                .fold(Sha256::new(), |hash, id| hash.chain_update(id))
+                .fold(Sha256::new(), Sha256::chain_update)
                 .finalize()
                 .to_vec();
 
-            let bisection_id = Uuid::now_v7();
-            let bisection_id = diesel::insert_into(schema::bisections::table)
-                .values(models::Bisection {
-                    id: bisection_id,
+            // Create or reuse a rollup.
+            let rollup_id = Uuid::now_v7();
+            let rollup_id = diesel::insert_into(schema::rollups::table)
+                .values(models::Rollup {
+                    id: rollup_id,
+                    repository_id: input.repository_id,
                     idempotency_hash,
-                    repository_id: Some(input.repository_id),
+                    rolled_at: None,
+                    updated_at: now,
+                    created_at: now,
+                })
+                .on_conflict((
+                    schema::rollups::repository_id,
+                    schema::rollups::idempotency_hash,
+                ))
+                .do_nothing()
+                .returning(schema::rollups::id)
+                .get_result::<Uuid>(conn)
+                .await
+                .optional()?
+                .unwrap_or(rollup_id);
+            diesel::insert_into(schema::rollup_inputs::table)
+                .values(
+                    (commit_ids.into_iter())
+                        .map(|commit_id| models::RollupInput {
+                            rollup_id,
+                            commit_id,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await?;
+
+            // Then create a bisection job for the rollup.
+            diesel::insert_into(schema::bisections::table)
+                .values(models::Bisection {
+                    id: Uuid::now_v7(),
+                    rollup_id,
                     template_id: Some(input.template_id),
                     template_kind: template.kind.clone(),
                     template_expr: template.expr.clone(),
@@ -150,22 +183,7 @@ async fn poll(_args: &Args, conn: &mut AsyncPgConnection) -> Result<(), Transact
                     updated_at: now,
                     created_at: now,
                 })
-                .on_conflict(schema::bisections::idempotency_hash)
-                .do_nothing()
-                .returning(schema::bisections::id)
-                .get_result::<Uuid>(conn)
-                .await
-                .optional()?
-                .unwrap_or(bisection_id);
-            diesel::insert_into(schema::bisection_commits::table)
-                .values(
-                    (commit_ids.into_iter())
-                        .map(|commit_id| models::BisectionCommit {
-                            bisection_id,
-                            commit_id,
-                        })
-                        .collect::<Vec<_>>(),
-                )
+                .on_conflict_do_nothing()
                 .execute(conn)
                 .await?;
         }
