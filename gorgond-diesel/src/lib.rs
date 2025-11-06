@@ -7,6 +7,7 @@ pub mod schema;
 
 use std::error::Error as StdError;
 
+use derive_more::{Display, From};
 use diesel::{
     connection::InstrumentationEvent, define_sql_function, migration::MigrationSource, pg::Pg,
     sql_types,
@@ -36,31 +37,24 @@ define_sql_function! {
     ) -> sql_types::Text;
 }
 
-#[derive(Debug, miette::Diagnostic)]
-pub struct TransactionError(miette::Report);
+#[derive(Debug, Display, From, miette::Diagnostic)]
+pub enum TransactionError {
+    Any(miette::Report),
+    Diesel(diesel::result::Error),
+    Pool(diesel_async::pooled_connection::deadpool::PoolError),
+}
 impl TransactionError {
     pub fn new<E: miette::Diagnostic + Send + Sync + 'static>(err: E) -> Self {
-        Self(miette::Report::new(err))
-    }
-}
-impl From<miette::Report> for TransactionError {
-    fn from(err: miette::Report) -> Self {
-        Self(err)
-    }
-}
-impl From<diesel::result::Error> for TransactionError {
-    fn from(err: diesel::result::Error) -> Self {
-        Self(miette::Report::from_err(err))
-    }
-}
-impl std::fmt::Display for TransactionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        Self::Any(miette::Report::new(err))
     }
 }
 impl std::error::Error for TransactionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.source()
+        match self {
+            Self::Diesel(err) => err.source(),
+            Self::Pool(err) => err.source(),
+            Self::Any(err) => err.source(),
+        }
     }
 }
 

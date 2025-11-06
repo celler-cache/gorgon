@@ -50,6 +50,7 @@ object_store = "0.12.0"
 ownable = "0.6.2"
 owo-colors = { version = "4.2.0", features = ["supports-colors"] }
 parking_lot = "0.12.3"
+pretty_assertions = "1.4.1"
 rayon = "1.11.0"
 reqwest = "0.12.12"
 scoped-futures = "0.1.4"

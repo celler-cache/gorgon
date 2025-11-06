@@ -26,3 +26,4 @@ tracing.workspace = true
 uuid.workspace = true
 yoke = { workspace = true, features = ["derive"] }
 serde_with = { version = "3.15.1", features = ["hex"] }
+derive_more.workspace = true

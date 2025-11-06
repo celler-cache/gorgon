@@ -1663,6 +1663,7 @@ dependencies = [
  "textwrap",
  "tokio",
  "tracing",
+ "tracing-indicatif",
  "tracing-serde-structured",
  "tracing-subscriber",
 ]
@@ -1773,6 +1774,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
+ "derive_more",
  "diesel",
  "diesel-async",
  "diesel-derive-enum",
@@ -1826,22 +1828,31 @@ dependencies = [
 name = "gorgond-tasks"
 version = "0.1.0"
 dependencies = [
+ "backon",
  "chrono",
  "clap",
  "colored_json",
+ "derive_more",
  "diesel",
  "diesel-async",
+ "directories",
  "futures",
  "gorgon-util-cli",
  "gorgond-diesel",
+ "humantime",
  "itertools",
  "miette",
+ "rayon",
  "scoped-futures",
  "serde",
  "sha2",
  "thiserror 2.0.11",
  "tokio",
+ "tokio-util",
  "tracing",
+ "tracing-appender",
+ "tracing-indicatif",
+ "tracing-subscriber",
  "uuid",
 ]
 

@@ -11,18 +11,27 @@ edition = "2024"
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 gorgond-diesel = { path = "../gorgond-diesel" }
 
+backon.workspace = true
+chrono.workspace = true
 clap.workspace = true
 colored_json.workspace = true
+derive_more.workspace = true
 diesel-async.workspace = true
 diesel = { workspace = true, features = ["chrono", "uuid", "serde_json", "postgres_backend", "with-deprecated"] }
+directories = "6.0.0"
 futures.workspace = true
+humantime.workspace = true
 itertools = "0.14.0"
 miette.workspace = true
+rayon.workspace = true
 scoped-futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
+sha2 = "0.10.9"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+tokio-util.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }
+tracing-appender = { version = "0.2.3", features = ["parking_lot"] }
+tracing-indicatif.workspace = true
+tracing-subscriber.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-sha2 = "0.10.9"
-chrono.workspace = true

@@ -8,7 +8,10 @@ use std::{
     future::Future,
     io::Write,
     path::PathBuf,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        LazyLock,
+    },
 };
 
 use clap::Parser;
@@ -28,6 +31,36 @@ use miette::{miette, Context, IntoDiagnostic, Result};
 use parking_lot::RwLock;
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 use tracing::{debug, error, info, info_span, trace, warn, Span};
+use tracing_indicatif::style::ProgressStyle;
+
+pub static PB_STYLE_BLANK: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix} {span_name} {span_fields}",
+        "{wide_msg}",
+    ))
+    .unwrap()
+});
+pub static PB_STYLE_SPIN: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix}{spinner} {elapsed} {span_name} {span_fields}",
+        "{wide_msg}",
+    ))
+    .unwrap()
+});
+pub static PB_STYLE_BAR: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix}{spinner} {elapsed} {span_name} {span_fields}",
+        "{bar} {human_pos}/{human_len} {wide_msg}",
+    ))
+    .unwrap()
+});
+pub static PB_STYLE_BAR_ETA: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template(concat!(
+        "{span_child_prefix}{spinner} {elapsed} {span_name} {span_fields}",
+        "{bar} {human_pos}/{human_len} {wide_msg} ETA: {eta}",
+    ))
+    .unwrap()
+});
 
 #[derive(Clone)]
 struct EventLoggerTask {
