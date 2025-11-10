@@ -44,8 +44,6 @@ pub struct MergeData {
     pub version: models::RepositoryMergeRequestVersion,
     #[diesel(embed)]
     pub source: models::CommitSource,
-    #[diesel(embed)]
-    pub commit: models::Commit,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InputData {
@@ -112,10 +110,7 @@ impl TaskSource for BisectTemplateSource {
                         schema::commit_sources::table.on(schema::commit_sources::id
                             .eq(schema::repository_merge_request_versions::source_id
                                 .assume_not_null())),
-                    )
-                    .inner_join(schema::commits::table.on(
-                        schema::commits::id.eq(schema::commit_sources::commit_id.assume_not_null()),
-                    )),
+                    ),
             )
             .distinct_on(schema::repository_merge_request_versions::merge_request_id)
             // --
@@ -174,8 +169,8 @@ impl TaskSource for BisectTemplateSource {
 
                 // The idempotency hash is a SHA256 of the UUIDs (not hashes) of the commits,
                 // in binary form, sorted and deduplicated.
-                let commit_ids: BTreeSet<Uuid> = merges.values().map(|m| m.commit.id).collect();
-                let idempotency_hash = (commit_ids.iter())
+                let source_ids: BTreeSet<Uuid> = merges.values().map(|m| m.source.id).collect();
+                let source_hash = (source_ids.iter())
                     .fold(Sha256::new(), Sha256::chain_update)
                     .finalize()
                     .to_vec();
@@ -186,15 +181,12 @@ impl TaskSource for BisectTemplateSource {
                     .values(models::Rollup {
                         id: rollup_id,
                         repository_id: input.repository_id,
-                        idempotency_hash,
+                        source_hash,
                         rolled_at: None,
                         updated_at: now,
                         created_at: now,
                     })
-                    .on_conflict((
-                        schema::rollups::repository_id,
-                        schema::rollups::idempotency_hash,
-                    ))
+                    .on_conflict((schema::rollups::repository_id, schema::rollups::source_hash))
                     .do_nothing()
                     .returning(schema::rollups::id)
                     .get_result::<Uuid>(conn)
@@ -203,10 +195,10 @@ impl TaskSource for BisectTemplateSource {
                     .unwrap_or(rollup_id);
                 diesel::insert_into(schema::rollup_inputs::table)
                     .values(
-                        (commit_ids.into_iter())
-                            .map(|commit_id| models::RollupInput {
+                        (source_ids.into_iter())
+                            .map(|source_id| models::RollupInput {
                                 rollup_id,
-                                commit_id,
+                                source_id,
                             })
                             .collect::<Vec<_>>(),
                     )

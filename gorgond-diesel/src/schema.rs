@@ -195,9 +195,9 @@ pub mod gorgond {
     }
 
     diesel::table! {
-        gorgond.rollup_inputs (rollup_id, commit_id) {
+        gorgond.rollup_inputs (rollup_id, source_id) {
             rollup_id -> Uuid,
-            commit_id -> Uuid,
+            source_id -> Uuid,
         }
     }
 
@@ -205,7 +205,7 @@ pub mod gorgond {
         gorgond.rollups (id) {
             id -> Uuid,
             repository_id -> Uuid,
-            idempotency_hash -> Bytea,
+            source_hash -> Bytea,
             rolled_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
@@ -251,7 +251,7 @@ pub mod gorgond {
     diesel::joinable!(rollup_batch_inputs -> rollup_batches (batch_id));
     diesel::joinable!(rollup_batches -> commits (commit_id));
     diesel::joinable!(rollup_batches -> rollups (rollup_id));
-    diesel::joinable!(rollup_inputs -> commits (commit_id));
+    diesel::joinable!(rollup_inputs -> commit_sources (source_id));
     diesel::joinable!(rollup_inputs -> rollups (rollup_id));
     diesel::joinable!(rollups -> repositories (repository_id));
 

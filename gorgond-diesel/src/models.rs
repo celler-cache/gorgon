@@ -632,7 +632,7 @@ impl CommitSource {
 pub struct Rollup {
     pub id: Uuid,
     pub repository_id: Uuid,
-    pub idempotency_hash: Vec<u8>,
+    pub source_hash: Vec<u8>,
 
     pub rolled_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -656,11 +656,12 @@ impl Rollup {
 )]
 #[diesel(table_name = crate::schema::gorgond::rollup_inputs)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-#[diesel(primary_key(rollup_id, commit_id))]
-#[diesel(belongs_to(Rollup), belongs_to(Commit))]
+#[diesel(primary_key(rollup_id, source_id))]
+#[diesel(belongs_to(Rollup))]
+#[diesel(belongs_to(CommitSource, foreign_key = source_id))]
 pub struct RollupInput {
     pub rollup_id: Uuid,
-    pub commit_id: Uuid,
+    pub source_id: Uuid,
 }
 
 #[derive(

@@ -8,10 +8,10 @@ DROP TABLE rollups;
 ---
 
 CREATE TABLE rollups (
-    id                UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    repository_id     UUID  NOT NULL   REFERENCES repositories (id),
-    idempotency_hash  BYTEA NOT NULL   CHECK (idempotency_hash <> ''),
-    UNIQUE (repository_id, idempotency_hash),
+    id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    repository_id  UUID  NOT NULL   REFERENCES repositories (id),
+    source_hash    BYTEA NOT NULL   CHECK (source_hash <> ''),
+    UNIQUE (repository_id, source_hash),
 
     rolled_at   TIMESTAMPTZ,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -19,15 +19,15 @@ CREATE TABLE rollups (
 );
 CREATE TABLE rollup_inputs (
     rollup_id      UUID NOT NULL REFERENCES rollups (id) ON DELETE CASCADE,
-    commit_id      UUID NOT NULL REFERENCES commits (id) ON DELETE CASCADE,
-    PRIMARY KEY (rollup_id, commit_id)
+    source_id      UUID NOT NULL REFERENCES commit_sources (id) ON DELETE CASCADE,
+    PRIMARY KEY (rollup_id, source_id)
 );
 
 SELECT diesel_manage_updated_at('rollups');
 
 COMMENT ON TABLE rollups IS 'A set of commits "rolled up" into one or more merge commits.';
 COMMENT ON TABLE rollup_inputs IS 'Input commits to be included in this rollup.';
-COMMENT ON COLUMN rollups.idempotency_hash IS 'SHA256 of input commit UUIDs (sorted, binary).';
+COMMENT ON COLUMN rollups.source_hash IS 'SHA256 of input source UUIDs (sorted, binary).';
 COMMENT ON COLUMN rollups.rolled_at IS 'na-naa na-na-na nana-na-na katamari damacy';
 
 ---
