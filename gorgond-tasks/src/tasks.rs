@@ -23,6 +23,7 @@ use tracing::{
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 pub mod bisect_templates;
+pub mod repo_sync;
 
 pub enum TaskMode {
     NonBlocking,
@@ -31,6 +32,7 @@ pub enum TaskMode {
 
 pub struct TaskConfig {
     pub mode: TaskMode,
+    pub enabled: Option<bool>,
     pub interval: Duration,
 }
 
@@ -43,7 +45,7 @@ pub trait TaskSource: clap::Parser + Debug + Clone + Send + Sync {
     type Output: Display + Serialize + DeserializeOwned + Send + Sync;
 
     /// Returns the task's config.
-    fn config(&self) -> Option<TaskConfig>;
+    fn config(&self) -> TaskConfig;
 
     /// Finds a set of tasks for this worker to perform, locking them if applicable.
     fn find(
@@ -52,16 +54,18 @@ pub trait TaskSource: clap::Parser + Debug + Clone + Send + Sync {
     ) -> impl Future<Output = Result<impl IntoIterator<Item = Self::Task>, Self::Error>> + Send;
 
     /// Perform heavier work on a worker thread.
-    fn work(&self, task: Self::Task) -> Result<Self::Output, Self::Error>;
+    fn work(
+        &self,
+        token: &CancellationToken,
+        task: Self::Task,
+    ) -> Result<Self::Output, Self::Error>;
 
     /// Finish executing the task.
-    fn finish<D: IntoIterator<Item = Self::Output> + Send>(
+    fn finish(
         &self,
         conn: &mut AsyncPgConnection,
-        data: D,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send
-    where
-        D::IntoIter: Send;
+        data: Vec<Self::Output>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -73,10 +77,14 @@ pub enum TaskError<S: TaskSource + Debug> {
     Task(#[source] S::Error),
 }
 
-#[instrument(name = "work", skip_all, fields(task = %task))]
-fn pb_work<S: TaskSource>(span: &Span, src: &S, task: S::Task) -> Result<S::Output, TaskError<S>> {
+fn pb_work<S: TaskSource>(
+    span: &Span,
+    token: &CancellationToken,
+    src: &S,
+    task: S::Task,
+) -> Result<S::Output, TaskError<S>> {
     trace!("Working...");
-    src.work(task)
+    src.work(token, task)
         .map_err(TaskError::Task)
         .inspect(|_| span.pb_inc(1))
 }
@@ -84,16 +92,14 @@ fn pb_work<S: TaskSource>(span: &Span, src: &S, task: S::Task) -> Result<S::Outp
 #[instrument(skip_all)]
 async fn run<S: TaskSource + 'static>(
     src: &S,
+    token: &CancellationToken,
     conn: &mut AsyncPgConnection,
 ) -> Result<(), TaskError<S>> {
     let span = Span::current();
     span.pb_set_style(&gorgon_util_cli::PB_STYLE_SPIN);
 
-    // Skip disabled tasks...
-    let Some(cfg) = src.config() else {
-        debug!(task = S::ID, "Task is disabled, skipping...");
-        return Ok(());
-    };
+    let cfg = src.config();
+
     info!("Running...");
 
     // Find work to do.
@@ -103,7 +109,7 @@ async fn run<S: TaskSource + 'static>(
             .map(|it| it.into_iter().collect::<Vec<S::Task>>())
             .map_err(TaskError::Task)
     }
-    .instrument(info_span!("find"))
+    .instrument(info_span!(parent: &span, "find"))
     .await?;
 
     let num_tasks = tasks.len();
@@ -115,13 +121,13 @@ async fn run<S: TaskSource + 'static>(
         debug!(num_tasks, "Working...");
         match cfg.mode {
             TaskMode::NonBlocking => (tasks.into_iter())
-                .map(|t| pb_work(&span, src, t))
+                .map(|t| pb_work(&span, token, src, t))
                 .collect::<Result<Vec<_>, TaskError<S>>>(),
             TaskMode::BlockingHeavy => tokio::task::spawn_blocking({
-                let src = src.clone();
+                let (span, src, token) = (span.clone(), src.clone(), token.clone());
                 move || {
                     (tasks.into_par_iter())
-                        .map(|t| pb_work(&span, &src, t))
+                        .map(|t| pb_work(&span, &token, &src, t))
                         .collect::<Result<Vec<S::Output>, TaskError<S>>>()
                 }
             })
@@ -129,7 +135,7 @@ async fn run<S: TaskSource + 'static>(
             .map_err(TaskError::Join)?,
         }
     }
-    .instrument(info_span!("work"))
+    .instrument(info_span!(parent: &span, "work"))
     .await?;
 
     // Finalize it.
@@ -142,19 +148,15 @@ async fn run<S: TaskSource + 'static>(
     Ok(())
 }
 
-#[instrument(name = "task", skip_all, fields(kind = S::ID))]
-pub async fn run_loop<S: TaskSource + 'static>(
+async fn run_loop<S: TaskSource + 'static>(
+    span: Span,
     token: CancellationToken,
     pool: AsyncPgPool,
     src: S,
 ) {
-    Span::current().pb_set_style(&gorgon_util_cli::PB_STYLE_BLANK);
+    let cfg = src.config();
 
-    let Some(cfg) = src.config() else {
-        debug!("Task disabled; skipping...");
-        return;
-    };
-
+    // arrested for rust crimes
     let mut ticker = tokio::time::interval(cfg.interval.into());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     while async {
@@ -164,45 +166,83 @@ pub async fn run_loop<S: TaskSource + 'static>(
             .await
             .is_some()
     }
-    .instrument(error_span!("waiting", t = %cfg.interval))
+    .instrument(error_span!(parent: &span, "waiting", t = %cfg.interval))
     .await
     {
-        (async || -> Result<(), TransactionError> {
+        let name = S::FRIENDLY;
+        if let Err(err) = (async || -> miette::Result<()> {
             let mut conn = async {
                 debug!("Getting database connection...");
                 pool.get().await
             }
             .instrument(debug_span!("wait_for_connection"))
-            .await?;
+            .await
+            .map_err(TransactionError::from)?;
 
             conn.transaction(|conn| {
-                async { run(&src, conn).await.map_err(TransactionError::new) }.scope_boxed()
+                async { run(&src, &token, conn).await.map_err(TransactionError::new) }.scope_boxed()
             })
-            .await
+            .await?;
+
+            Ok(())
         })
         .retry(ExponentialBuilder::default())
         .sleep(tokio::time::sleep)
+        .when(|_| !token.is_cancelled())
         .notify(|err, d| {
-            let (t, d) = (S::FRIENDLY, Duration::from(d));
-            warn!("Task Failed ({t}) -- retrying in {d}...\n\n{err:?}");
+            let d = Duration::from(d);
+            warn!("Task Failed ({name}) -- retrying in {d}...\n\n{err:?}");
         })
         .await
-        .expect("Failed task not retried!?");
+        {
+            if !token.is_cancelled() {
+                warn!("Task Failed ({name}) -- going back to sleep...\n\n{err:?}");
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone, clap::Parser)]
-pub struct AllTasks {
+pub struct AllTaskArgs {
     #[command(flatten)]
     pub bisect_templates: bisect_templates::BisectTemplateSource,
+    #[command(flatten)]
+    pub repo_sync: repo_sync::RepoSyncTaskSource,
 }
-impl AllTasks {
+
+#[derive(Debug, Clone, clap::Parser)]
+#[command(next_help_heading = "Tasks")]
+pub struct TaskRunnerArgs {
+    /// Run all tasks, except those individiually disabled.
+    #[arg(long, short)]
+    pub all_tasks: bool,
+}
+impl TaskRunnerArgs {
     #[instrument(name = "tasks", skip_all)]
-    pub async fn run_all(self, token: &CancellationToken, pool: &AsyncPgPool) {
+    pub async fn run_all(self, token: &CancellationToken, pool: &AsyncPgPool, tasks: AllTaskArgs) {
         Span::current().pb_set_style(&gorgon_util_cli::PB_STYLE_BLANK);
 
-        let mut tasks = JoinSet::new();
-        tasks.spawn(run_loop(token.clone(), pool.clone(), self.bisect_templates));
-        while tasks.join_next().await.is_some() {}
+        let mut set = JoinSet::new();
+        self.spawn(&mut set, token, pool, tasks.bisect_templates);
+        self.spawn(&mut set, token, pool, tasks.repo_sync);
+        while set.join_next().await.is_some() {}
+    }
+
+    fn spawn<S: TaskSource + 'static>(
+        &self,
+        set: &mut JoinSet<()>,
+        token: &CancellationToken,
+        pool: &AsyncPgPool,
+        src: S,
+    ) {
+        let parent = Span::current();
+        let span = info_span!(parent: parent, "task", kind = S::ID);
+        span.pb_set_style(&gorgon_util_cli::PB_STYLE_BLANK);
+
+        if src.config().enabled.unwrap_or(self.all_tasks) {
+            set.spawn(run_loop(span.clone(), token.clone(), pool.clone(), src).instrument(span));
+        } else {
+            debug!("Skipping disabled task...");
+        }
     }
 }

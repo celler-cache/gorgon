@@ -15,6 +15,7 @@ use humantime::Duration;
 use miette::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
 
@@ -59,11 +60,12 @@ pub struct BisectTemplateTask {
 }
 
 #[derive(Debug, Clone, Parser)]
+#[command(next_help_heading = "Task: Bisect Templates")]
 pub struct BisectTemplateSource {
-    #[arg(long, default_value_t = true)]
-    pub bisect_templates: bool,
+    #[arg(long, default_missing_value = "true", num_args=0..=1)]
+    pub task_bisect_templates: Option<bool>,
     #[arg(long, default_value = "10s")]
-    pub bisect_templates_interval: Duration,
+    pub task_bisect_templates_interval: Duration,
 }
 impl TaskSource for BisectTemplateSource {
     const ID: &str = "BisectTemplates";
@@ -73,11 +75,12 @@ impl TaskSource for BisectTemplateSource {
     type Task = BisectTemplateTask;
     type Output = BisectTemplateTask;
 
-    fn config(&self) -> Option<TaskConfig> {
-        self.bisect_templates.then_some(TaskConfig {
+    fn config(&self) -> TaskConfig {
+        TaskConfig {
             mode: TaskMode::NonBlocking,
-            interval: self.bisect_templates_interval,
-        })
+            enabled: self.task_bisect_templates,
+            interval: self.task_bisect_templates_interval,
+        }
     }
 
     async fn find(
@@ -149,14 +152,18 @@ impl TaskSource for BisectTemplateSource {
             .map_err(|err| err.into())
     }
 
-    fn work(&self, task: Self::Task) -> Result<Self::Output, Self::Error> {
+    fn work(
+        &self,
+        _token: &CancellationToken,
+        task: Self::Task,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(task)
     }
 
-    async fn finish<D: IntoIterator<Item = Self::Output>>(
+    async fn finish(
         &self,
         conn: &mut AsyncPgConnection,
-        data: D,
+        data: Vec<Self::Output>,
     ) -> Result<(), Self::Error> {
         let now = Utc::now();
 

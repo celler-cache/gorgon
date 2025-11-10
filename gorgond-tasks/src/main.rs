@@ -11,7 +11,9 @@ use tracing_indicatif::style::ProgressStyle;
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     #[command(flatten)]
-    tasks: gorgond_tasks::tasks::AllTasks,
+    task_runner: gorgond_tasks::tasks::TaskRunnerArgs,
+    #[command(flatten)]
+    all_tasks: gorgond_tasks::tasks::AllTaskArgs,
 
     #[command(flatten)]
     db: gorgond_diesel::Args,
@@ -38,7 +40,9 @@ async fn run(args: Args) -> Result<()> {
     tokio::task::spawn(wait_for_ctrlc(token.clone()));
 
     let pool = args.db.connect().await?;
-    args.tasks.run_all(&token, &pool).await;
+    args.task_runner
+        .run_all(&token, &pool, args.all_tasks)
+        .await;
 
     Ok(())
 }

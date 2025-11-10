@@ -8,8 +8,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gorgon-util-cli = { path = "../gorgon-util-cli" }
+gorgond-client = { path = "../gorgond-client" }
 gorgond-diesel = { path = "../gorgond-diesel" }
+gorgon-util-cli = { path = "../gorgon-util-cli" }
+gorgon-util = { path = "../gorgon-util", features = ["source_url"] }
 
 backon.workspace = true
 chrono.workspace = true
@@ -20,6 +22,7 @@ diesel-async.workspace = true
 diesel = { workspace = true, features = ["chrono", "uuid", "serde_json", "postgres_backend", "with-deprecated"] }
 directories = "6.0.0"
 futures.workspace = true
+git2 = "0.20.2"
 humantime.workspace = true
 itertools = "0.14.0"
 miette.workspace = true
@@ -34,4 +37,7 @@ tracing-appender = { version = "0.2.3", features = ["parking_lot"] }
 tracing-indicatif.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
+url.workspace = true
 uuid.workspace = true
+hex = "0.4.3"
+serde_with = "3.15.1"
