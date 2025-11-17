@@ -39,6 +39,15 @@ pub enum HelperError {
     Exit(HelperExitError),
 }
 
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("Helper '{_0}' has no stdin")]
+#[diagnostic(help(
+    "{} {}",
+    "If you're seeing this, you've found a bug.",
+    "Child was most likely started without piping stdin, or the handle was claimed twice.",
+))]
+pub struct HelperNoStdin(String);
+
 impl HelperError {
     fn fmt_find_binary(
         name: &String,
@@ -383,6 +392,12 @@ impl Helper {
 }
 
 impl HelperChild<'_> {
+    pub fn take_stdin(&mut self) -> Result<std::process::ChildStdin, HelperNoStdin> {
+        (self.child.stdin)
+            .take()
+            .ok_or_else(|| HelperNoStdin(self.helper.name().to_string()))
+    }
+
     pub fn wait_checked(self) -> Result<Output> {
         let output = self.child.wait_with_output().map_err(HelperError::Start)?;
         match output.status {

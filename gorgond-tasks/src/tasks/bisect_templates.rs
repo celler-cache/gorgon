@@ -10,6 +10,7 @@ use derive_more::Display;
 use diesel::prelude::*;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::TryStreamExt;
+use gorgon_build_helper::helper::HelperCaller;
 use gorgond_diesel::{TransactionError, models, schema::gorgond as schema};
 use humantime::Duration;
 use miette::Result;
@@ -81,6 +82,11 @@ impl TaskSource for BisectTemplateSource {
         }
     }
 
+    type Context = ();
+    fn init(&self, _helpers: &impl HelperCaller) -> miette::Result<Self::Context> {
+        Ok(())
+    }
+
     async fn find(
         &self,
         conn: &mut AsyncPgConnection,
@@ -100,7 +106,9 @@ impl TaskSource for BisectTemplateSource {
             .inner_join(
                 schema::repository_merge_requests::table
                     .on(schema::repository_merge_requests::repository_id
-                        .eq(schema::build_template_inputs::repository_id))
+                        .eq(schema::build_template_inputs::repository_id)
+                        // Only open MRs.
+                        .and(schema::repository_merge_requests::closed_at.is_null()))
                     .inner_join(
                         schema::repository_merge_request_versions::table
                             .on(schema::repository_merge_request_versions::merge_request_id
@@ -150,6 +158,7 @@ impl TaskSource for BisectTemplateSource {
     fn work(
         &self,
         _token: &CancellationToken,
+        _ctx: &Self::Context,
         task: Self::Task,
     ) -> Result<Self::Output, Self::Error> {
         Ok(task)

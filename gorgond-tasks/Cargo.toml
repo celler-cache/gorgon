@@ -12,6 +12,7 @@ gorgond-client = { path = "../gorgond-client" }
 gorgond-diesel = { path = "../gorgond-diesel" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
 gorgon-util = { path = "../gorgon-util", features = ["source_url"] }
+gorgon-build-helper = { path = "../gorgon-build-helper" }
 
 backon.workspace = true
 chrono.workspace = true
@@ -41,3 +42,4 @@ url.workspace = true
 uuid.workspace = true
 hex = "0.4.3"
 serde_with = "3.15.1"
+conflate = "0.3.3"

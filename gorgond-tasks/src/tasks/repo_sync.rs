@@ -5,6 +5,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Display,
+    io::Write,
     path::PathBuf,
     time::Instant,
 };
@@ -12,19 +13,21 @@ use std::{
 use chrono::{TimeDelta, prelude::*};
 use clap::Parser;
 use derive_more::Display;
-use diesel::{prelude::*, sql_query, upsert::excluded};
+use diesel::{prelude::*, sql_query, sql_types, upsert::excluded};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::TryStreamExt;
 use git2::{Direction, Remote, RemoteCallbacks, Repository, RepositoryInitOptions};
+use gorgon_build_helper::helper::{Helper, HelperCaller, HelperError, HelperNoStdin};
 use gorgon_util::source_url::{GitUrl, SourceUrl};
 use gorgond_client::Uuid;
-use gorgond_diesel::{TransactionError, models, schema};
+use gorgond_diesel::{TransactionError, models, schema::gorgond as schema};
 use humantime::Duration;
+use itertools::Itertools;
 use miette::Context;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, debug, error_span, info, info_span, instrument, trace, warn};
+use tracing::{Span, debug, error, error_span, info, info_span, instrument, trace, warn};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use url::{Position, Url};
 
@@ -39,9 +42,14 @@ pub enum Error {
     #[error(transparent)]
     Diesel(#[from] diesel::result::Error),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Git(#[from] GitError),
     #[error(transparent)]
+    #[diagnostic(transparent)]
     Remote(#[from] RemoteError),
+    #[error("Rollup failed: {_0}")]
+    #[diagnostic(forward(1))]
+    Rollup(Uuid, #[source] RollupError),
 
     #[error("Remote '{REMOTE_STORAGE}' error")]
     #[diagnostic(
@@ -56,13 +64,6 @@ pub enum Error {
 
     #[error("Ref '{_0}' does not refer to an object?")]
     RefNoTarget(String),
-
-    #[error("Skipping remote...")]
-    #[diagnostic(severity = "warning")]
-    WarnSkippingRemote(#[source] RemoteError),
-    #[error("Skipping unresolved ref: {_0}")]
-    #[diagnostic(severity = "warning")]
-    WarnUnresolvedRef(String),
 }
 impl From<Error> for TransactionError {
     fn from(err: Error) -> Self {
@@ -73,17 +74,65 @@ impl From<Error> for TransactionError {
     }
 }
 
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum Warn {
+    #[error("Skipping remote...")]
+    #[diagnostic(severity = "warning")]
+    SkippingRemote(#[source] RemoteError),
+    #[error("Skipping unresolved ref: {_0}")]
+    #[diagnostic(severity = "warning")]
+    UnresolvedRef(String),
+
+    #[error("Removing unresolved commit source from rollup {_0}: {_1}")]
+    #[diagnostic(severity = "warning")]
+    RemovingUnresolvedRollupInput(Uuid, Uuid),
+    #[error("Skipping rollup with no (resolvable) inputs: {_0}")]
+    #[diagnostic(severity = "warning")]
+    RemovingEmptyRollup(Uuid),
+}
+
+fn log_err_ref(err: &miette::Report) {
+    match err.severity().unwrap_or(miette::Severity::Error) {
+        miette::Severity::Error => error!("\n{err:?}"),
+        miette::Severity::Warning => info!("\n{err:?}"),
+        miette::Severity::Advice => info!("\n{err:?}"),
+    }
+}
+fn log_err(err: impl Into<miette::Report>) {
+    log_err_ref(&err.into());
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoSyncContext {
+    pub gorgon_rollup_path: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PendingRollup {
+    pub rollup: models::Rollup,
+    pub inputs: Vec<models::RollupInput>,
+}
 #[derive(Debug, Display, Serialize, Deserialize)]
 #[display("{}", repo.id)]
 pub struct RepoSyncTask {
     pub repo: models::Repository,
     pub sources: BTreeMap<Uuid, models::CommitSource>,
+    pub rollups: BTreeMap<Uuid, PendingRollup>,
 }
 
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResolvedRollup {
+    pub rollup: models::Rollup,
+    #[serde_as(as = "BTreeMap<DisplayFromStr, BTreeSet<DisplayFromStr>>")]
+    pub resolved_batches: BTreeMap<git2::Oid, BTreeSet<git2::Oid>>,
+    pub rejected_sources: BTreeSet<Uuid>,
+}
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResolvedCommit {
     pub commit: models::Commit,
-    pub sources: Vec<models::CommitSource>,
+    pub sources: BTreeMap<Uuid, models::CommitSource>,
 }
 #[serde_as]
 #[derive(Debug, Display, Serialize, Deserialize)]
@@ -92,6 +141,8 @@ pub struct RepoSyncOutput {
     pub repo: models::Repository,
     #[serde_as(as = "BTreeMap<DisplayFromStr, _>")]
     pub resolved_commits: BTreeMap<git2::Oid, ResolvedCommit>,
+    pub resolved_rollups: BTreeMap<Uuid, ResolvedRollup>,
+    pub rejected_rollups: BTreeSet<Uuid>,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -120,32 +171,98 @@ impl TaskSource for RepoSyncTaskSource {
         }
     }
 
+    type Context = RepoSyncContext;
+    fn init(&self, helpers: &impl HelperCaller) -> miette::Result<Self::Context> {
+        Ok(RepoSyncContext {
+            gorgon_rollup_path: helpers.path("gorgon-rollup")?,
+        })
+    }
+
     async fn find(
         &self,
         conn: &mut AsyncPgConnection,
     ) -> Result<impl IntoIterator<Item = Self::Task>, Self::Error> {
-        sql_query(concat!(
-            "SELECT * FROM gorgond.repositories AS r",
-            "  LEFT JOIN gorgond.commit_sources AS cs ON (cs.repository_id = r.id)",
-            // "LEFT JOIN gorgond.rollups AS rl ON (rl.repository_id = r.id AND rl.rolled_at IS NULL)",
-            "  WHERE cs.id IS NOT NULL", // OR rl.id IS NOT NULL
+        #[derive(Debug, QueryableByName)]
+        #[diesel(check_for_backend(diesel::pg::Pg))]
+        struct Row {
+            #[diesel(sql_type = sql_types::Uuid)]
+            repo_id: Uuid,
+            #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+            source_id: Option<Uuid>,
+            #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+            rollup_id: Option<Uuid>,
+        }
+        // Find repositories...
+        let rows = sql_query(concat!(
+            "SELECT r.id AS repo_id, cs.id AS source_id, rl.id AS rollup_id",
+            "  FROM gorgond.repositories AS r",
+            // ...that have commit sources... (TODO: Select only stale or unresolved ones)
+            "  LEFT JOIN gorgond.commit_sources AS cs ",
+            "    ON (cs.repository_id = r.id)",
+            // ...or unrolled rollups... (TODO: Remember to include sources)
+            "  LEFT JOIN gorgond.rollups AS rl ",
+            "    ON (rl.repository_id = r.id AND rl.rolled_at IS NULL)",
+            // ...skip rows that were joined with nothing...
+            "  WHERE r.storage <> ''",
+            "    AND (cs.id IS NOT NULL OR rl.id IS NOT NULL)",
+            // ...and lock the repository, skipping ones already locked.
+            //
+            // This is the part where we need to drop down to raw SQL - Diesel has no DSL
+            // to add `OF <target>` to a lock, which is needed when doing outer joins.
             "  FOR NO KEY UPDATE OF r SKIP LOCKED",
         ))
-        .load_stream::<(models::Repository, Option<models::CommitSource>)>(conn)
-        .await?
-        .try_fold(BTreeMap::new(), async |mut tasks, (repo, src)| {
-            let task = (tasks.entry(repo.id)).or_insert_with(|| RepoSyncTask {
-                repo,
-                sources: BTreeMap::new(),
-            });
-            if let Some(src) = src {
-                task.sources.entry(src.id).or_insert(src);
-            }
-            Ok(tasks)
-        })
-        .await
-        .map(|v| v.into_values())
-        .map_err(|err| err.into())
+        .get_results::<Row>(conn)
+        .await?;
+
+        let repos = schema::repositories::table
+            .filter(schema::repositories::id.eq_any(rows.iter().map(|r| r.repo_id)))
+            .load_stream::<models::Repository>(conn)
+            .await?
+            .try_fold(BTreeMap::new(), async |mut repos, repo| {
+                repos.insert(
+                    repo.id,
+                    RepoSyncTask {
+                        repo,
+                        sources: Default::default(),
+                        rollups: Default::default(),
+                    },
+                );
+                Ok(repos)
+            })
+            .await?;
+        let repos = schema::commit_sources::table
+            .filter(schema::commit_sources::id.eq_any(rows.iter().filter_map(|r| r.source_id)))
+            .load_stream::<models::CommitSource>(conn)
+            .await?
+            .try_fold(repos, async |mut repos, src| {
+                let repo = repos.get_mut(&src.repository_id).unwrap();
+                repo.sources.insert(src.id, src);
+                Ok(repos)
+            })
+            .await?;
+        let repos = schema::rollups::table
+            .filter(schema::rollups::id.eq_any(rows.iter().filter_map(|r| r.rollup_id)))
+            .inner_join(
+                schema::rollup_inputs::table
+                    .on(schema::rollup_inputs::rollup_id.eq(schema::rollups::id)),
+            )
+            .load_stream::<(models::Rollup, models::RollupInput)>(conn)
+            .await?
+            .try_fold(repos, async |mut repos, (rollup, input)| {
+                let repo = repos.get_mut(&rollup.repository_id).unwrap();
+                repo.rollups
+                    .entry(rollup.id)
+                    .or_insert_with(|| PendingRollup {
+                        rollup,
+                        inputs: Default::default(),
+                    })
+                    .inputs
+                    .push(input);
+                Ok(repos)
+            })
+            .await?;
+
+        Ok(repos.into_values())
     }
 
     async fn finish(
@@ -153,58 +270,13 @@ impl TaskSource for RepoSyncTaskSource {
         conn: &mut AsyncPgConnection,
         data: Vec<Self::Output>,
     ) -> Result<(), Self::Error> {
-        let mut commits = BTreeMap::new();
-        for mut out in data {
-            commits.append(&mut out.resolved_commits);
-        }
+        let now = Utc::now();
+        let mut repos = (data.into_iter())
+            .map(|d| (d.repo.id, d))
+            .collect::<BTreeMap<Uuid, Self::Output>>();
 
-        // Insert commits, update source references.
-        let commits = diesel::insert_into(schema::gorgond::commits::table)
-            .values(
-                (commits.values())
-                    .by_ref()
-                    .map(|v| &v.commit)
-                    .collect::<Vec<&models::Commit>>(),
-            )
-            .on_conflict((
-                schema::gorgond::commits::repository_id,
-                schema::gorgond::commits::hash,
-            ))
-            .do_nothing()
-            .returning(models::Commit::as_returning())
-            .load_stream(conn)
-            .await?
-            .map_err(Error::from)
-            .try_fold(commits, async |mut commits, commit| -> Result<_, Error> {
-                let oid = git2::Oid::from_bytes(&commit.hash).into_git_error("")?;
-                let entry = commits.get_mut(&oid).unwrap();
-                entry.commit.id = commit.id;
-                for src in entry.sources.iter_mut() {
-                    src.commit_id = Some(commit.id);
-                }
-                Ok(commits)
-            })
-            .await?;
-
-        // Update sources.
-        diesel::insert_into(schema::gorgond::commit_sources::table)
-            .values(
-                commits
-                    .into_values()
-                    .flat_map(|v| v.sources)
-                    .collect::<Vec<models::CommitSource>>(),
-            )
-            .on_conflict((
-                schema::gorgond::commit_sources::repository_id,
-                schema::gorgond::commit_sources::source,
-            ))
-            .do_update()
-            .set(
-                schema::gorgond::commit_sources::commit_id
-                    .eq(excluded(schema::gorgond::commit_sources::commit_id)),
-            )
-            .execute(conn)
-            .await?;
+        save_commits(conn, &mut repos, now).await?;
+        save_rollups(conn, &mut repos, now).await?;
 
         Ok(())
     }
@@ -212,19 +284,24 @@ impl TaskSource for RepoSyncTaskSource {
     fn work(
         &self,
         token: &CancellationToken,
-        task: Self::Task,
+        ctx: &RepoSyncContext,
+        RepoSyncTask {
+            repo,
+            sources,
+            rollups,
+        }: Self::Task,
     ) -> Result<Self::Output, Self::Error> {
         let now = Utc::now();
 
         let mut remotes = BTreeMap::<Url, RemoteWork>::new();
-        let mut refs = BTreeMap::<String, models::CommitSource>::new();
-        for source in task.sources.into_values() {
+        let mut ref_to_src = BTreeMap::<String, models::CommitSource>::new();
+        for source in sources.into_values() {
             let _enter = info_span!("source", id = %source.id, url = source.source).entered();
 
             // Skip invalid sources.
             let Ok(src) = SourceUrl::parse(&source.source)
                 .context("Invalid Source URL")
-                .inspect_err(|err| warn!("\n{err:?}"))
+                .inspect_err(log_err_ref)
             else {
                 continue;
             };
@@ -246,12 +323,12 @@ impl TaskSource for RepoSyncTaskSource {
                 .or_default()
                 .add_source(&src)?;
             if let Some(ref_) = ref_ {
-                refs.insert(ref_, source);
+                ref_to_src.insert(ref_, source);
             }
         }
 
         // Do the mucking about with the git repo.
-        let r = RepoWrapper::init_for_repo(&task.repo)?;
+        let r = RepoWrapper::init_for_repo(&repo)?;
         let mut storage = r.storage_remote()?;
 
         // First, try to fetch cached refs from storage. For floating refs, this lets us
@@ -259,7 +336,7 @@ impl TaskSource for RepoSyncTaskSource {
         // entire history from the remote as well, which is quite slow with large repos.
         info!("Fetching cached refs from storage...");
         r.with_remote(token, &mut storage, Direction::Fetch, |storage| {
-            r.fetch(token, storage, refs.keys().map(|r| (r, r)))
+            r.fetch(token, storage, ref_to_src.keys().map(|r| (r, r)))
         })?;
 
         // Then fetch up-to-date refs from remotes.
@@ -278,10 +355,7 @@ impl TaskSource for RepoSyncTaskSource {
                     |remote| r.fetch(token, remote, &task.refs_from_git),
                 ) {
                     Ok(_) => {}
-                    Err(err @ RemoteError(_, _, RemoteErrorKind::Connect(_))) => {
-                        let err = miette::Report::new(Error::WarnSkippingRemote(err));
-                        warn!("\n{err:?}");
-                    }
+                    Err(err @ RemoteError(_, _, RemoteErrorKind::Connect(_))) => log_err(err),
                     Err(err) => return Err(err.into()),
                 };
             }
@@ -289,43 +363,287 @@ impl TaskSource for RepoSyncTaskSource {
 
         // Resolve refs to commit OIDs.
         info!("Resolving refs...");
-        let mut output = RepoSyncOutput {
-            repo: task.repo,
-            resolved_commits: BTreeMap::new(),
-        };
-        let mut local_refs = BTreeSet::<String>::new();
-        for (ref_, src) in refs {
+        let mut resolved_sources = BTreeMap::<Uuid, git2::Oid>::new();
+        let mut resolved_commits = BTreeMap::<git2::Oid, ResolvedCommit>::new();
+        let mut refs_to_push = BTreeSet::<String>::new();
+        for (ref_, src) in ref_to_src {
             // Unresolved refs happen, just warn about it (and don't try to push them).
             let Some(oid) = r.resolve(&ref_)? else {
-                let err = miette::Report::new(Error::WarnUnresolvedRef(ref_.clone()));
-                warn!("\n{err}");
+                log_err(Warn::UnresolvedRef(ref_.clone()));
                 continue;
             };
-            local_refs.insert(ref_);
 
-            // Map it to the output.
-            (output.resolved_commits)
-                .entry(oid)
+            refs_to_push.insert(ref_);
+            resolved_sources.insert(src.id, oid);
+            (resolved_commits.entry(oid))
                 .or_insert_with(|| ResolvedCommit {
                     commit: models::Commit {
                         id: Uuid::now_v7(),
-                        repository_id: output.repo.id,
+                        repository_id: repo.id,
                         hash: oid.as_bytes().to_vec(),
                         created_at: now,
                     },
-                    sources: Vec::new(),
+                    sources: BTreeMap::new(),
                 })
                 .sources
-                .push(src);
+                .insert(src.id, src);
+        }
+
+        // Kick off rollups.
+        let (mut resolved_rollups, mut rejected_rollups) = (BTreeMap::new(), BTreeSet::new());
+        if let Some(num_rollups) = Some(rollups.len()).filter(|n| *n > 0) {
+            let span = info_span!("rollups").entered();
+            span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR_ETA);
+            span.pb_set_length(num_rollups as u64);
+            info!(num = num_rollups, "Creating rollups...");
+
+            for (_, pr) in rollups {
+                let id = pr.rollup.id;
+                match resolve_rollup(ctx, &r, &resolved_sources, pr)
+                    .with_context(|| format!("Couldn't resolve rollup: {id}"))
+                {
+                    Ok(Some(rr)) => {
+                        resolved_rollups.insert(id, rr);
+                    }
+                    Ok(None) => {
+                        rejected_rollups.insert(id);
+                    }
+                    Err(err) => log_err(err),
+                }
+                span.pb_inc(1);
+            }
         }
 
         info!("Pushing local refs to storage...");
         r.with_remote(token, &mut storage, Direction::Push, |storage| {
-            r.push(token, storage, local_refs)
+            r.push(token, storage, refs_to_push)
         })?;
 
-        Ok(output)
+        Ok(RepoSyncOutput {
+            repo,
+            resolved_commits,
+            resolved_rollups,
+            rejected_rollups,
+        })
     }
+}
+
+async fn save_commits(
+    conn: &mut AsyncPgConnection,
+    repos: &mut BTreeMap<Uuid, RepoSyncOutput>,
+    _now: DateTime<Utc>,
+) -> Result<(), Error> {
+    // Insert commits, retrieving the actual IDs.
+    diesel::insert_into(schema::commits::table)
+        .values(
+            (repos.values())
+                .flat_map(|d| d.resolved_commits.values())
+                .map(|rc| &rc.commit)
+                .collect::<Vec<&models::Commit>>(),
+        )
+        .on_conflict((schema::commits::repository_id, schema::commits::hash))
+        .do_update()
+        .set(schema::commits::created_at.eq(schema::commits::created_at))
+        .returning(models::Commit::as_returning())
+        .load_stream(conn)
+        .await?
+        .map_err(Error::from)
+        .try_fold(&mut *repos, async |repos, commit| -> Result<_, Error> {
+            let oid = git2::Oid::from_bytes(&commit.hash).into_git_error("")?;
+            if let Some(repo) = repos.get_mut(&commit.repository_id) {
+                if let Some(rc) = repo.resolved_commits.get_mut(&oid) {
+                    rc.commit = commit;
+                    for src in rc.sources.values_mut() {
+                        src.commit_id = Some(rc.commit.id);
+                    }
+                }
+            }
+            Ok(repos)
+        })
+        .await?;
+
+    // Upsert commit sources.
+    diesel::insert_into(schema::commit_sources::table)
+        .values(
+            (repos.values())
+                .flat_map(|d| d.resolved_commits.values())
+                .flat_map(|rc| rc.sources.values())
+                .collect::<Vec<&models::CommitSource>>(),
+        )
+        .on_conflict((
+            schema::commit_sources::repository_id,
+            schema::commit_sources::source,
+        ))
+        .do_update()
+        .set(schema::commit_sources::commit_id.eq(excluded(schema::commit_sources::commit_id)))
+        .execute(conn)
+        .await?;
+
+    Ok(())
+}
+
+async fn save_rollups(
+    conn: &mut AsyncPgConnection,
+    repos: &mut BTreeMap<Uuid, RepoSyncOutput>,
+    now: DateTime<Utc>,
+) -> Result<(), Error> {
+    let (mut batches, mut batch_inputs) = (Vec::new(), Vec::new());
+    for r in repos.values_mut() {
+        for rr in r.resolved_rollups.values_mut() {
+            rr.rollup.rolled_at = Some(now);
+            for (rc, inputs) in (rr.resolved_batches.iter())
+                .filter_map(|(oid, is)| r.resolved_commits.get(oid).map(|c| (c, is)))
+            {
+                let batch = models::RollupBatch {
+                    id: Uuid::now_v7(),
+                    rollup_id: rr.rollup.id,
+                    commit_id: rc.commit.id,
+                    created_at: now,
+                };
+                for rc in inputs.iter().filter_map(|oid| r.resolved_commits.get(oid)) {
+                    batch_inputs.push(models::RollupBatchInput {
+                        batch_id: batch.id,
+                        commit_id: rc.commit.id,
+                    });
+                }
+                batches.push(batch);
+            }
+        }
+    }
+
+    // Create rollup batches and inputs.
+    diesel::insert_into(schema::rollup_batches::table)
+        .values(batches)
+        .execute(conn)
+        .await?;
+    diesel::insert_into(schema::rollup_batch_inputs::table)
+        .values(batch_inputs)
+        .execute(conn)
+        .await?;
+
+    // Delete rejected rollups and inputs.
+    diesel::delete(schema::rollups::table)
+        .filter(schema::rollups::id.eq_any(repos.values().flat_map(|r| &r.rejected_rollups)))
+        .execute(conn)
+        .await?;
+    for rr in (repos.values())
+        .flat_map(|r| r.resolved_rollups.values())
+        .filter(|rr| !rr.rejected_sources.is_empty())
+    {
+        diesel::delete(schema::rollup_inputs::table)
+            .filter(schema::rollup_inputs::rollup_id.eq(rr.rollup.id))
+            .filter(schema::rollup_inputs::source_id.eq_any(&rr.rejected_sources))
+            .execute(conn)
+            .await?;
+    }
+
+    // Update rolled_at timestamps for rollups.
+    diesel::update(schema::rollups::table)
+        .filter(schema::rollups::id.eq_any(repos.values().flat_map(|r| r.resolved_rollups.keys())))
+        .set(schema::rollups::rolled_at.eq(diesel::dsl::now))
+        .execute(conn)
+        .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum RollupError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Git(#[from] GitError),
+    #[error(transparent)]
+    Helper(#[from] HelperError),
+    #[error(transparent)]
+    HelperNoStdin(#[from] HelperNoStdin),
+}
+
+#[instrument(name = "rollup", skip_all, fields(id = %rollup.id))]
+fn resolve_rollup(
+    ctx: &RepoSyncContext,
+    r: &RepoWrapper,
+    resolved_sources: &BTreeMap<Uuid, git2::Oid>,
+    PendingRollup { rollup, inputs }: PendingRollup,
+) -> Result<Option<ResolvedRollup>, RollupError> {
+    info!("Resolving Rollup...");
+
+    // Resolve sources to commits, discarding sources that couldn't be resolved.
+    let (mut pending_commits, rejected_sources) = inputs
+        .into_iter()
+        .map(|input| {
+            resolved_sources.get(&input.source_id).ok_or_else(|| {
+                log_err(Warn::RemovingUnresolvedRollupInput(
+                    rollup.id,
+                    input.source_id,
+                ));
+                input.source_id
+            })
+        })
+        .partition_result::<BTreeSet<git2::Oid>, BTreeSet<Uuid>, _, _>();
+    let num_commits = pending_commits.len();
+
+    // Progress bar.
+    let span = Span::current();
+    span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR);
+    span.pb_set_length(num_commits as u64);
+
+    // Resolve commits into batches.
+    let mut resolved_batches = BTreeMap::new();
+    while !pending_commits.is_empty() {
+        let num = resolved_batches.len() + 1;
+        let (commit, parents) = gorgon_rollup(num, ctx, r, &pending_commits)?;
+        for parent in parents.iter() {
+            pending_commits.remove(parent);
+        }
+        resolved_batches.insert(commit, parents);
+        span.pb_set_position((num_commits - pending_commits.len()) as u64);
+    }
+    if resolved_batches.is_empty() {
+        log_err(Warn::RemovingEmptyRollup(rollup.id));
+        return Ok(None);
+    }
+    Ok(Some(ResolvedRollup {
+        rollup,
+        resolved_batches,
+        rejected_sources,
+    }))
+}
+
+#[instrument(name = "batch", skip_all, fields(num = _num))]
+fn gorgon_rollup(
+    _num: usize,
+    ctx: &RepoSyncContext,
+    r: &RepoWrapper,
+    commits: &BTreeSet<git2::Oid>,
+) -> Result<(git2::Oid, BTreeSet<git2::Oid>), RollupError> {
+    // Spawn gorgon-rollup process.
+    let mut helper = Helper::new(&ctx.gorgon_rollup_path)
+        .with_stdin(std::process::Stdio::piped())
+        .with_stdout(std::process::Stdio::piped());
+    let mut child = helper.start()?;
+
+    // Write commits to stdin, then drop stdin to close it and proceed.
+    (child.take_stdin())
+        .map_err(RollupError::from)
+        .and_then(|mut stdin| {
+            (commits.iter())
+                .try_for_each(|oid| {
+                    debug!(%oid, "-> Attempting to merge commit...");
+                    writeln!(&mut stdin, "{oid}")
+                })
+                .map_err(RollupError::from)
+        })?;
+
+    // When gorgon-rollup completes successfully, it exits printing a commit hash.
+    info!("Rolling...");
+    let output = child.wait_checked()?;
+    let commit = git2::Oid::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .and_then(|oid| r.repo.find_commit(oid))
+        .into_git_error(&r.path)?;
+    info!("Successfully created rollup commit!");
+
+    Ok((commit.id(), commit.parent_ids().collect()))
 }
 
 #[derive(Default)]

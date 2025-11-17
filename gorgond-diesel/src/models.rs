@@ -615,6 +615,7 @@ impl CommitSource {
     }
 }
 
+#[serde_as]
 #[derive(
     Debug,
     Serialize,
@@ -632,6 +633,7 @@ impl CommitSource {
 pub struct Rollup {
     pub id: Uuid,
     pub repository_id: Uuid,
+    #[serde_as(as = "serde_with::hex::Hex")]
     pub source_hash: Vec<u8>,
 
     pub rolled_at: Option<DateTime<Utc>>,

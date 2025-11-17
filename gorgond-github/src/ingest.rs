@@ -8,7 +8,8 @@ use diesel_async::{AsyncConnection, RunQueryDsl};
 use gorgond_client::Uuid;
 use gorgond_diesel::AsyncPgPool;
 use miette::{
-    Context, IntoDiagnostic, NamedSource, Result, SourceOffset, SourceSpan, bail, miette,
+    Context, Diagnostic, IntoDiagnostic, NamedSource, Result, SourceOffset, SourceSpan, bail,
+    miette,
 };
 use octocrab::models::events::{self, payload::EventPayload};
 use scoped_futures::ScopedFutureExt;
@@ -51,29 +52,17 @@ pub struct Args {}
 impl Args {
     #[instrument(name = "ingest", skip_all)]
     pub fn run(self, pool: AsyncPgPool, rt: Runtime) -> Result<()> {
-        let mut it =
+        let (mut events, mut failed) = (0, 0);
+        for r in
             serde_json::Deserializer::from_reader(std::io::BufReader::new(std::io::stdin().lock()))
                 .into_iter::<serde_json::Value>()
-                .map(|r| r.map_err(EventError::InvalidJson));
-        let (mut events, mut failed) = (0, 0);
-        while let Some(value) = it.next().transpose()? {
+                .map(|r| r.map_err(EventError::InvalidJson))
+        {
             events += 1;
-            let event = serde_json::value::from_value(value.clone()).map_err(|err| {
-                let src = serde_json::to_string_pretty(&value).unwrap_or_default();
-                EventError::FromValue(
-                    SourceOffset::from_location(&src, err.line(), err.column()),
-                    NamedSource::new("event.json", src).with_language("JSON"),
-                    err,
-                )
-            })?;
-            if let Err(err) = rt.block_on(self.ingest_event(event, &pool)) {
-                failed += 1;
-                let src = serde_json::to_string_pretty(&value).unwrap_or_default();
-                let err = EventError::Ingest(
-                    SourceSpan::new(0.into(), src.len()),
-                    NamedSource::new("event.json", src),
-                    err.into(),
-                );
+            if let Err(err) = r.and_then(|value| self.ingest_value(&pool, &rt, value)) {
+                if err.severity().unwrap_or(miette::Severity::Error) == miette::Severity::Error {
+                    failed += 1;
+                }
                 eprintln!("{:?}", miette::Report::new(err));
             };
         }
@@ -81,6 +70,30 @@ impl Args {
             bail!("Ingesting {failed}/{events} events failed!");
         }
         Ok(())
+    }
+
+    fn ingest_value(
+        &self,
+        pool: &AsyncPgPool,
+        rt: &Runtime,
+        value: serde_json::Value,
+    ) -> Result<(), EventError> {
+        let event = serde_json::value::from_value(value.clone()).map_err(|err| {
+            let src = serde_json::to_string_pretty(&value).unwrap_or_default();
+            EventError::FromValue(
+                SourceOffset::from_location(&src, err.line(), err.column()),
+                NamedSource::new("event.json", src).with_language("JSON"),
+                err,
+            )
+        })?;
+        rt.block_on(self.ingest_event(event, pool)).map_err(|err| {
+            let src = serde_json::to_string_pretty(&value).unwrap_or_default();
+            EventError::Ingest(
+                SourceSpan::new(0.into(), src.len()),
+                NamedSource::new("event.json", src),
+                err.into(),
+            )
+        })
     }
 
     #[instrument(name = "event", skip_all, fields(

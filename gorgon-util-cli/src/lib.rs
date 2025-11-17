@@ -385,6 +385,7 @@ pub fn logger(args: Args) -> LoggerBuilder {
         target_levels: BTreeMap::new(),
     }
     // We have our own database instrumentation, tokio_postgres' is redundant.
+    .with_target_level("tokio_postgres::connection", tracing::Level::INFO)
     .with_target_level("tokio_postgres::prepare", tracing::Level::INFO)
     .with_target_level("tokio_postgres::query", tracing::Level::INFO)
     .with_target_level("tokio_postgres::simple_query", tracing::Level::INFO)

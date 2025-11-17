@@ -18,6 +18,8 @@ pub struct Args {
     #[command(flatten)]
     db: gorgond_diesel::Args,
     #[command(flatten)]
+    helpers: gorgon_util_cli::HelperArgs,
+    #[command(flatten)]
     common: gorgon_util_cli::Args,
 }
 
@@ -41,10 +43,8 @@ async fn run(args: Args) -> Result<()> {
 
     let pool = args.db.connect().await?;
     args.task_runner
-        .run_all(&token, &pool, args.all_tasks)
-        .await;
-
-    Ok(())
+        .run_all(&token, &pool, &args.helpers, args.all_tasks)
+        .await
 }
 
 fn main() {

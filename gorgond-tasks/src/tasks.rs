@@ -9,6 +9,8 @@ use std::{
 
 use backon::{ExponentialBuilder, Retryable};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
+use gorgon_build_helper::helper::HelperCaller;
+use gorgon_util_cli::HelperArgs;
 use gorgond_diesel::{AsyncPgPool, TransactionError};
 use humantime::Duration;
 use miette::{Diagnostic, Result};
@@ -41,11 +43,15 @@ pub trait TaskSource: clap::Parser + Debug + Clone + Send + Sync {
     const FRIENDLY: &str;
 
     type Error: StdError + Diagnostic + Into<TransactionError> + Send + Sync + 'static;
-    type Task: Display + Serialize + DeserializeOwned + Send + Sync;
-    type Output: Display + Serialize + DeserializeOwned + Send + Sync;
+    type Task: Display + Debug + Serialize + DeserializeOwned + Send + Sync;
+    type Output: Display + Debug + Serialize + DeserializeOwned + Send + Sync;
 
     /// Returns the task's config.
     fn config(&self) -> TaskConfig;
+
+    /// Returns a context that's later passed to workers.
+    type Context: Clone + Send + Sync;
+    fn init(&self, helpers: &impl HelperCaller) -> miette::Result<Self::Context>;
 
     /// Finds a set of tasks for this worker to perform, locking them if applicable.
     fn find(
@@ -57,6 +63,7 @@ pub trait TaskSource: clap::Parser + Debug + Clone + Send + Sync {
     fn work(
         &self,
         token: &CancellationToken,
+        ctx: &Self::Context,
         task: Self::Task,
     ) -> Result<Self::Output, Self::Error>;
 
@@ -80,19 +87,38 @@ pub enum TaskError<S: TaskSource + Debug> {
 fn pb_work<S: TaskSource>(
     span: &Span,
     token: &CancellationToken,
+    ctx: &S::Context,
     src: &S,
     task: S::Task,
 ) -> Result<S::Output, TaskError<S>> {
-    trace!("Working...");
-    src.work(token, task)
-        .map_err(TaskError::Task)
-        .inspect(|_| span.pb_inc(1))
+    span.in_scope(|| {
+        src.work(token, ctx, task)
+            .map_err(TaskError::Task)
+            .inspect(|_| span.pb_inc(1))
+    })
+}
+
+struct JsonDisplayWrapper<'a, T: Serialize>(&'a T);
+impl<'a, T: Serialize> Display for JsonDisplayWrapper<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match colored_json::to_colored_json(
+            self.0,
+            colored_json::ColorMode::Auto(colored_json::Output::StdErr),
+        ) {
+            Ok(json) => Ok(write!(f, "{json}")?),
+            Err(err) => {
+                write!(f, "{err}")?;
+                Err(std::fmt::Error)
+            }
+        }
+    }
 }
 
 #[instrument(skip_all)]
 async fn run<S: TaskSource + 'static>(
-    src: &S,
     token: &CancellationToken,
+    ctx: &S::Context,
+    src: &S,
     conn: &mut AsyncPgConnection,
 ) -> Result<(), TaskError<S>> {
     let span = Span::current();
@@ -111,6 +137,11 @@ async fn run<S: TaskSource + 'static>(
     }
     .instrument(info_span!(parent: &span, "find"))
     .await?;
+    if tasks.is_empty() {
+        debug!("Nothing to do...");
+        return Ok(());
+    }
+    trace!(tasks = %JsonDisplayWrapper(&tasks), "[ task input ]");
 
     let num_tasks = tasks.len();
     span.pb_set_length(num_tasks as _);
@@ -118,16 +149,18 @@ async fn run<S: TaskSource + 'static>(
 
     // Do it!
     let data: Vec<S::Output> = async {
+        let span = Span::current();
         debug!(num_tasks, "Working...");
         match cfg.mode {
             TaskMode::NonBlocking => (tasks.into_iter())
-                .map(|t| pb_work(&span, token, src, t))
+                .map(|t| pb_work(&span, token, ctx, src, t))
                 .collect::<Result<Vec<_>, TaskError<S>>>(),
             TaskMode::BlockingHeavy => tokio::task::spawn_blocking({
-                let (span, src, token) = (span.clone(), src.clone(), token.clone());
+                let (span, ctx, src, token) =
+                    (span.clone(), ctx.clone(), src.clone(), token.clone());
                 move || {
                     (tasks.into_par_iter())
-                        .map(|t| pb_work(&span, &token, &src, t))
+                        .map(|t| pb_work(&span, &token, &ctx, &src, t))
                         .collect::<Result<Vec<S::Output>, TaskError<S>>>()
                 }
             })
@@ -137,6 +170,8 @@ async fn run<S: TaskSource + 'static>(
     }
     .instrument(info_span!(parent: &span, "work"))
     .await?;
+
+    trace!(data = %JsonDisplayWrapper(&data), "[ task output ]");
 
     // Finalize it.
     async {
@@ -152,6 +187,7 @@ async fn run_loop<S: TaskSource + 'static>(
     span: Span,
     token: CancellationToken,
     pool: AsyncPgPool,
+    ctx: S::Context,
     src: S,
 ) {
     let cfg = src.config();
@@ -180,7 +216,12 @@ async fn run_loop<S: TaskSource + 'static>(
             .map_err(TransactionError::from)?;
 
             conn.transaction(|conn| {
-                async { run(&src, &token, conn).await.map_err(TransactionError::new) }.scope_boxed()
+                async {
+                    run(&token, &ctx, &src, conn)
+                        .await
+                        .map_err(TransactionError::new)
+                }
+                .scope_boxed()
             })
             .await?;
 
@@ -219,30 +260,50 @@ pub struct TaskRunnerArgs {
 }
 impl TaskRunnerArgs {
     #[instrument(name = "tasks", skip_all)]
-    pub async fn run_all(self, token: &CancellationToken, pool: &AsyncPgPool, tasks: AllTaskArgs) {
+    pub async fn run_all(
+        self,
+        token: &CancellationToken,
+        pool: &AsyncPgPool,
+        helpers: &HelperArgs,
+        tasks: AllTaskArgs,
+    ) -> Result<()> {
         Span::current().pb_set_style(&gorgon_util_cli::PB_STYLE_BLANK);
 
+        let caller = helpers.caller()?;
+
         let mut set = JoinSet::new();
-        self.spawn(&mut set, token, pool, tasks.bisect_templates);
-        self.spawn(&mut set, token, pool, tasks.repo_sync);
+        self.spawn(&mut set, &caller, token, pool, tasks.bisect_templates)?;
+        self.spawn(&mut set, &caller, token, pool, tasks.repo_sync)?;
         while set.join_next().await.is_some() {}
+        Ok(())
     }
 
     fn spawn<S: TaskSource + 'static>(
         &self,
         set: &mut JoinSet<()>,
+        caller: &impl HelperCaller,
         token: &CancellationToken,
         pool: &AsyncPgPool,
         src: S,
-    ) {
+    ) -> Result<()> {
         let parent = Span::current();
         let span = info_span!(parent: parent, "task", kind = S::ID);
         span.pb_set_style(&gorgon_util_cli::PB_STYLE_BLANK);
 
         if src.config().enabled.unwrap_or(self.all_tasks) {
-            set.spawn(run_loop(span.clone(), token.clone(), pool.clone(), src).instrument(span));
+            set.spawn(
+                run_loop(
+                    span.clone(),
+                    token.clone(),
+                    pool.clone(),
+                    src.init(caller)?,
+                    src,
+                )
+                .instrument(span),
+            );
         } else {
             debug!("Skipping disabled task...");
         }
+        Ok(())
     }
 }
