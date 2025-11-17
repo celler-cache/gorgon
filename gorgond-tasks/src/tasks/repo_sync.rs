@@ -150,6 +150,8 @@ pub struct RepoSyncOutput {
 pub struct RepoSyncTaskSource {
     #[arg(long, default_missing_value = "true", num_args=0..=1)]
     pub task_repo_sync: Option<bool>,
+    #[arg(long, env = "EMAIL")]
+    pub task_repo_sync_committer_email: String,
     #[arg(long, default_value = "60s")]
     pub task_repo_sync_interval: Duration,
     #[arg(long, default_value = "6h", value_parser = crate::parse_duration)]
@@ -196,15 +198,17 @@ impl TaskSource for RepoSyncTaskSource {
         let rows = sql_query(concat!(
             "SELECT r.id AS repo_id, cs.id AS source_id, rl.id AS rollup_id",
             "  FROM gorgond.repositories AS r",
-            // ...that have commit sources... (TODO: Select only stale or unresolved ones)
-            "  LEFT JOIN gorgond.commit_sources AS cs ",
-            "    ON (cs.repository_id = r.id)",
-            // ...or unrolled rollups... (TODO: Remember to include sources)
-            "  LEFT JOIN gorgond.rollups AS rl ",
+            // ...that have unrolled rollups...
+            "  LEFT JOIN gorgond.rollups AS rl",
             "    ON (rl.repository_id = r.id AND rl.rolled_at IS NULL)",
+            "  LEFT JOIN gorgond.rollup_inputs AS rli",
+            "    ON (rli.rollup_id = rl.id)",
+            // ...or commit sources... (TODO: Select only stale or unresolved ones)
+            "  LEFT JOIN gorgond.commit_sources AS cs",
+            "    ON (cs.repository_id = r.id OR cs.id = rli.source_id)",
             // ...skip rows that were joined with nothing...
-            "  WHERE r.storage <> ''",
-            "    AND (cs.id IS NOT NULL OR rl.id IS NOT NULL)",
+            "  WHERE r.storage <> '' AND (cs.id IS NOT NULL OR rl.id IS NOT NULL)",
+            "  ORDER BY repo_id, source_id, rollup_id",
             // ...and lock the repository, skipping ones already locked.
             //
             // This is the part where we need to drop down to raw SQL - Diesel has no DSL
@@ -293,7 +297,7 @@ impl TaskSource for RepoSyncTaskSource {
     ) -> Result<Self::Output, Self::Error> {
         let now = Utc::now();
 
-        let mut remotes = BTreeMap::<Url, RemoteWork>::new();
+        let mut remotes = BTreeMap::<Url, BTreeMap<String, String>>::new();
         let mut ref_to_src = BTreeMap::<String, models::CommitSource>::new();
         for source in sources.into_values() {
             let _enter = info_span!("source", id = %source.id, url = source.source).entered();
@@ -305,26 +309,25 @@ impl TaskSource for RepoSyncTaskSource {
             else {
                 continue;
             };
-            // Skip fixed commit URLs that are already resolved.
+            let Some((url, from, to)) = parse_source_url(&src) else {
+                continue;
+            };
+
+            // Don't re-fetch still-fresh sources.
             if source.commit_id.is_some() && src.is_fixed() {
                 debug!("Skipping already resolved fixed URL...");
-                continue;
-            }
-            // Skip floating commit URLs that were resolved recently.
-            if (source.fetched_at).is_some_and(|t| (t - now) > self.task_repo_sync_ref_stale_after)
+            } else if (source.fetched_at)
+                .is_some_and(|t| (t - now) > self.task_repo_sync_ref_stale_after)
             {
                 debug!("Skipping still-fresh dynamic URL...");
-                continue;
+            } else {
+                (remotes.entry(url.clone()))
+                    .or_default()
+                    .insert(from.to_string(), to.clone());
             }
 
-            // Add it to the work for the relevant remote.
-            let ref_ = remotes
-                .entry(RemoteWork::url(&src).clone()) // TODO: Pointless allocation.
-                .or_default()
-                .add_source(&src)?;
-            if let Some(ref_) = ref_ {
-                ref_to_src.insert(ref_, source);
-            }
+            // Resolve the ref to a source regardless.
+            ref_to_src.insert(to, source);
         }
 
         // Do the mucking about with the git repo.
@@ -346,13 +349,13 @@ impl TaskSource for RepoSyncTaskSource {
             span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR);
             span.pb_set_length(remotes.len() as _);
             info!("Fetching refs from remotes...");
-            for (i, (url, task)) in remotes.iter().enumerate() {
+            for (i, (url, refs)) in remotes.iter().enumerate() {
                 span.pb_set_position(i as _);
                 match r.with_remote(
                     token,
                     &mut r.remote_anonymous(url.as_str())?,
                     Direction::Fetch,
-                    |remote| r.fetch(token, remote, &task.refs_from_git),
+                    |remote| r.fetch(token, remote, refs),
                 ) {
                     Ok(_) => {}
                     Err(err @ RemoteError(_, _, RemoteErrorKind::Connect(_))) => log_err(err),
@@ -399,7 +402,8 @@ impl TaskSource for RepoSyncTaskSource {
 
             for (_, pr) in rollups {
                 let id = pr.rollup.id;
-                match resolve_rollup(ctx, &r, &resolved_sources, pr)
+                match self
+                    .resolve_rollup(ctx, &r, &resolved_sources, pr)
                     .with_context(|| format!("Couldn't resolve rollup: {id}"))
                 {
                     Ok(Some(rr)) => {
@@ -559,133 +563,129 @@ pub enum RollupError {
     HelperNoStdin(#[from] HelperNoStdin),
 }
 
-#[instrument(name = "rollup", skip_all, fields(id = %rollup.id))]
-fn resolve_rollup(
-    ctx: &RepoSyncContext,
-    r: &RepoWrapper,
-    resolved_sources: &BTreeMap<Uuid, git2::Oid>,
-    PendingRollup { rollup, inputs }: PendingRollup,
-) -> Result<Option<ResolvedRollup>, RollupError> {
-    info!("Resolving Rollup...");
+impl RepoSyncTaskSource {
+    #[instrument(name = "rollup", skip_all, fields(id = %rollup.id))]
+    fn resolve_rollup(
+        &self,
+        ctx: &RepoSyncContext,
+        r: &RepoWrapper,
+        resolved_sources: &BTreeMap<Uuid, git2::Oid>,
+        PendingRollup { rollup, inputs }: PendingRollup,
+    ) -> Result<Option<ResolvedRollup>, RollupError> {
+        info!("Resolving Rollup...");
 
-    // Resolve sources to commits, discarding sources that couldn't be resolved.
-    let (mut pending_commits, rejected_sources) = inputs
-        .into_iter()
-        .map(|input| {
-            resolved_sources.get(&input.source_id).ok_or_else(|| {
-                log_err(Warn::RemovingUnresolvedRollupInput(
-                    rollup.id,
-                    input.source_id,
-                ));
-                input.source_id
-            })
-        })
-        .partition_result::<BTreeSet<git2::Oid>, BTreeSet<Uuid>, _, _>();
-    let num_commits = pending_commits.len();
-
-    // Progress bar.
-    let span = Span::current();
-    span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR);
-    span.pb_set_length(num_commits as u64);
-
-    // Resolve commits into batches.
-    let mut resolved_batches = BTreeMap::new();
-    while !pending_commits.is_empty() {
-        let num = resolved_batches.len() + 1;
-        let (commit, parents) = gorgon_rollup(num, ctx, r, &pending_commits)?;
-        for parent in parents.iter() {
-            pending_commits.remove(parent);
-        }
-        resolved_batches.insert(commit, parents);
-        span.pb_set_position((num_commits - pending_commits.len()) as u64);
-    }
-    if resolved_batches.is_empty() {
-        log_err(Warn::RemovingEmptyRollup(rollup.id));
-        return Ok(None);
-    }
-    Ok(Some(ResolvedRollup {
-        rollup,
-        resolved_batches,
-        rejected_sources,
-    }))
-}
-
-#[instrument(name = "batch", skip_all, fields(num = _num))]
-fn gorgon_rollup(
-    _num: usize,
-    ctx: &RepoSyncContext,
-    r: &RepoWrapper,
-    commits: &BTreeSet<git2::Oid>,
-) -> Result<(git2::Oid, BTreeSet<git2::Oid>), RollupError> {
-    // Spawn gorgon-rollup process.
-    let mut helper = Helper::new(&ctx.gorgon_rollup_path)
-        .with_stdin(std::process::Stdio::piped())
-        .with_stdout(std::process::Stdio::piped());
-    let mut child = helper.start()?;
-
-    // Write commits to stdin, then drop stdin to close it and proceed.
-    (child.take_stdin())
-        .map_err(RollupError::from)
-        .and_then(|mut stdin| {
-            (commits.iter())
-                .try_for_each(|oid| {
-                    debug!(%oid, "-> Attempting to merge commit...");
-                    writeln!(&mut stdin, "{oid}")
+        // Resolve sources to commits, discarding sources that couldn't be resolved.
+        let (mut pending_commits, rejected_sources) = inputs
+            .into_iter()
+            .map(|input| {
+                resolved_sources.get(&input.source_id).ok_or_else(|| {
+                    log_err(Warn::RemovingUnresolvedRollupInput(
+                        rollup.id,
+                        input.source_id,
+                    ));
+                    input.source_id
                 })
-                .map_err(RollupError::from)
-        })?;
+            })
+            .partition_result::<BTreeSet<git2::Oid>, BTreeSet<Uuid>, _, _>();
+        let num_commits = pending_commits.len();
 
-    // When gorgon-rollup completes successfully, it exits printing a commit hash.
-    info!("Rolling...");
-    let output = child.wait_checked()?;
-    let commit = git2::Oid::from_str(String::from_utf8_lossy(&output.stdout).trim())
-        .and_then(|oid| r.repo.find_commit(oid))
-        .into_git_error(&r.path)?;
-    info!("Successfully created rollup commit!");
+        // Progress bar.
+        let span = Span::current();
+        span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR);
+        span.pb_set_length(num_commits as u64);
 
-    Ok((commit.id(), commit.parent_ids().collect()))
-}
-
-#[derive(Default)]
-struct RemoteWork {
-    pub refs_from_git: BTreeMap<String, String>,
-}
-impl RemoteWork {
-    pub fn url(src: &SourceUrl) -> &Url {
-        match src {
-            SourceUrl::Git(GitUrl { base_url, .. }) => base_url,
+        // Resolve commits into batches.
+        let mut resolved_batches = BTreeMap::new();
+        while !pending_commits.is_empty() {
+            let num = resolved_batches.len() + 1;
+            let (commit, parents) = self.gorgon_rollup(num, ctx, r, &pending_commits)?;
+            for parent in parents.iter() {
+                pending_commits.remove(parent);
+            }
+            resolved_batches.insert(commit, parents);
+            span.pb_set_position((num_commits - pending_commits.len()) as u64);
         }
+        if resolved_batches.is_empty() {
+            log_err(Warn::RemovingEmptyRollup(rollup.id));
+            return Ok(None);
+        }
+        Ok(Some(ResolvedRollup {
+            rollup,
+            resolved_batches,
+            rejected_sources,
+        }))
     }
-    pub fn add_source(&mut self, src: &SourceUrl) -> Result<Option<String>, Error> {
-        let (from, to) = match src {
-            SourceUrl::Git(GitUrl { rev: Some(rev), .. }) => {
-                (rev.as_str(), format!("refs/gorgon/rev/{rev}"))
-            }
-            SourceUrl::Git(GitUrl {
-                base_url,
-                ref_: Some(ref_),
-                ..
-            }) => (
-                ref_.as_str(),
-                format!(
-                    "refs/gorgon/remote/{}/{ref_}",
-                    &base_url[Position::BeforeHost..]
-                ),
+
+    #[instrument(name = "batch", skip_all, fields(num = _num))]
+    fn gorgon_rollup(
+        &self,
+        _num: usize,
+        ctx: &RepoSyncContext,
+        r: &RepoWrapper,
+        commits: &BTreeSet<git2::Oid>,
+    ) -> Result<(git2::Oid, BTreeSet<git2::Oid>), RollupError> {
+        // Spawn gorgon-rollup process.
+        let mut helper = Helper::new(&ctx.gorgon_rollup_path)
+            .with_cwd(&r.path)
+            .with_env("EMAIL", &self.task_repo_sync_committer_email)
+            .with_stdin(std::process::Stdio::piped())
+            .with_stdout(std::process::Stdio::piped())
+            .with_stderr(std::process::Stdio::piped());
+        let mut child = helper.start()?;
+
+        // Write commits to stdin, then drop stdin to close it and proceed.
+        (child.take_stdin())
+            .map_err(RollupError::from)
+            .and_then(|mut stdin| {
+                (commits.iter())
+                    .try_for_each(|oid| {
+                        debug!(%oid, "-> Attempting to merge commit...");
+                        writeln!(&mut stdin, "{oid}")
+                    })
+                    .map_err(RollupError::from)
+            })?;
+
+        // When gorgon-rollup completes successfully, it exits printing a commit hash.
+        info!("Rolling...");
+        let output = child.wait_checked()?;
+        let commit = git2::Oid::from_str(String::from_utf8_lossy(&output.stdout).trim())
+            .and_then(|oid| r.repo.find_commit(oid))
+            .into_git_error(&r.path)?;
+        info!("Successfully created rollup commit!");
+
+        Ok((commit.id(), commit.parent_ids().collect()))
+    }
+}
+
+fn parse_source_url(src: &SourceUrl) -> Option<(&Url, &str, String)> {
+    let url = match src {
+        SourceUrl::Git(GitUrl { base_url, .. }) => base_url,
+    };
+    let (from, to) = match src {
+        SourceUrl::Git(GitUrl { rev: Some(rev), .. }) => {
+            (rev.as_str(), format!("refs/gorgon/rev/{rev}"))
+        }
+        SourceUrl::Git(GitUrl {
+            base_url,
+            ref_: Some(ref_),
+            ..
+        }) => (
+            ref_.as_str(),
+            format!(
+                "refs/gorgon/remote/{}/{ref_}",
+                &base_url[Position::BeforeHost..]
             ),
-            SourceUrl::Git(GitUrl {
-                rev: None,
-                ref_: None,
-                ..
-            }) => {
-                warn!("Git URL with no rev or ref!?");
-                return Ok(None);
-            }
-        };
-        if let Some(old) = self.refs_from_git.insert(to.clone(), from.into()) {
-            return Err(Error::RefMultipleSources(to, old, from.into()));
-        };
-        Ok(Some(to))
-    }
+        ),
+        SourceUrl::Git(GitUrl {
+            rev: None,
+            ref_: None,
+            ..
+        }) => {
+            warn!("Git URL with no rev or ref!?");
+            return None;
+        }
+    };
+    Some((url, from, to))
 }
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]

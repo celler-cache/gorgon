@@ -27,6 +27,7 @@ pkgs.mkShell {
     # other tools
     jq
     cargo-expand
+    pgformatter
 
     # repo tools
     reuse # check license compliance

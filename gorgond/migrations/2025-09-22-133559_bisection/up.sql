@@ -9,7 +9,7 @@ DROP TABLE rollups;
 
 CREATE TABLE rollups (
     id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    repository_id  UUID  NOT NULL   REFERENCES repositories (id),
+    repository_id  UUID  NOT NULL   REFERENCES repositories (id) ON DELETE CASCADE,
     source_hash    BYTEA NOT NULL   CHECK (source_hash <> ''),
     UNIQUE (repository_id, source_hash),
 
@@ -52,7 +52,7 @@ COMMENT ON TABLE rollup_batch_inputs IS 'Commits included in a batch.';
 
 CREATE TABLE bisections (
     id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
-    rollup_id      UUID NOT NULL    REFERENCES rollups (id),
+    rollup_id      UUID NOT NULL    REFERENCES rollups (id) ON DELETE CASCADE,
 
     template_id    UUID             REFERENCES build_templates (id)       ON DELETE SET NULL,
     template_kind  TEXT NOT NULL    CHECK (template_kind <> ''),
@@ -89,7 +89,7 @@ CREATE TABLE bisection_steps (
 );
 CREATE TABLE bisection_step_commits (
     step_id    UUID REFERENCES bisection_steps (id) ON DELETE CASCADE,
-    commit_id  UUID REFERENCES commits (id),
+    commit_id  UUID REFERENCES commits (id)         ON DELETE CASCADE,
     PRIMARY KEY (step_id, commit_id)
 );
 
