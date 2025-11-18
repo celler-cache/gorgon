@@ -8,24 +8,18 @@ pub mod gorgond {
     }
 
     diesel::table! {
-        gorgond.bisection_step_commits (step_id, commit_id) {
-            step_id -> Uuid,
-            commit_id -> Uuid,
+        gorgond.bisection_rollups (bisection_id, rollup_id) {
+            bisection_id -> Uuid,
+            rollup_id -> Uuid,
         }
     }
 
     diesel::table! {
-        use diesel::sql_types::*;
-        use super::sql_types::BuildResult;
-
         gorgond.bisection_steps (id) {
             id -> Uuid,
             bisection_id -> Uuid,
             batch_id -> Uuid,
-            build_id -> Nullable<Uuid>,
-            result -> Nullable<BuildResult>,
-            started_at -> Nullable<Timestamptz>,
-            ended_at -> Nullable<Timestamptz>,
+            build_id -> Uuid,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
         }
@@ -34,7 +28,6 @@ pub mod gorgond {
     diesel::table! {
         gorgond.bisections (id) {
             id -> Uuid,
-            rollup_id -> Uuid,
             template_id -> Nullable<Uuid>,
             template_kind -> Text,
             template_expr -> Text,
@@ -179,7 +172,7 @@ pub mod gorgond {
     }
 
     diesel::table! {
-        gorgond.rollup_batch_inputs (batch_id, commit_id) {
+        gorgond.rollup_batch_commits (batch_id, commit_id) {
             batch_id -> Uuid,
             commit_id -> Uuid,
         }
@@ -195,9 +188,13 @@ pub mod gorgond {
     }
 
     diesel::table! {
-        gorgond.rollup_inputs (rollup_id, source_id) {
+        gorgond.rollup_inputs (id) {
+            id -> Uuid,
             rollup_id -> Uuid,
-            source_id -> Uuid,
+            commit_id -> Nullable<Uuid>,
+            source_id -> Nullable<Uuid>,
+            updated_at -> Timestamptz,
+            created_at -> Timestamptz,
         }
     }
 
@@ -205,7 +202,6 @@ pub mod gorgond {
         gorgond.rollups (id) {
             id -> Uuid,
             repository_id -> Uuid,
-            source_hash -> Bytea,
             rolled_at -> Nullable<Timestamptz>,
             updated_at -> Timestamptz,
             created_at -> Timestamptz,
@@ -223,14 +219,13 @@ pub mod gorgond {
         }
     }
 
-    diesel::joinable!(bisection_step_commits -> bisection_steps (step_id));
-    diesel::joinable!(bisection_step_commits -> commits (commit_id));
+    diesel::joinable!(bisection_rollups -> bisections (bisection_id));
+    diesel::joinable!(bisection_rollups -> rollups (rollup_id));
     diesel::joinable!(bisection_steps -> bisections (bisection_id));
     diesel::joinable!(bisection_steps -> builds (build_id));
     diesel::joinable!(bisection_steps -> rollup_batches (batch_id));
     diesel::joinable!(bisections -> build_template_inputs (input_id));
     diesel::joinable!(bisections -> build_templates (template_id));
-    diesel::joinable!(bisections -> rollups (rollup_id));
     diesel::joinable!(build_inputs -> builds (build_id));
     diesel::joinable!(build_template_input_commits -> build_template_inputs (input_id));
     diesel::joinable!(build_template_input_commits -> commits (commit_id));
@@ -247,16 +242,17 @@ pub mod gorgond {
     diesel::joinable!(repository_merge_request_versions -> repository_merge_requests (merge_request_id));
     diesel::joinable!(repository_merge_requests -> commit_sources (base_id));
     diesel::joinable!(repository_merge_requests -> repositories (repository_id));
-    diesel::joinable!(rollup_batch_inputs -> commits (commit_id));
-    diesel::joinable!(rollup_batch_inputs -> rollup_batches (batch_id));
+    diesel::joinable!(rollup_batch_commits -> commits (commit_id));
+    diesel::joinable!(rollup_batch_commits -> rollup_batches (batch_id));
     diesel::joinable!(rollup_batches -> commits (commit_id));
     diesel::joinable!(rollup_batches -> rollups (rollup_id));
     diesel::joinable!(rollup_inputs -> commit_sources (source_id));
+    diesel::joinable!(rollup_inputs -> commits (commit_id));
     diesel::joinable!(rollup_inputs -> rollups (rollup_id));
     diesel::joinable!(rollups -> repositories (repository_id));
 
     diesel::allow_tables_to_appear_in_same_query!(
-        bisection_step_commits,
+        bisection_rollups,
         bisection_steps,
         bisections,
         build_inputs,
@@ -270,7 +266,7 @@ pub mod gorgond {
         repositories,
         repository_merge_request_versions,
         repository_merge_requests,
-        rollup_batch_inputs,
+        rollup_batch_commits,
         rollup_batches,
         rollup_inputs,
         rollups,

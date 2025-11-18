@@ -15,7 +15,6 @@ use gorgond_diesel::{TransactionError, models, schema::gorgond as schema};
 use humantime::Duration;
 use miette::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
@@ -176,50 +175,41 @@ impl TaskSource for BisectTemplateSource {
             for (_, InputData { input, merges }) in inputs {
                 info!(%input.id, input.key, merges = merges.len(), "--> Input...");
 
-                // The idempotency hash is a SHA256 of the UUIDs (not hashes) of the commits,
-                // in binary form, sorted and deduplicated.
-                let source_ids: BTreeSet<Uuid> = merges.values().map(|m| m.source.id).collect();
-                let source_hash = (source_ids.iter())
-                    .fold(Sha256::new(), Sha256::chain_update)
-                    .finalize()
-                    .to_vec();
-
-                // Create or reuse a rollup.
+                // Create a rollup.
                 let rollup_id = Uuid::now_v7();
-                let rollup_id = diesel::insert_into(schema::rollups::table)
+                diesel::insert_into(schema::rollups::table)
                     .values(models::Rollup {
                         id: rollup_id,
                         repository_id: input.repository_id,
-                        source_hash,
                         rolled_at: None,
                         updated_at: now,
                         created_at: now,
                     })
-                    .on_conflict((schema::rollups::repository_id, schema::rollups::source_hash))
-                    .do_nothing()
-                    .returning(schema::rollups::id)
-                    .get_result::<Uuid>(conn)
-                    .await
-                    .optional()?
-                    .unwrap_or(rollup_id);
+                    .execute(conn)
+                    .await?;
+
+                let source_ids: BTreeSet<Uuid> = merges.values().map(|m| m.source.id).collect();
                 diesel::insert_into(schema::rollup_inputs::table)
                     .values(
                         (source_ids.into_iter())
                             .map(|source_id| models::RollupInput {
+                                id: Uuid::now_v7(),
                                 rollup_id,
-                                source_id,
+                                source_id: Some(source_id),
+                                commit_id: None,
+                                updated_at: now,
+                                created_at: now,
                             })
                             .collect::<Vec<_>>(),
                     )
-                    .on_conflict_do_nothing()
                     .execute(conn)
                     .await?;
 
                 // Then create a bisection job for the rollup.
+                let bisection_id = Uuid::now_v7();
                 diesel::insert_into(schema::bisections::table)
                     .values(models::Bisection {
-                        id: Uuid::now_v7(),
-                        rollup_id,
+                        id: bisection_id,
                         template_id: Some(input.template_id),
                         template_kind: template.kind.clone(),
                         template_expr: template.expr.clone(),
@@ -230,7 +220,13 @@ impl TaskSource for BisectTemplateSource {
                         updated_at: now,
                         created_at: now,
                     })
-                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .await?;
+                diesel::insert_into(schema::bisection_rollups::table)
+                    .values(models::BisectionRollup {
+                        bisection_id,
+                        rollup_id,
+                    })
                     .execute(conn)
                     .await?;
             }

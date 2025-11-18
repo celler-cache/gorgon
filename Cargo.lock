@@ -2026,7 +2026,6 @@ dependencies = [
  "scoped-futures",
  "serde",
  "serde_with",
- "sha2",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",

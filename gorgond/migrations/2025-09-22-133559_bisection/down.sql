@@ -2,11 +2,11 @@
 --
 -- SPDX-License-Identifier: EUPL-1.2
 
-DROP TABLE bisection_step_commits;
 DROP TABLE bisection_steps;
+DROP TABLE bisection_rollups;
 DROP TABLE bisections;
 
-DROP TABLE rollup_batch_inputs;
+DROP TABLE rollup_batch_commits;
 DROP TABLE rollup_batches;
 DROP TABLE rollup_inputs;
 DROP TABLE rollups;

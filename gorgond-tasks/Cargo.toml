@@ -30,7 +30,6 @@ miette.workspace = true
 rayon.workspace = true
 scoped-futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
-sha2 = "0.10.9"
 thiserror.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal"] }

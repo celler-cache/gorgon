@@ -76,6 +76,9 @@ impl From<Error> for TransactionError {
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum Warn {
+    #[error("Skipping invalid commit hash: {_0}")]
+    #[diagnostic(severity = "warning")]
+    SkippingInvalidCommitHash(String),
     #[error("Skipping remote...")]
     #[diagnostic(severity = "warning")]
     SkippingRemote(#[source] RemoteError),
@@ -107,15 +110,25 @@ pub struct RepoSyncContext {
     pub gorgon_rollup_path: PathBuf,
 }
 
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PendingRollupInput {
+    pub input: models::RollupInput,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub commit: Option<git2::Oid>,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PendingRollup {
     pub rollup: models::Rollup,
-    pub inputs: Vec<models::RollupInput>,
+    pub inputs: BTreeMap<Uuid, PendingRollupInput>,
 }
+#[serde_as]
 #[derive(Debug, Display, Serialize, Deserialize)]
 #[display("{}", repo.id)]
 pub struct RepoSyncTask {
     pub repo: models::Repository,
+    #[serde_as(as = "BTreeSet<DisplayFromStr>")]
+    pub commits: BTreeSet<git2::Oid>,
     pub sources: BTreeMap<Uuid, models::CommitSource>,
     pub rollups: BTreeMap<Uuid, PendingRollup>,
 }
@@ -133,6 +146,19 @@ pub struct ResolvedRollup {
 pub struct ResolvedCommit {
     pub commit: models::Commit,
     pub sources: BTreeMap<Uuid, models::CommitSource>,
+}
+impl ResolvedCommit {
+    fn new(now: DateTime<Utc>, repo: &models::Repository, oid: git2::Oid) -> Self {
+        Self {
+            commit: models::Commit {
+                id: Uuid::now_v7(),
+                repository_id: repo.id,
+                hash: oid.as_bytes().to_vec(),
+                created_at: now,
+            },
+            sources: BTreeMap::new(),
+        }
+    }
 }
 #[serde_as]
 #[derive(Debug, Display, Serialize, Deserialize)]
@@ -227,6 +253,7 @@ impl TaskSource for RepoSyncTaskSource {
                     repo.id,
                     RepoSyncTask {
                         repo,
+                        commits: Default::default(),
                         sources: Default::default(),
                         rollups: Default::default(),
                     },
@@ -245,23 +272,47 @@ impl TaskSource for RepoSyncTaskSource {
             })
             .await?;
         let repos = schema::rollups::table
-            .filter(schema::rollups::id.eq_any(rows.iter().filter_map(|r| r.rollup_id)))
             .inner_join(
                 schema::rollup_inputs::table
                     .on(schema::rollup_inputs::rollup_id.eq(schema::rollups::id)),
             )
-            .load_stream::<(models::Rollup, models::RollupInput)>(conn)
+            .left_join(
+                schema::commits::table
+                    .on(schema::commits::id.eq(schema::rollup_inputs::commit_id.assume_not_null())),
+            )
+            .filter(schema::rollups::id.eq_any(rows.iter().filter_map(|r| r.rollup_id)))
+            .select((
+                models::Rollup::as_select(),
+                models::RollupInput::as_select(),
+                Option::<models::Commit>::as_select(),
+            ))
+            .load_stream::<(models::Rollup, models::RollupInput, Option<models::Commit>)>(conn)
             .await?
-            .try_fold(repos, async |mut repos, (rollup, input)| {
+            .try_fold(repos, async |mut repos, (rollup, input, commit)| {
                 let repo = repos.get_mut(&rollup.repository_id).unwrap();
-                repo.rollups
+                let input = repo
+                    .rollups
                     .entry(rollup.id)
                     .or_insert_with(|| PendingRollup {
                         rollup,
                         inputs: Default::default(),
                     })
                     .inputs
-                    .push(input);
+                    .entry(input.id)
+                    .or_insert_with(|| PendingRollupInput {
+                        input,
+                        commit: None,
+                    });
+                if let Some(oid) = commit.and_then(|c| {
+                    git2::Oid::from_bytes(&c.hash)
+                        .inspect_err(|_| {
+                            log_err(Warn::SkippingInvalidCommitHash(hex::encode(&c.hash)))
+                        })
+                        .ok()
+                }) {
+                    repo.commits.insert(oid);
+                    input.commit = Some(oid);
+                }
                 Ok(repos)
             })
             .await?;
@@ -291,6 +342,7 @@ impl TaskSource for RepoSyncTaskSource {
         ctx: &RepoSyncContext,
         RepoSyncTask {
             repo,
+            commits,
             sources,
             rollups,
         }: Self::Task,
@@ -298,7 +350,9 @@ impl TaskSource for RepoSyncTaskSource {
         let now = Utc::now();
 
         let mut remotes = BTreeMap::<Url, BTreeMap<String, String>>::new();
-        let mut ref_to_src = BTreeMap::<String, models::CommitSource>::new();
+        let mut ref_to_src = BTreeMap::<String, Option<models::CommitSource>>::from_iter(
+            (commits.iter()).map(|oid| (commit_ref(oid), None)),
+        );
         for source in sources.into_values() {
             let _enter = info_span!("source", id = %source.id, url = source.source).entered();
 
@@ -327,7 +381,7 @@ impl TaskSource for RepoSyncTaskSource {
             }
 
             // Resolve the ref to a source regardless.
-            ref_to_src.insert(to, source);
+            ref_to_src.insert(to, Some(source));
         }
 
         // Do the mucking about with the git repo.
@@ -376,20 +430,18 @@ impl TaskSource for RepoSyncTaskSource {
                 continue;
             };
 
+            // Mark the commit as resolved.
+            let resolved_commit = (resolved_commits.entry(oid))
+                .or_insert_with(|| ResolvedCommit::new(now, &repo, oid));
+
+            // If this ref was resolved from a source, make sure we update it.
+            if let Some(src) = src {
+                resolved_sources.insert(src.id, oid);
+                resolved_commit.sources.insert(src.id, src);
+            }
+
+            // Stage the ref for push.
             refs_to_push.insert(ref_);
-            resolved_sources.insert(src.id, oid);
-            (resolved_commits.entry(oid))
-                .or_insert_with(|| ResolvedCommit {
-                    commit: models::Commit {
-                        id: Uuid::now_v7(),
-                        repository_id: repo.id,
-                        hash: oid.as_bytes().to_vec(),
-                        created_at: now,
-                    },
-                    sources: BTreeMap::new(),
-                })
-                .sources
-                .insert(src.id, src);
         }
 
         // Kick off rollups.
@@ -415,6 +467,29 @@ impl TaskSource for RepoSyncTaskSource {
                     Err(err) => log_err(err),
                 }
                 span.pb_inc(1);
+            }
+        }
+        // Add merge commits to resolved_commits.
+        resolved_commits.extend(
+            (resolved_rollups.values())
+                .flat_map(|v| v.resolved_batches.keys().copied())
+                .map(|oid| (oid, ResolvedCommit::new(now, &repo, oid))),
+        );
+
+        // Ensure there are refs for all resolved commits.
+        {
+            let span = info_span!("commit_refs").entered();
+            info!("Creating refs for resolved commits...");
+            span.pb_set_style(&gorgon_util_cli::PB_STYLE_BAR_ETA);
+            span.pb_set_length(resolved_commits.len() as u64);
+
+            for oid in resolved_commits.keys() {
+                let ref_ = commit_ref(oid);
+                debug!(ref_, %oid, "Creating commit ref...");
+                r.repo
+                    .reference(&ref_, *oid, true, &ref_)
+                    .into_git_error(&r.path)?;
+                refs_to_push.insert(ref_);
             }
         }
 
@@ -454,12 +529,12 @@ async fn save_commits(
         .map_err(Error::from)
         .try_fold(&mut *repos, async |repos, commit| -> Result<_, Error> {
             let oid = git2::Oid::from_bytes(&commit.hash).into_git_error("")?;
-            if let Some(repo) = repos.get_mut(&commit.repository_id) {
-                if let Some(rc) = repo.resolved_commits.get_mut(&oid) {
-                    rc.commit = commit;
-                    for src in rc.sources.values_mut() {
-                        src.commit_id = Some(rc.commit.id);
-                    }
+            if let Some(repo) = repos.get_mut(&commit.repository_id)
+                && let Some(rc) = repo.resolved_commits.get_mut(&oid)
+            {
+                rc.commit = commit;
+                for src in rc.sources.values_mut() {
+                    src.commit_id = Some(rc.commit.id);
                 }
             }
             Ok(repos)
@@ -491,21 +566,27 @@ async fn save_rollups(
     repos: &mut BTreeMap<Uuid, RepoSyncOutput>,
     now: DateTime<Utc>,
 ) -> Result<(), Error> {
-    let (mut batches, mut batch_inputs) = (Vec::new(), Vec::new());
+    let (mut batches, mut batch_commits) = (Vec::new(), Vec::new());
     for r in repos.values_mut() {
         for rr in r.resolved_rollups.values_mut() {
             rr.rollup.rolled_at = Some(now);
-            for (rc, inputs) in (rr.resolved_batches.iter())
-                .filter_map(|(oid, is)| r.resolved_commits.get(oid).map(|c| (c, is)))
-            {
+            for (rc, inputs) in (rr.resolved_batches.iter()).map(|(oid, is)| {
+                (r.resolved_commits.get(oid))
+                    .map(|c| (c, is))
+                    .expect("unresolved commit in batch!?")
+            }) {
                 let batch = models::RollupBatch {
                     id: Uuid::now_v7(),
                     rollup_id: rr.rollup.id,
                     commit_id: rc.commit.id,
                     created_at: now,
                 };
-                for rc in inputs.iter().filter_map(|oid| r.resolved_commits.get(oid)) {
-                    batch_inputs.push(models::RollupBatchInput {
+                for rc in inputs.iter().map(|oid| {
+                    r.resolved_commits
+                        .get(oid)
+                        .expect("unresolved batch input!?")
+                }) {
+                    batch_commits.push(models::RollupBatchCommit {
                         batch_id: batch.id,
                         commit_id: rc.commit.id,
                     });
@@ -520,8 +601,8 @@ async fn save_rollups(
         .values(batches)
         .execute(conn)
         .await?;
-    diesel::insert_into(schema::rollup_batch_inputs::table)
-        .values(batch_inputs)
+    diesel::insert_into(schema::rollup_batch_commits::table)
+        .values(batch_commits)
         .execute(conn)
         .await?;
 
@@ -575,16 +656,18 @@ impl RepoSyncTaskSource {
         info!("Resolving Rollup...");
 
         // Resolve sources to commits, discarding sources that couldn't be resolved.
-        let (mut pending_commits, rejected_sources) = inputs
-            .into_iter()
-            .map(|input| {
-                resolved_sources.get(&input.source_id).ok_or_else(|| {
-                    log_err(Warn::RemovingUnresolvedRollupInput(
-                        rollup.id,
-                        input.source_id,
-                    ));
-                    input.source_id
-                })
+        let (mut pending_commits, rejected_sources) = (inputs.into_values())
+            .map(|PendingRollupInput { input, commit }| {
+                // If the input directly references a commit, use that.
+                commit
+                    .or_else(|| {
+                        // If not, try to resolve the referenced source.
+                        (input.source_id)
+                            .and_then(|id| resolved_sources.get(&id))
+                            .copied()
+                    })
+                    .ok_or(input.id)
+                    .inspect_err(|id| log_err(Warn::RemovingUnresolvedRollupInput(rollup.id, *id)))
             })
             .partition_result::<BTreeSet<git2::Oid>, BTreeSet<Uuid>, _, _>();
         let num_commits = pending_commits.len();
@@ -657,14 +740,16 @@ impl RepoSyncTaskSource {
     }
 }
 
+fn commit_ref(rev: impl Display) -> String {
+    format!("refs/gorgon/rev/{rev}")
+}
+
 fn parse_source_url(src: &SourceUrl) -> Option<(&Url, &str, String)> {
     let url = match src {
         SourceUrl::Git(GitUrl { base_url, .. }) => base_url,
     };
     let (from, to) = match src {
-        SourceUrl::Git(GitUrl { rev: Some(rev), .. }) => {
-            (rev.as_str(), format!("refs/gorgon/rev/{rev}"))
-        }
+        SourceUrl::Git(GitUrl { rev: Some(rev), .. }) => (rev.as_str(), commit_ref(rev.as_str())),
         SourceUrl::Git(GitUrl {
             base_url,
             ref_: Some(ref_),
