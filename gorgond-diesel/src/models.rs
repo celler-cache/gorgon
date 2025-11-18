@@ -95,6 +95,7 @@ macro_rules! gen_model_with_ident_helpers {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -141,6 +142,7 @@ impl Project {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -206,6 +208,7 @@ impl BuildTemplate {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -266,6 +269,7 @@ impl BuildTemplateInput {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -291,6 +295,7 @@ pub struct BuildTemplateInputCommit {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -356,6 +361,7 @@ impl From<BuildResult> for client::BuildResult {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -380,6 +386,7 @@ impl BuildInput {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -466,6 +473,7 @@ impl Build {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -539,6 +547,7 @@ impl Repository {
 #[serde_as]
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -565,6 +574,7 @@ impl Commit {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -617,6 +627,7 @@ impl CommitSource {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -643,6 +654,7 @@ impl Rollup {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -671,6 +683,7 @@ pub struct RollupInput {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -696,6 +709,7 @@ impl RollupBatch {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -717,6 +731,7 @@ pub struct RollupBatchCommit {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -796,6 +811,7 @@ impl RepositoryMergeRequest {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -863,6 +879,7 @@ impl RepositoryMergeRequestVersion {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -898,6 +915,7 @@ impl Bisection {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
@@ -918,6 +936,7 @@ pub struct BisectionRollup {
 
 #[derive(
     Debug,
+    Clone,
     Serialize,
     Deserialize,
     Yokeable,
