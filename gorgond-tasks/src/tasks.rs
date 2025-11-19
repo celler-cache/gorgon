@@ -24,6 +24,7 @@ use tracing::{
 };
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
+pub mod bisect;
 pub mod bisect_templates;
 pub mod repo_sync;
 
@@ -246,6 +247,8 @@ async fn run_loop<S: TaskSource + 'static>(
 #[derive(Debug, Clone, clap::Parser)]
 pub struct AllTaskArgs {
     #[command(flatten)]
+    pub bisect: bisect::Bisect,
+    #[command(flatten)]
     pub bisect_templates: bisect_templates::BisectTemplateSource,
     #[command(flatten)]
     pub repo_sync: repo_sync::RepoSyncTaskSource,
@@ -272,6 +275,7 @@ impl TaskRunnerArgs {
         let caller = helpers.caller()?;
 
         let mut set = JoinSet::new();
+        self.spawn(&mut set, &caller, token, pool, tasks.bisect)?;
         self.spawn(&mut set, &caller, token, pool, tasks.bisect_templates)?;
         self.spawn(&mut set, &caller, token, pool, tasks.repo_sync)?;
         while set.join_next().await.is_some() {}

@@ -7,6 +7,11 @@ use clap::Parser;
 use clap_stdin::MaybeStdin;
 use derive_more::{Deref, DerefMut};
 use gorgon_build_helper::{event_handler, helper::Helper, Event};
+use gorgon_util::{
+    json::{parse_json, WithJsonAdvice},
+    source_url::{self, GitUrl, SourceUrl},
+    WithAdvice,
+};
 use gorgond_client::{
     events::BuildTaskUpdate,
     models::{Build, BuildTask, BuildTaskKind},
@@ -16,7 +21,7 @@ use gorgond_client::{
     models::BuildTaskLevel,
     Uuid,
 };
-use miette::{miette, Context, IntoDiagnostic, Result};
+use miette::{miette, Context, IntoDiagnostic, NamedSource, Result};
 use nix_daemon::{
     nix::internal_json::{
         Action, ActionMessage, ActionResult, ActionResultData, ActionStart, ActionStop,
@@ -27,12 +32,10 @@ use nix_daemon::{
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader},
-    ops::Deref,
     path::{Path, PathBuf},
     process::Stdio,
 };
 use tracing::{info, trace, warn};
-use url::{Position, Url};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
@@ -51,85 +54,42 @@ struct Args {
     common: gorgon_util_cli::Args,
 }
 
-#[derive(Debug, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
-pub enum FetchExprError {
-    #[error("{1}")]
-    #[diagnostic(code = "FetchExpr::url::parse")]
-    ParseUrl(String, #[source] url::ParseError),
-    #[error("{1}")]
-    #[diagnostic(forward(1))]
-    Url(Url, #[source] FetchExprUrlError),
-}
-#[derive(Debug, PartialEq, Eq, thiserror::Error, miette::Diagnostic)]
-pub enum FetchExprUrlError {
-    #[error("Unsupported fetcher: {0}")]
-    #[diagnostic(
-        code = "FetchExpr::url::scheme",
-        help = "Fetchers are specified by the URL scheme, eg. 'git://' or 'git+http://'.\nSupported fetchers: 'git'."
-    )]
-    Fetcher(String),
-    #[error("Unknown query parameter: ?{0}")]
-    #[diagnostic(
-        code = "FetchExpr::url::query::unknown",
-        help = "Valid query parameters are: ?rev"
-    )]
-    UnknownQueryParameter(String),
-    #[error("Missing required query parameter: ?{0}")]
-    #[diagnostic(
-        code = "FetchExpr::url::query::required",
-        help = "Required query parameters are: ?rev"
-    )]
-    MissingQueryParameter(&'static str),
-}
-
 /// A nix expression for a fetcher, eg. `builtins.fetchGit`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FetchExpr {
-    FetchGit { url: String, rev: String },
+    FetchGit(GitUrl),
 }
 impl std::fmt::Display for FetchExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::FetchGit { url, rev } => write!(
-                f,
-                r#"builtins.fetchGit {{ url = "{url}"; rev = "{rev}"; }}"#,
-            ),
+            Self::FetchGit(GitUrl {
+                base_url,
+                rev,
+                ref_,
+            }) => {
+                write!(f, r#"builtins.fetchGit {{"#)?;
+                write!(f, r#" url = "{base_url}";"#)?;
+                if let Some(ref_) = ref_ {
+                    write!(f, r#" ref = "{ref_}";"#)?;
+                }
+                if let Some(rev) = rev {
+                    write!(f, r#" rev = "{rev}";"#)?;
+                }
+                write!(f, r#" }}"#)
+            }
+        }
+    }
+}
+impl From<SourceUrl> for FetchExpr {
+    fn from(url: SourceUrl) -> Self {
+        match url {
+            SourceUrl::Git(url) => Self::FetchGit(url),
         }
     }
 }
 impl FetchExpr {
-    /// Parses a Fetcher URL, eg. `git+https://example.com/?rev=abc123`.
-    pub fn parse_url(url_s: &str) -> Result<Self, FetchExprError> {
-        let url = Url::parse(url_s).map_err(|err| FetchExprError::ParseUrl(url_s.into(), err))?;
-        let url_err = |err| FetchExprError::Url(url.clone(), err);
-
-        // The URL crate won't let us do `set_scheme()` involving "special" schemes like
-        // https://, which... is unfortunate for doing git+https -> https, so if we need
-        // to do that, we need to rebuild the whole string ourselves.
-        // https://github.com/servo/rust-url/issues/577
-        let scheme_ = url.scheme();
-        let (fetcher, scheme) = scheme_.split_once("+").unwrap_or((scheme_, scheme_));
-        let url_s = [scheme, &url[Position::AfterScheme..Position::AfterPath]].join("");
-
-        match fetcher {
-            "git" => {
-                let mut rev = None;
-                for (k, v) in url.query_pairs() {
-                    match k.deref() {
-                        "rev" => rev = Some(v.to_string()),
-                        _ => {
-                            return Err(url_err(FetchExprUrlError::UnknownQueryParameter(k.into())))
-                        }
-                    }
-                }
-                Ok(Self::FetchGit {
-                    url: url_s,
-                    rev: rev
-                        .ok_or_else(|| url_err(FetchExprUrlError::MissingQueryParameter("rev")))?,
-                })
-            }
-            _ => Err(url_err(FetchExprUrlError::Fetcher(fetcher.into()))),
-        }
+    pub fn parse_url(s: &str) -> Result<Self, source_url::Error> {
+        SourceUrl::parse(s).map(Self::from)
     }
 }
 
@@ -150,7 +110,7 @@ impl NixCommand {
     fn input(&mut self, name: &str, expr: &FetchExpr) {
         self.args(["--arg", name, &expr.to_string()]);
     }
-    fn input_url(&mut self, name: &str, url_s: &str) -> Result<(), FetchExprError> {
+    fn input_url(&mut self, name: &str, url_s: &str) -> Result<(), source_url::Error> {
         self.input(name, &FetchExpr::parse_url(url_s)?);
         Ok(())
     }
@@ -334,27 +294,37 @@ impl NixCommand {
     }
 }
 
-fn run(args: Args) -> Result<()> {
-    let build: Build = serde_json::from_str(&args.build_json)
-        .into_diagnostic()
-        .context("Couldn't parse Build spec")?;
-
+fn run_build(args: &Args, build: &Build) -> Result<String> {
     // First, instantiate the derivation...
-    let mut inst = NixCommand::new(args.nix_instantiate);
+    let mut inst = NixCommand::new(&args.nix_instantiate);
     for (i, (name, s)) in build.spec.inputs.iter().enumerate() {
         inst.input_url(name, s)
             .with_context(|| format!("build.inputs[{i}]"))?;
     }
     inst.args(["--expr", &build.spec.expr]);
-    info!(?inst, "Instantiating derivation...");
-    let drv = inst.call().context("nix-instantiate failed")?;
+    let inst_cmd = inst.0.to_string();
+    info!(inst_cmd, "Instantiating derivation...");
+    let drv = inst
+        .call()
+        .context("nix-instantiate failed")
+        .with_advice("Command", NamedSource::new("nix-instantiate", inst_cmd))?;
 
     // ...then realise (build) it.
-    let mut build = NixCommand::new(args.nix_store);
+    let mut build = NixCommand::new(&args.nix_store);
     build.args(["--realise", &drv]);
-    info!(?build, "Building...");
-    let out = build.call().context("nix-instantiate failed")?;
+    let build_cmd = build.0.to_string();
+    info!(build_cmd, "Building...");
+    let out = build
+        .call()
+        .context("nix-instantiate failed")
+        .with_advice("Command", NamedSource::new("nix-build", build_cmd))?;
 
+    Ok(out)
+}
+
+fn run(args: Args) -> Result<()> {
+    let build: Build = parse_json("", &args.build_json).context("Couldn't parse Build spec")?;
+    let out = run_build(&args, &build).with_json_advice("Provided Build", &build)?;
     println!("{out}");
     Ok(())
 }
@@ -402,63 +372,30 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn test_fetchexpr_parse_url_bad_url() {
+    fn test_fetchexpr_git_ref() {
         assert_eq!(
-            FetchExprError::ParseUrl("bad".into(), url::ParseError::RelativeUrlWithoutBase),
-            FetchExpr::parse_url("bad").unwrap_err(),
+            r#"builtins.fetchGit { url = "https://example.com/"; ref = "ref"; }"#,
+            FetchExpr::parse_url("git+https://example.com/?ref=ref")
+                .unwrap()
+                .to_string()
         );
     }
     #[test]
-    fn test_fetchexpr_parse_url_bad_scheme() {
-        let url = "bad://";
+    fn test_fetchexpr_git_rev() {
         assert_eq!(
-            FetchExprError::Url(
-                Url::parse(url).unwrap(),
-                FetchExprUrlError::Fetcher("bad".into()),
-            ),
-            FetchExpr::parse_url(url).unwrap_err(),
+            r#"builtins.fetchGit { url = "https://example.com/"; rev = "rev"; }"#,
+            FetchExpr::parse_url("git+https://example.com/?rev=rev")
+                .unwrap()
+                .to_string()
         );
     }
     #[test]
-    fn test_fetchexpr_parse_url_unknown_query() {
-        let url = "git+https://example.com/?bad=yes";
+    fn test_fetchexpr_git_ref_rev() {
         assert_eq!(
-            FetchExprError::Url(
-                Url::parse(url).unwrap(),
-                FetchExprUrlError::UnknownQueryParameter("bad".into()),
-            ),
-            FetchExpr::parse_url(url).unwrap_err(),
-        );
-    }
-    #[test]
-    fn test_fetchexpr_parse_url_missing_rev() {
-        let url = "git+https://example.com/";
-        assert_eq!(
-            FetchExprError::Url(
-                Url::parse(url).unwrap(),
-                FetchExprUrlError::MissingQueryParameter("rev"),
-            ),
-            FetchExpr::parse_url(url).unwrap_err(),
-        );
-    }
-    #[test]
-    fn test_fetchexpr_parse_url_git() {
-        assert_eq!(
-            FetchExpr::FetchGit {
-                url: "git://example.com/".into(),
-                rev: "abc123".into(),
-            },
-            FetchExpr::parse_url("git://example.com/?rev=abc123").unwrap(),
-        );
-    }
-    #[test]
-    fn test_fetchexpr_parse_url_git_https() {
-        assert_eq!(
-            FetchExpr::FetchGit {
-                url: "https://example.com/".into(),
-                rev: "abc123".into(),
-            },
-            FetchExpr::parse_url("git+https://example.com/?rev=abc123").unwrap(),
+            r#"builtins.fetchGit { url = "https://example.com/"; ref = "ref"; rev = "rev"; }"#,
+            FetchExpr::parse_url("git+https://example.com/?ref=ref&rev=rev")
+                .unwrap()
+                .to_string()
         );
     }
 }

@@ -1767,6 +1767,7 @@ dependencies = [
  "clap-stdin",
  "derive_more",
  "gorgon-build-helper",
+ "gorgon-util",
  "gorgon-util-cli",
  "gorgond-client",
  "miette",
@@ -1813,6 +1814,8 @@ name = "gorgon-util"
 version = "0.1.0"
 dependencies = [
  "miette",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
  "url",
 ]
@@ -1890,6 +1893,7 @@ dependencies = [
  "gorgon-util",
  "gorgond-client",
  "gorgond-diesel",
+ "hex",
  "humantime",
  "miette",
  "minicbor",

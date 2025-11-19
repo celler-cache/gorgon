@@ -379,6 +379,7 @@ pub struct BuildInput {
     pub build_id: Uuid,
     pub key: String,
     pub source: String,
+    pub commit_id: Option<Uuid>,
 }
 impl BuildInput {
     gen_model!(build_inputs, BuildInput);
@@ -443,6 +444,7 @@ impl Build {
                 build_id: id,
                 key: k.into(),
                 source: v.into(),
+                commit_id: None,
             }),
         )
     }
@@ -896,6 +898,7 @@ impl RepositoryMergeRequestVersion {
 #[diesel(belongs_to(BuildTemplateInput, foreign_key = input_id))]
 pub struct Bisection {
     pub id: Uuid,
+    pub project_id: Uuid,
 
     pub template_id: Option<Uuid>,
     pub template_kind: String,
@@ -929,9 +932,11 @@ impl Bisection {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 #[diesel(belongs_to(Bisection, foreign_key = bisection_id))]
 #[diesel(belongs_to(Rollup, foreign_key = rollup_id))]
+#[diesel(belongs_to(BisectionStep, foreign_key = fork_step_id))]
 pub struct BisectionRollup {
     pub bisection_id: Uuid,
     pub rollup_id: Uuid,
+    pub fork_step_id: Option<Uuid>,
 }
 
 #[derive(

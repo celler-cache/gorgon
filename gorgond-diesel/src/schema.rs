@@ -11,6 +11,7 @@ pub mod gorgond {
         gorgond.bisection_rollups (bisection_id, rollup_id) {
             bisection_id -> Uuid,
             rollup_id -> Uuid,
+            fork_step_id -> Nullable<Uuid>,
         }
     }
 
@@ -28,6 +29,7 @@ pub mod gorgond {
     diesel::table! {
         gorgond.bisections (id) {
             id -> Uuid,
+            project_id -> Uuid,
             template_id -> Nullable<Uuid>,
             template_kind -> Text,
             template_expr -> Text,
@@ -46,6 +48,7 @@ pub mod gorgond {
             build_id -> Uuid,
             key -> Text,
             source -> Text,
+            commit_id -> Nullable<Uuid>,
         }
     }
 
@@ -219,6 +222,7 @@ pub mod gorgond {
         }
     }
 
+    diesel::joinable!(bisection_rollups -> bisection_steps (fork_step_id));
     diesel::joinable!(bisection_rollups -> bisections (bisection_id));
     diesel::joinable!(bisection_rollups -> rollups (rollup_id));
     diesel::joinable!(bisection_steps -> bisections (bisection_id));
@@ -226,7 +230,9 @@ pub mod gorgond {
     diesel::joinable!(bisection_steps -> rollup_batches (batch_id));
     diesel::joinable!(bisections -> build_template_inputs (input_id));
     diesel::joinable!(bisections -> build_templates (template_id));
+    diesel::joinable!(bisections -> projects (project_id));
     diesel::joinable!(build_inputs -> builds (build_id));
+    diesel::joinable!(build_inputs -> commits (commit_id));
     diesel::joinable!(build_template_input_commits -> build_template_inputs (input_id));
     diesel::joinable!(build_template_input_commits -> commits (commit_id));
     diesel::joinable!(build_template_inputs -> build_templates (template_id));

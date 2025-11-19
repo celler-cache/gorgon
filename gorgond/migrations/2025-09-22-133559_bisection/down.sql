@@ -2,8 +2,13 @@
 --
 -- SPDX-License-Identifier: EUPL-1.2
 
-DROP TABLE bisection_steps;
+-- This will fail if there are commit-dependent builds in the database; remove them manually.
+ALTER TABLE build_inputs DROP CONSTRAINT build_inputs_source_or_commit;
+ALTER TABLE build_inputs ADD CONSTRAINT build_inputs_source_check CHECK (source <> '');
+ALTER TABLE build_inputs DROP COLUMN commit_id;
+
 DROP TABLE bisection_rollups;
+DROP TABLE bisection_steps;
 DROP TABLE bisections;
 
 DROP TABLE rollup_batch_commits;

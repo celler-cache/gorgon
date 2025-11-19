@@ -12,6 +12,7 @@ license = "EUPL-1.2"
 gorgon-build-helper = { path = "../gorgon-build-helper" }
 gorgond-client = { path = "../gorgond-client" }
 gorgon-util-cli = { path = "../gorgon-util-cli" }
+gorgon-util = { path = "../gorgon-util", features = ["source_url", "json"] }
 nix-daemon = { path = "../nix-daemon" }
 
 chrono.workspace = true

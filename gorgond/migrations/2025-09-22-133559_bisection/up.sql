@@ -63,6 +63,7 @@ COMMENT ON TABLE rollup_batch_commits IS 'Commits included in a batch.';
 
 CREATE TABLE bisections (
     id             UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    project_id     UUID NOT NULL    REFERENCES projects (id) ON DELETE CASCADE,
 
     template_id    UUID             REFERENCES build_templates (id)       ON DELETE SET NULL,
     template_kind  TEXT NOT NULL    CHECK (template_kind <> ''),
@@ -81,19 +82,11 @@ SELECT diesel_manage_updated_at('bisections');
 
 ---
 
-CREATE TABLE bisection_rollups (
-    bisection_id UUID NOT NULL REFERENCES bisections (id) ON DELETE CASCADE,
-    rollup_id    UUID NOT NULL REFERENCES rollups (id)    ON DELETE CASCADE,
-    PRIMARY KEY (bisection_id, rollup_id)
-);
-
----
-
 CREATE TABLE bisection_steps (
     id            UUID PRIMARY KEY CHECK (id <> '00000000-0000-0000-0000-000000000000'),
     bisection_id  UUID NOT NULL    REFERENCES bisections (id)     ON DELETE CASCADE,
     batch_id      UUID NOT NULL    REFERENCES rollup_batches (id) ON DELETE CASCADE,
-    build_id      UUID NOT NULL    REFERENCES builds (id)         ON DELETE SET NULL,
+    build_id      UUID NOT NULL    REFERENCES builds (id)         ON DELETE CASCADE,
 
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -104,3 +97,18 @@ CREATE TABLE bisection_steps (
 SELECT diesel_manage_updated_at('bisection_steps');
 
 ---
+
+CREATE TABLE bisection_rollups (
+    bisection_id UUID NOT NULL REFERENCES bisections (id)      ON DELETE CASCADE,
+    rollup_id    UUID NOT NULL REFERENCES rollups (id)         ON DELETE CASCADE,
+    fork_step_id UUID          REFERENCES bisection_steps (id) ON DELETE CASCADE,
+    PRIMARY KEY (bisection_id, rollup_id)
+);
+
+---
+
+ALTER TABLE build_inputs ADD COLUMN commit_id UUID;
+ALTER TABLE build_inputs ADD FOREIGN KEY (commit_id) REFERENCES commits (id);
+ALTER TABLE build_inputs DROP CONSTRAINT build_inputs_source_check;
+ALTER TABLE build_inputs ADD CONSTRAINT build_inputs_source_or_commit
+    CHECK ((source = '' AND commit_id IS NOT NULL) OR (source <> '' AND commit_id IS NULL));

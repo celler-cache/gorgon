@@ -254,10 +254,24 @@ impl fmt::Display for Helper {
             .get_current_dir()
             .map(|p| p.to_string_lossy())
             .unwrap_or_default();
-        writeln!(f, "[{cwd}]")?;
+        if !cwd.is_empty() {
+            writeln!(f, "[{cwd}]")?;
+        }
         write!(f, "$ {}", self.get_program().to_string_lossy())?;
         for arg in self.get_args() {
-            write!(f, " {}", arg.to_string_lossy())?;
+            let s = arg.to_string_lossy();
+            if s.starts_with("--") {
+                write!(f, " \\\n   ")?;
+            }
+            if s.contains(char::is_whitespace) {
+                if !s.contains('\'') {
+                    write!(f, " '{s}'")?;
+                } else {
+                    write!(f, " {s:?}")?;
+                }
+            } else {
+                write!(f, " {s}")?;
+            }
         }
         Ok(())
     }

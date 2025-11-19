@@ -316,6 +316,8 @@ pub fn run(args: Args) -> miette::Result<()> {
         .with(&args.helpers)
         .with_arg("-")
         .with_stdin(Stdio::piped())
+        .with_stdout(Stdio::piped())
+        .with_stderr(Stdio::piped())
         .into_task(None);
 
     // Start the builder process...

@@ -919,7 +919,7 @@ async fn worker_internal_allocate_build(
     JsonRequest(_req): JsonRequest<api::WorkerInternalAllocateBuildRequest>,
 ) -> Result<JsonResponse<api::WorkerInternalAllocateBuildResponse<'static>>> {
     transaction!(state, async |conn: &mut _| {
-        use schema::gorgond::{build_inputs, builds, workers};
+        use schema::gorgond::{build_inputs, builds, commits, repositories, workers};
         let now = Utc::now();
 
         // Resolve the worker slug to an ID, or create it if it doesn't exist.
@@ -984,11 +984,36 @@ async fn worker_internal_allocate_build(
         };
 
         let inputs = build_inputs::table
+            .left_join(
+                commits::table
+                    .on(commits::id.eq(build_inputs::commit_id.assume_not_null()))
+                    .inner_join(
+                        repositories::table.on(repositories::id.eq(commits::repository_id)),
+                    ),
+            )
             .filter(build_inputs::build_id.eq(build.id))
-            .get_results::<models::BuildInput>(conn)
+            .select((
+                models::BuildInput::as_select(),
+                Option::<(models::Commit, models::Repository)>::as_select(),
+            ))
+            .get_results::<(
+                models::BuildInput,
+                Option<(models::Commit, models::Repository)>,
+            )>(conn)
             .await?;
         Ok(JsonResponse(api::WorkerInternalAllocateBuildResponse {
-            build: build.to_client(inputs),
+            build: build.to_client(inputs.into_iter().map(|(mut input, src)| {
+                // Resolve Source URLs for dynamic sources.
+                if let Some((commit, repo)) = src {
+                    // FIXME: Bodge.
+                    input.source = format!(
+                        "git+{}?ref=refs/gorgon/rev/{}",
+                        repo.storage,
+                        hex::encode(commit.hash)
+                    );
+                }
+                input
+            })),
         }))
     })
     .await

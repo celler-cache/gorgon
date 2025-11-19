@@ -48,3 +48,4 @@ git2 = "0.20.2"
 tempfile.workspace = true
 tracing-indicatif = "0.3.12"
 directories = "6.0.0"
+hex = "0.4.3"

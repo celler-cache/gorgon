@@ -210,6 +210,7 @@ impl TaskSource for BisectTemplateSource {
                 diesel::insert_into(schema::bisections::table)
                     .values(models::Bisection {
                         id: bisection_id,
+                        project_id: template.project_id,
                         template_id: Some(input.template_id),
                         template_kind: template.kind.clone(),
                         template_expr: template.expr.clone(),
@@ -226,6 +227,7 @@ impl TaskSource for BisectTemplateSource {
                     .values(models::BisectionRollup {
                         bisection_id,
                         rollup_id,
+                        fork_step_id: None,
                     })
                     .execute(conn)
                     .await?;
