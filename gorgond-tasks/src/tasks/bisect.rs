@@ -6,18 +6,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::prelude::*;
 use clap::Parser;
-use conflate::Merge;
 use derive_more::Display;
 use diesel::{prelude::*, sql_query, sql_types};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::TryStreamExt;
 use gorgond_diesel::{TransactionError, models, schema::gorgond as schema};
 use humantime::Duration;
-use itertools::Itertools;
-use miette::Result;
+use itertools::{Either, Itertools};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument};
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::tasks::TaskSource;
@@ -64,6 +62,12 @@ pub struct BisectTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedFork {
+    pub rollup: models::Rollup,
+    pub rollup_inputs: Vec<models::RollupInput>,
+    pub bisect_rollup: models::BisectionRollup,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedStep {
     pub step: models::BisectionStep,
     pub build: models::Build,
@@ -73,6 +77,7 @@ pub struct ResolvedStep {
 pub struct ResolvedBatch {
     pub batch: models::RollupBatch,
     pub resolved_step: Option<ResolvedStep>,
+    pub resolved_forks: Vec<ResolvedFork>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRollup {
@@ -144,13 +149,20 @@ impl TaskSource for Bisect {
         }
         let rows = sql_query(
             r#"
-SELECT br.bisection_id, batch.rollup_id, batch.id AS batch_id,
+SELECT br.bisection_id, batch.rollup_id,
+       batch.id AS batch_id, COALESCE(commits.num, 0) AS num_commits,
        step.id AS step_id, build.id AS build_id, build.result AS build_result,
        forks.num IS NOT NULL AS has_forks
   FROM gorgond.bisection_rollups AS br
   INNER JOIN gorgond.rollup_batches AS batch ON (br.rollup_id = batch.rollup_id)
   LEFT JOIN gorgond.bisection_steps AS step ON (step.batch_id = batch.id)
   LEFT JOIN gorgond.builds AS build ON (build.id = step.build_id)
+
+  -- Count number of commits in this batch.
+  LEFT JOIN (
+    SELECT COUNT(bc.commit_id) AS num, bc.batch_id
+    FROM gorgond.rollup_batch_commits AS bc
+    GROUP BY bc.batch_id) AS commits ON (commits.batch_id = batch.id)
 
   -- Count number of "forks" originating from this step.
   LEFT JOIN (
@@ -160,8 +172,8 @@ SELECT br.bisection_id, batch.rollup_id, batch.id AS batch_id,
 
   -- 1. Does this batch lack a step or build?
   WHERE (step.id IS NULL OR build.id IS NULL)
-  -- 2. Did this step fail, but no forks have been spawned?
-    OR (build.result = 'failure' AND forks.num IS NULL)
+  -- 2. Did this step fail, with >1 commit, but no forks have been spawned?
+    OR (build.result = 'failure' AND COALESCE(commits.num, 0) > 1 AND forks.num IS NULL)
 
   ORDER BY rollup_id, batch_id
   FOR NO KEY UPDATE OF batch SKIP LOCKED
@@ -273,33 +285,62 @@ SELECT br.bisection_id, batch.rollup_id, batch.id AS batch_id,
         // This is silly, but basically exists for debuggability.
         #[derive(Default)]
         struct MergedData {
+            // From Forks.
+            pub rollups: Vec<models::Rollup>,
+            pub rollup_inputs: Vec<models::RollupInput>,
+            pub bisect_rollups: Vec<models::BisectionRollup>,
+
+            // From Steps.
             pub builds: Vec<models::Build>,
             pub build_inputs: Vec<models::BuildInput>,
             pub steps: Vec<models::BisectionStep>,
         }
         let MergedData {
+            rollups,
+            rollup_inputs,
+            bisect_rollups,
             builds,
             build_inputs,
             steps,
-        } = data
-            .into_iter()
+        } = (data.into_iter())
             .flat_map(|d| d.resolved_rollups.into_values())
             .flat_map(|d| d.resolved_batches.into_values())
-            .flat_map(|d| d.resolved_step)
-            .fold(
-                MergedData::default(),
-                |mut data,
-                 ResolvedStep {
-                     step,
-                     build,
-                     build_input,
-                 }| {
+            .fold(MergedData::default(), |mut data, batch| {
+                for ResolvedFork {
+                    rollup,
+                    mut rollup_inputs,
+                    bisect_rollup,
+                } in batch.resolved_forks
+                {
+                    data.rollups.push(rollup);
+                    data.rollup_inputs.append(&mut rollup_inputs);
+                    data.bisect_rollups.push(bisect_rollup);
+                }
+                if let Some(ResolvedStep {
+                    step,
+                    build,
+                    build_input,
+                }) = batch.resolved_step
+                {
                     data.steps.push(step);
                     data.builds.push(build);
                     data.build_inputs.push(build_input);
-                    data
-                },
-            );
+                }
+                data
+            });
+
+        diesel::insert_into(schema::rollups::table)
+            .values(rollups)
+            .execute(conn)
+            .await?;
+        diesel::insert_into(schema::rollup_inputs::table)
+            .values(rollup_inputs)
+            .execute(conn)
+            .await?;
+        diesel::insert_into(schema::bisection_rollups::table)
+            .values(bisect_rollups)
+            .execute(conn)
+            .await?;
 
         diesel::insert_into(schema::builds::table)
             .values(builds)
@@ -341,7 +382,7 @@ impl Bisect {
     ) -> Option<ResolvedRollup> {
         Some(ResolvedRollup {
             resolved_batches: (batches.into_values())
-                .filter_map(|batch| self.resolve_batch(now, b, batch))
+                .filter_map(|batch| self.resolve_batch(now, b, &rollup, batch))
                 .map(|b| (b.batch.id, b))
                 .collect(),
             rollup,
@@ -353,15 +394,23 @@ impl Bisect {
         &self,
         now: DateTime<Utc>,
         b: &models::Bisection,
-        BisectTaskRollupBatch { batch, step, .. }: BisectTaskRollupBatch,
+        rollup: &models::Rollup,
+        BisectTaskRollupBatch {
+            batch,
+            step,
+            commits,
+        }: BisectTaskRollupBatch,
     ) -> Option<ResolvedBatch> {
         Some(ResolvedBatch {
             resolved_step: (step.is_none()).then(|| self.resolve_step(now, b, &batch)),
+            resolved_forks: step
+                .map(|step| self.resolve_forks(now, b, rollup, step, commits))
+                .unwrap_or_default(),
             batch,
         })
-        .filter(|rb| rb.resolved_step.is_some())
+        .filter(|b| b.resolved_step.is_some() || !b.resolved_forks.is_empty())
     }
-    #[instrument(name = "step")]
+    #[instrument(name = "step", skip_all)]
     fn resolve_step(
         &self,
         now: DateTime<Utc>,
@@ -398,6 +447,62 @@ impl Bisect {
                 key: b.input_key.clone(),
                 source: String::new(),
                 commit_id: Some(batch.commit_id),
+            },
+        }
+    }
+    #[instrument(name = "forks", skip_all)]
+    fn resolve_forks(
+        &self,
+        now: DateTime<Utc>,
+        b: &models::Bisection,
+        rollup: &models::Rollup,
+        step: BisectTaskStep,
+        commits: BTreeSet<Uuid>,
+    ) -> Vec<ResolvedFork> {
+        // Just split the batch down the middle for now.
+        // BTreeSets are sorted, so this is deterministic.
+        let (set_a, set_b): (BTreeSet<Uuid>, BTreeSet<Uuid>) = (commits.into_iter())
+            .enumerate()
+            .partition_map(|(i, v)| match i {
+                i if i.is_multiple_of(2) => Either::Left(v),
+                _ => Either::Right(v),
+            });
+        [set_a, set_b]
+            .map(|commits| self.resolve_fork(now, b, rollup, &step, commits))
+            .to_vec()
+    }
+    #[instrument(name = "fork", skip_all)]
+    fn resolve_fork(
+        &self,
+        now: DateTime<Utc>,
+        b: &models::Bisection,
+        rollup: &models::Rollup,
+        step: &BisectTaskStep,
+        commits: impl IntoIterator<Item = Uuid>,
+    ) -> ResolvedFork {
+        let rollup_id = Uuid::now_v7();
+        ResolvedFork {
+            rollup: models::Rollup {
+                id: rollup_id,
+                repository_id: rollup.repository_id,
+                rolled_at: None,
+                updated_at: now,
+                created_at: now,
+            },
+            rollup_inputs: (commits.into_iter())
+                .map(|commit_id| models::RollupInput {
+                    id: Uuid::now_v7(),
+                    rollup_id,
+                    commit_id: Some(commit_id),
+                    source_id: None,
+                    updated_at: now,
+                    created_at: now,
+                })
+                .collect(),
+            bisect_rollup: models::BisectionRollup {
+                bisection_id: b.id,
+                rollup_id,
+                fork_step_id: Some(step.step.id),
             },
         }
     }
