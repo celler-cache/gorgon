@@ -25,6 +25,10 @@ use with_drop::with_drop;
 
 use crate::{models, schema::gorgond_github as schema};
 
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("Sync Failed")]
+pub struct SyncErrors(#[related] Vec<miette::Report>);
+
 #[derive(Debug, Clone, Parser)]
 #[group(id = "sync")]
 pub struct Args {
@@ -68,13 +72,25 @@ impl Args {
             .into_diagnostic()
             .context("Couldn't create thread pool")?;
 
-        if !self.no_github {
-            self.sync_github(&pool, rt.clone(), &client, now)?;
+        let mut errs = Vec::new();
+        if !self.no_github
+            && let Err(err) = self
+                .sync_github(&pool, rt.clone(), &client, now)
+                .context("Github Sync Failed")
+        {
+            errs.push(err);
         }
-        if !self.no_pull_requests {
-            self.sync_pull_requests(&pool, rt.clone(), &client, now)?;
+        if !self.no_pull_requests
+            && let Err(err) = self
+                .sync_pull_requests(&pool, rt.clone(), &client, now)
+                .context("Pull Request Sync Failed")
+        {
+            errs.push(err);
         }
 
+        if !errs.is_empty() {
+            return Err(miette::Report::new(SyncErrors(errs)));
+        }
         Ok(())
     }
 
