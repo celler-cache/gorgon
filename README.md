@@ -75,7 +75,7 @@ commit, and try building Blender. This will be pretty quick, since Blender is al
 available from the binary cache, but will still show off how this all works:
 
 ```
-$ cargo run -p gorgonctl -- project builds test create -k nix \
+$ cargo run -p gorgonctl -- project slug test build create -k nix \
     -i 'nixpkgs=git+https://github.com/NixOS/nixpkgs?rev=b75693fb46bfaf09e662d09ec076c5a162efa9f6' \
     -e '{ nixpkgs }: (import nixpkgs {}).pkgs.blender'
 {
@@ -108,7 +108,7 @@ $ cargo run -p gorgon-build -- -vvi $(hostname) --helper-dev
 So how did that go? Let's find out!
 
 ```bash
-$ cargo run -p gorgonctl -- project builds test list
+$ cargo run -p gorgonctl -- project slug test build list
 ```
 
 You can also see a log of every event that happened during the build, though note that
