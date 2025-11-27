@@ -409,7 +409,7 @@ impl TaskSource for RepoSyncTaskSource {
                     token,
                     &mut r.remote_anonymous(url.as_str())?,
                     Direction::Fetch,
-                    |remote| r.fetch(token, remote, refs),
+                    |remote| r.fetch(token, remote, refs.iter().map(|(dst, src)| (src, dst))),
                 ) {
                     Ok(_) => {}
                     Err(err @ RemoteError(_, _, RemoteErrorKind::Connect(_))) => log_err(err),
@@ -435,7 +435,8 @@ impl TaskSource for RepoSyncTaskSource {
                 .or_insert_with(|| ResolvedCommit::new(now, &repo, oid));
 
             // If this ref was resolved from a source, make sure we update it.
-            if let Some(src) = src {
+            if let Some(mut src) = src {
+                src.fetched_at = Some(now);
                 resolved_sources.insert(src.id, oid);
                 resolved_commit.sources.insert(src.id, src);
             }
@@ -554,7 +555,10 @@ async fn save_commits(
             schema::commit_sources::source,
         ))
         .do_update()
-        .set(schema::commit_sources::commit_id.eq(excluded(schema::commit_sources::commit_id)))
+        .set((
+            schema::commit_sources::commit_id.eq(excluded(schema::commit_sources::commit_id)),
+            schema::commit_sources::fetched_at.eq(excluded(schema::commit_sources::fetched_at)),
+        ))
         .execute(conn)
         .await?;
 
