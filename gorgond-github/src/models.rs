@@ -53,9 +53,21 @@ impl Repo {
         current_at: DateTime<Utc>,
         r: &models::Repository,
     ) -> Result<Self> {
+        // Github just stopped returning `full_name` in events, all we get is:
+        //
+        // "repo": {
+        //   "id": 14396900,
+        //   "name": "nixos-homepage",
+        //   "url": "https://api.github.com/repos/NixOS/nixos-homepage"
+        // }
+        //
+        // So we're gonna just do something equally stupid and parse it out of the URL.
+        let name = (r.url.as_str())
+            .strip_prefix("https://api.github.com/repos/")
+            .ok_or_else(|| miette!("unexpected repo URL format: {}", r.url))?;
         Ok(Self {
             id: sign(&r.id).context("Invalid ID")?,
-            name: (r.full_name.as_ref()).unwrap_or(&r.name).clone(),
+            name: name.to_string(),
             repository_id: None,
             polled_at: None,
             current_at: Some(current_at),

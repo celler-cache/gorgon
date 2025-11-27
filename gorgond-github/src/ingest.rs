@@ -31,7 +31,8 @@ pub enum EventError {
     InvalidJson(#[from] serde_json::Error),
 
     #[error("Invalid Event")]
-    FromValue(
+    #[diagnostic(severity(Warning))]
+    InvalidEvent(
         #[label("{2}")] SourceOffset,
         #[source_code] NamedSource<String>,
         #[source] serde_json::Error,
@@ -80,7 +81,7 @@ impl Args {
     ) -> Result<(), EventError> {
         let event = serde_json::value::from_value(value.clone()).map_err(|err| {
             let src = serde_json::to_string_pretty(&value).unwrap_or_default();
-            EventError::FromValue(
+            EventError::InvalidEvent(
                 SourceOffset::from_location(&src, err.line(), err.column()),
                 NamedSource::new("event.json", src).with_language("JSON"),
                 err,
