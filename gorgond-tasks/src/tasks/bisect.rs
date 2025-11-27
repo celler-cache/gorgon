@@ -101,7 +101,7 @@ pub struct Bisect {
 }
 impl TaskSource for Bisect {
     const ID: &str = "Bisect";
-    const FRIENDLY: &str = "Bisect ";
+    const FRIENDLY: &str = "Bisect";
 
     type Error = TransactionError;
     type Task = BisectTask;
