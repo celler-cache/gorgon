@@ -38,6 +38,18 @@ use tokio::runtime::Runtime;
 use tokio_util::{io::SyncIoBridge, sync::CancellationToken};
 use tracing::{debug, error, info, instrument, warn};
 
+/// gorgon-build requests a build from gorgond, builds it, and exits.
+///
+/// This program is build system agnostic; to handle the specifics of *how* to perform a
+/// build, it looks at the `kind` field on the build, and tries to spawn a program called
+/// `gorgon-build-{kind}` in $PATH, and use it as a build helper.
+///
+/// The helper will receive a JSON-encoded Build object (see `gorgond-client`) on stdin,
+/// and is expected to output logs and events using (or in a manner compatible with) the
+/// `gorgon-build-helper` library, and exit with status code 0 for a successful build, or
+/// any other code for an unsuccessful build.
+///
+/// gorgon-build will then take care of heartbeats, log uploads, and reporting to gorgond.
 #[derive(Debug, Clone, Parser)]
 pub struct Args {
     /// Base URL for the Gorgon API to talk to.
