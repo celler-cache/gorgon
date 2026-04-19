@@ -16,6 +16,7 @@ pub mod wire;
 use crate::{
     BuildMode, ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store,
 };
+use futures::{stream, Stream};
 use std::future::Future;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::{
@@ -1255,6 +1256,98 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
             }
         }
         DaemonProgress::new(self, Caller { paths, mode }, Returner)
+    }
+
+    fn nar_from_path<S>(
+        &mut self,
+        path: S,
+    ) -> impl Stream<Item = Result<Vec<u8>, Error>> + Send + Unpin
+    where
+        S: AsRef<str> + Send + Sync + Debug,
+    {
+        // Amount of NAR body bytes to read per chunk.
+        const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+        // State carried between stream iterations.
+        enum State<S> {
+            Initial(S),
+            Reading { bytes_left: usize },
+        }
+
+        /// Reads a single chunk and returns it together with the remaining
+        /// bytes left to read.
+        async fn read_chunk<C>(
+            store: &mut DaemonStore<C>,
+            mut bytes_left: usize,
+        ) -> Result<(Vec<u8>, usize), Error>
+        where
+            C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+        {
+            let to_read = std::cmp::min(CHUNK_SIZE, bytes_left);
+            let mut chunk = vec![0u8; to_read];
+            match store.conn.read(&mut chunk).await? {
+                0 => Err(Error::Invalid(format!(
+                    "NAR file size mismatch. {bytes_left} bytes left but stream returned 0"
+                ))),
+                n => {
+                    chunk.truncate(n);
+                    bytes_left -= n;
+                    Ok((chunk, bytes_left))
+                }
+            }
+        }
+
+        Box::pin(stream::try_unfold(
+            (self, State::Initial(path)),
+            async move |(store, mut state)| -> Result<Option<(Vec<u8>, _)>> {
+                loop {
+                    match state {
+                        State::Initial(path) => {
+                            // Look up the NAR size up front. We need it to know
+                            // when to stop reading the body.
+                            //
+                            // TODO This is technically racy, because the store path
+                            // can change between looking this up and fetching the
+                            // NAR. The better implementation would be to parse the
+                            // NAR to find out how long it is.
+                            let path_info =
+                                store.query_pathinfo(&path).result().await?.ok_or_else(|| {
+                                    Error::Invalid(format!(
+                                        "NarFromPath: path not found: {}",
+                                        path.as_ref()
+                                    ))
+                                })?;
+
+                            wire::write_op(&mut store.conn, wire::Op::NarFromPath)
+                                .await
+                                .with_field("NarFromPath.<op>")?;
+                            wire::write_string(&mut store.conn, path.as_ref())
+                                .await
+                                .with_field("NarFromPath.path")?;
+
+                            // TODO Do we need to do this?
+                            while let Some(stderr) = wire::read_stderr(&mut store.conn).await? {
+                                if let Stderr::Error(err) = stderr {
+                                    return Err(Error::NixError(err));
+                                }
+                            }
+
+                            state = State::Reading {
+                                bytes_left: path_info.nar_size.try_into().unwrap(),
+                            };
+
+                            // Fallthrough to reading the chunk.
+                            continue;
+                        }
+                        State::Reading { bytes_left: 0 } => return Ok(None),
+                        State::Reading { bytes_left } => {
+                            let (item, bytes_left) = read_chunk(store, bytes_left).await?;
+                            return Ok(Some((item, (store, State::Reading { bytes_left }))));
+                        }
+                    }
+                }
+            },
+        ))
     }
 }
 

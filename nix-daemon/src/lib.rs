@@ -26,6 +26,7 @@
 pub mod nix;
 
 use chrono::{DateTime, Utc};
+use futures::Stream;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -732,6 +733,17 @@ pub trait Store {
         Ps: IntoIterator + Send + Debug,
         Ps::IntoIter: ExactSizeIterator + Send,
         Ps::Item: AsRef<str> + Send + Sync;
+
+    /// Export the given path as a NAR file.
+    ///
+    /// Beware! You need to drain the stream before you call any other store
+    /// methods.
+    fn nar_from_path<S>(
+        &mut self,
+        path: S,
+    ) -> impl Stream<Item = Result<Vec<u8>, Self::Error>> + Send + Unpin
+    where
+        S: AsRef<str> + Send + Sync + Debug;
 }
 
 /// Returned from [`Store::query_missing()`].
