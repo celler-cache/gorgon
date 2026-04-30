@@ -1259,47 +1259,46 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
     }
 
     fn nar_from_path<S>(
-        &mut self,
+        self,
         path: S,
-    ) -> impl Stream<Item = Result<Vec<u8>, Error>> + Send + Unpin
+    ) -> impl Stream<Item = Result<Vec<u8>, Error>> + Send + Unpin + 'static
     where
         S: AsRef<str> + Send + Sync + Debug,
+        C: 'static,
     {
         // Amount of NAR body bytes to read per chunk.
         const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
+        let path: String = path.as_ref().to_owned();
+
         // State carried between stream iterations.
-        enum State<S> {
-            Initial(S),
+        enum State {
+            Initial(String),
             Reading { bytes_left: usize },
         }
 
         /// Reads a single chunk and returns it together with the remaining
         /// bytes left to read.
-        async fn read_chunk<C>(
-            store: &mut DaemonStore<C>,
-            mut bytes_left: usize,
-        ) -> Result<(Vec<u8>, usize), Error>
+        async fn read_chunk<C>(store: &mut C, bytes_left: usize) -> Result<(Vec<u8>, usize), Error>
         where
-            C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+            C: AsyncReadExt + Unpin + Send,
         {
             let to_read = std::cmp::min(CHUNK_SIZE, bytes_left);
             let mut chunk = vec![0u8; to_read];
-            match store.conn.read(&mut chunk).await? {
+            match store.read(&mut chunk).await? {
                 0 => Err(Error::Invalid(format!(
                     "NAR file size mismatch. {bytes_left} bytes left but stream returned 0"
                 ))),
                 n => {
                     chunk.truncate(n);
-                    bytes_left -= n;
-                    Ok((chunk, bytes_left))
+                    Ok((chunk, bytes_left - n))
                 }
             }
         }
 
         Box::pin(stream::try_unfold(
             (self, State::Initial(path)),
-            async move |(store, mut state)| -> Result<Option<(Vec<u8>, _)>> {
+            async move |(mut store, mut state)| -> Result<Option<(Vec<u8>, _)>> {
                 loop {
                     match state {
                         State::Initial(path) => {
@@ -1312,16 +1311,13 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
                             // NAR to find out how long it is.
                             let path_info =
                                 store.query_pathinfo(&path).result().await?.ok_or_else(|| {
-                                    Error::Invalid(format!(
-                                        "NarFromPath: path not found: {}",
-                                        path.as_ref()
-                                    ))
+                                    Error::Invalid(format!("NarFromPath: path not found: {}", path))
                                 })?;
 
                             wire::write_op(&mut store.conn, wire::Op::NarFromPath)
                                 .await
                                 .with_field("NarFromPath.<op>")?;
-                            wire::write_string(&mut store.conn, path.as_ref())
+                            wire::write_string(&mut store.conn, &path)
                                 .await
                                 .with_field("NarFromPath.path")?;
 
@@ -1341,7 +1337,8 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
                         }
                         State::Reading { bytes_left: 0 } => return Ok(None),
                         State::Reading { bytes_left } => {
-                            let (item, bytes_left) = read_chunk(store, bytes_left).await?;
+                            let (item, bytes_left) =
+                                read_chunk(&mut store.conn, bytes_left).await?;
                             return Ok(Some((item, (store, State::Reading { bytes_left }))));
                         }
                     }

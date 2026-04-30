@@ -736,14 +736,15 @@ pub trait Store {
 
     /// Export the given path as a NAR file.
     ///
-    /// Beware! You need to drain the stream before you call any other store
-    /// methods.
+    /// Consumes self to avoid the risk of calling other store methods before
+    /// draining the stream. Use a fresh store connection to call this.
     fn nar_from_path<S>(
-        &mut self,
+        self,
         path: S,
-    ) -> impl Stream<Item = Result<Vec<u8>, Self::Error>> + Send + Unpin
+    ) -> impl Stream<Item = Result<Vec<u8>, Self::Error>> + Send + Unpin + 'static
     where
-        S: AsRef<str> + Send + Sync + Debug;
+        S: AsRef<str> + Send + Sync + Debug,
+        Self: 'static;
 }
 
 /// Returned from [`Store::query_missing()`].
