@@ -347,8 +347,8 @@ async fn test_build() {
     // actually build something, so it needs a derivation with a known output,
     // which is incredibly unlikely to already exist in the user's store.
     let cookie = {
-        use rand::distributions::{Alphanumeric, DistString};
-        Alphanumeric.sample_string(&mut rand::thread_rng(), 16)
+        use rand::distr::{Alphanumeric, SampleString};
+        Alphanumeric.sample_string(&mut rand::rng(), 16)
     };
 
     // Instantiate a derivation.
