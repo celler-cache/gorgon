@@ -5,7 +5,7 @@
 { pkgs ? import ./nixpkgs.default.nix
 , lib ? pkgs.lib
 , nixVersions ? pkgs.nixVersions
-, lixVersions ? pkgs.lixVersions
+, lixPackageSets ? pkgs.lixPackageSets
 }:
 let
   toVersion = lib.replaceStrings ["_"] ["."];
@@ -15,4 +15,4 @@ let
   isLixSupported = attr: _: lib.versionAtLeast (toVersion (lib.removePrefix "lix_" attr)) "2.90";
 in
 lib.filterAttrs isNixSupported nixVersions //
-lib.filterAttrs isLixSupported lixVersions
+lib.filterAttrs isLixSupported lixPackageSets
