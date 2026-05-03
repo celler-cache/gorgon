@@ -1,5 +1,9 @@
 #!/usr/bin/env fish
 
+# SPDX-FileCopyrightText: 2026 embr <hi@liclac.eu>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
 # Move to the repo root.
 cd (dirname (dirname (status dirname)))
 

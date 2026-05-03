@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 embr <hi@liclac.eu>
+
+SPDX-License-Identifier: EUPL-1.2
+-->
+
 # Projects
 A "project" is the top-level container for anything that is "user-scoped", rather than global - a "namespace" was another contender for what to name this. Once we have authentication and authorization, this will be the primary permission boundary.
 

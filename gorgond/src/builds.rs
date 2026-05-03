@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 embr <hi@liclac.eu>
+//
+// SPDX-License-Identifier: EUPL-1.2
+
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use chrono::Duration;
