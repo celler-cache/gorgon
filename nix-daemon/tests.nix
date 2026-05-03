@@ -20,7 +20,12 @@ let
       buildType = "debug";
       inherit (nix-supervisor) src buildInputs nativeBuildInputs;
       cargoDepsName = "nix-supervisor";
-      cargoLock.lockFile = ../Cargo.lock;
+      cargoLock = {
+        lockFile = ../Cargo.lock;
+        outputHashes = {
+          "octocrab-0.47.1" = "sha256-TjkIlU5l3q6lvlZlXayNdbyYZ/cpxt/PENqBmLLjeAo=";
+        };
+      };
 
       cargoBuildFlags = [ "-p=nix-daemon" "--test=nix" ];
       dontCargoCheck = true;
