@@ -12,6 +12,7 @@ pkgs.mkShell {
     rustc
     rustfmt
     clippy
+    rust-analyzer
 
     # build dependencies
     stdenv.cc
