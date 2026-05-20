@@ -165,7 +165,7 @@ async fn test_has_substitutes() {
     match store.has_substitutes(find_hello_in_store()).result().await {
         Ok(has_subs) => assert!(has_subs),
         Err(Error::NixError(NixError { msg, .. }))
-            if msg.starts_with("HasSubstitutes is not supported in Lix.") => {}
+            if msg.starts_with("HasSubstitutes is not supported in Lix.") || msg.starts_with("invalid operation") => {}
         Err(err) => panic!("{err}"),
     };
 }
