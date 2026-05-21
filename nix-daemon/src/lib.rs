@@ -29,11 +29,10 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, fmt::Debug, future::Future};
 use strum::{AsRefStr, IntoStaticStr};
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -738,13 +737,10 @@ pub trait Store {
     ///
     /// Consumes self to avoid the risk of calling other store methods before
     /// draining the stream. Use a fresh store connection to call this.
-    fn nar_from_path<S>(
+    fn into_nar_from_path<P: AsRef<str> + Send + Sync + Debug>(
         self,
-        path: S,
-    ) -> impl Stream<Item = Result<Vec<u8>, Self::Error>> + Send + Unpin + 'static
-    where
-        S: AsRef<str> + Send + Sync + Debug,
-        Self: 'static;
+        path: P,
+    ) -> impl Progress<T = impl AsyncRead, Error = Self::Error>;
 }
 
 /// Returned from [`Store::query_missing()`].

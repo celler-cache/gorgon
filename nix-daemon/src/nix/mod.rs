@@ -14,13 +14,15 @@ pub mod internal_json;
 pub mod wire;
 
 use crate::{
-    BuildMode, ClientSettings, Error, PathInfo, Progress, Result, ResultExt, Stderr, Store,
+    BuildMode, ClientSettings, Error, PathInfo, Progress, ProgressExt, Result, ResultExt, Stderr,
+    Store,
 };
 use futures::{stream, Stream};
 use std::future::Future;
+use std::marker::PhantomData;
 use std::{collections::HashMap, fmt::Debug};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
 use tokio_stream::StreamExt;
@@ -1258,93 +1260,146 @@ impl<C: AsyncReadExt + AsyncWriteExt + Unpin + Send> Store for DaemonStore<C> {
         DaemonProgress::new(self, Caller { paths, mode }, Returner)
     }
 
-    fn nar_from_path<S>(
+    fn into_nar_from_path<P: AsRef<str> + Send + Sync + Debug>(
         self,
-        path: S,
-    ) -> impl Stream<Item = Result<Vec<u8>, Error>> + Send + Unpin + 'static
-    where
-        S: AsRef<str> + Send + Sync + Debug,
-        C: 'static,
-    {
-        // Amount of NAR body bytes to read per chunk.
-        const CHUNK_SIZE: usize = 16 * 1024 * 1024;
-
-        let path: String = path.as_ref().to_owned();
-
-        // State carried between stream iterations.
-        enum State {
-            Initial(String),
-            Reading { bytes_left: usize },
+        path: P,
+    ) -> impl Progress<T = impl AsyncRead, Error = Self::Error> {
+        struct Caller<P: AsRef<str> + Send + Sync + Debug> {
+            path: P,
         }
-
-        /// Reads a single chunk and returns it together with the remaining
-        /// bytes left to read.
-        async fn read_chunk<C>(store: &mut C, bytes_left: usize) -> Result<(Vec<u8>, usize), Error>
-        where
-            C: AsyncReadExt + Unpin + Send,
-        {
-            let to_read = std::cmp::min(CHUNK_SIZE, bytes_left);
-            let mut chunk = vec![0u8; to_read];
-            match store.read(&mut chunk).await? {
-                0 => Err(Error::Invalid(format!(
-                    "NAR file size mismatch. {bytes_left} bytes left but stream returned 0"
-                ))),
-                n => {
-                    chunk.truncate(n);
-                    Ok((chunk, bytes_left - n))
-                }
+        impl<P: AsRef<str> + Send + Sync + Debug> DaemonProgressCaller for Caller<P> {
+            async fn call<
+                E: From<Error> + From<std::io::Error> + Send + Sync,
+                C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+            >(
+                self,
+                store: &mut DaemonStore<C>,
+            ) -> Result<(), E> {
+                wire::write_op(&mut store.conn, wire::Op::NarFromPath)
+                    .await
+                    .with_field("NarFromPath.<op>")?;
+                wire::write_string(&mut store.conn, self.path)
+                    .await
+                    .with_field("NarFromPath.path")?;
+                Ok(())
             }
         }
 
-        Box::pin(stream::try_unfold(
-            (self, State::Initial(path)),
-            async move |(mut store, mut state)| -> Result<Option<(Vec<u8>, _)>> {
+        // Dummy Returner to let us reuse some of the normal Progress machinery, but as the reader
+        // takes ownership of the store's connection, we instead construct it in NarProgress below.
+        struct DummyReturner;
+        impl DaemonProgressReturner for DummyReturner {
+            type T = ();
+            async fn result<
+                E: From<Error> + From<std::io::Error> + Send + Sync,
+                C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+            >(
+                self,
+                _store: &mut DaemonStore<C>,
+            ) -> Result<Self::T, E> {
+                Ok(())
+            }
+        }
+
+        // NARs are dumped straight onto the wire, with no length prefix, which means that in order
+        // to find out where it ends, we'd have to implement a streaming NAR parser - or cheat, and
+        // simply ask the daemon, by calling QueryPathInfo before the actual NarFromPath call.
+        //
+        // NOTE: Slightly racy - the path may be garbage collected and/or recreated in between.
+        // The Nix store is content addressed, which should minimise the risk of this resulting in
+        // anything but a "not found" error from the daemon/an empty response, but in a situation
+        // where QueryPathInfo returns the wrong length, we would either (if the file got shorter)
+        // hang forever, waiting for data that will never come; or (if the file got longer), return
+        // a truncated version, misalign the connection, and read the rest of the file as if it was
+        // the response to the next operation.
+        //
+        // For the same reason, the response also needs to be completely read before the connection
+        // can be reused. This is why this method takes ownership of the connection, and closes it.
+        //
+        // Once we have a better solution to this stream corruption problem, a non-owning version
+        // will be added.
+        enum NarState {
+            Start,
+            QueryPathInfo(std::vec::IntoIter<Stderr>),
+            NarFromPath(std::vec::IntoIter<Stderr>),
+            End,
+        }
+
+        struct NarProgress<E, C, P>
+        where
+            E: From<Error> + Send + Sync,
+            C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+            P: AsRef<str> + Send + Sync + Debug,
+        {
+            store: DaemonStore<C>,
+            path: P,
+            state: NarState,
+            nar_size: u64,
+            _e: PhantomData<E>,
+        }
+        impl<E, C, P> Progress for NarProgress<E, C, P>
+        where
+            E: From<Error> + Send + Sync,
+            C: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+            P: AsRef<str> + Send + Sync + Debug,
+        {
+            type T = tokio::io::Take<C>;
+            type Error = E;
+
+            async fn next(&mut self) -> Result<Option<Stderr>, Self::Error> {
                 loop {
-                    match state {
-                        State::Initial(path) => {
-                            // Look up the NAR size up front. We need it to know
-                            // when to stop reading the body.
+                    match self.state {
+                        NarState::Start => {
+                            // Ask the daemon how long the NAR is, so that we don't need to parse it.
                             //
-                            // TODO This is technically racy, because the store path
-                            // can change between looking this up and fetching the
-                            // NAR. The better implementation would be to parse the
-                            // NAR to find out how long it is.
-                            let path_info =
-                                store.query_pathinfo(&path).result().await?.ok_or_else(|| {
-                                    Error::Invalid(format!("NarFromPath: path not found: {}", path))
-                                })?;
-
-                            wire::write_op(&mut store.conn, wire::Op::NarFromPath)
-                                .await
-                                .with_field("NarFromPath.<op>")?;
-                            wire::write_string(&mut store.conn, &path)
-                                .await
-                                .with_field("NarFromPath.path")?;
-
-                            // TODO Do we need to do this?
-                            while let Some(stderr) = wire::read_stderr(&mut store.conn).await? {
-                                if let Stderr::Error(err) = stderr {
-                                    return Err(Error::NixError(err));
-                                }
+                            // Note that this deliberately offloads any error handling for requesting
+                            // unknown paths to the daemon; we assume that if QueryPathInfo returns
+                            // nothing, then NarFromPath will either return an error or no contents.
+                            let (stderr, r) = self.store.query_pathinfo(&self.path).split().await;
+                            self.nar_size = r?.map(|pi| pi.nar_size).unwrap_or(0);
+                            self.state = NarState::QueryPathInfo(stderr.into_iter());
+                        }
+                        NarState::QueryPathInfo(ref mut stderrs) => {
+                            // Forward all stderr messages from QueryPathInfo.
+                            if let Some(stderr) = stderrs.next() {
+                                return Ok(Some(stderr));
                             }
-
-                            state = State::Reading {
-                                bytes_left: path_info.nar_size.try_into().unwrap(),
-                            };
-
-                            // Fallthrough to reading the chunk.
-                            continue;
+                            // Then invoke NarFromPath.
+                            let nar_from_path = DaemonProgress::new(
+                                &mut self.store,
+                                Caller { path: &self.path },
+                                DummyReturner,
+                            );
+                            let (stderr, r) = nar_from_path.split().await;
+                            r?;
+                            self.state = NarState::NarFromPath(stderr.into_iter());
                         }
-                        State::Reading { bytes_left: 0 } => return Ok(None),
-                        State::Reading { bytes_left } => {
-                            let (item, bytes_left) =
-                                read_chunk(&mut store.conn, bytes_left).await?;
-                            return Ok(Some((item, (store, State::Reading { bytes_left }))));
+                        NarState::NarFromPath(ref mut stderrs) => {
+                            // Forward all stderr messages from NarFromPath.
+                            if let Some(stderr) = stderrs.next() {
+                                return Ok(Some(stderr));
+                            }
+                            // Short-circuit.
+                            self.state = NarState::End;
                         }
+                        NarState::End => return Ok(None),
                     }
                 }
-            },
-        ))
+            }
+            async fn result(mut self) -> Result<Self::T, Self::Error> {
+                // Consume all stderr messages, then return a reader for `nar_size` bytes.
+                while self.next().await?.is_some() {}
+                Ok(self.store.conn.take(self.nar_size))
+            }
+        }
+
+        NarProgress {
+            store: self,
+            path,
+            state: NarState::Start,
+            nar_size: 0,
+            _e: PhantomData,
+        }
     }
 }
 

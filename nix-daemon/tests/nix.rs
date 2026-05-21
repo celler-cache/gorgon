@@ -10,6 +10,7 @@ use nix_daemon::{
 };
 use std::io::Write;
 use std::{collections::HashMap, process::Stdio};
+use tokio::io::AsyncReadExt;
 use tokio_test::io::Builder;
 use tracing::warn;
 use utils::init_logging;
@@ -488,4 +489,36 @@ async fn test_build() {
         HashMap::from([("out".to_string(), out_path.to_string())]),
         outputs
     );
+}
+
+#[tokio::test]
+async fn test_into_nar_from_path() {
+    init_logging();
+    let store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let (stderrs, r) = store
+        .into_nar_from_path(create_known_test_file())
+        .split()
+        .await;
+    assert_eq!(Vec::<Stderr>::new(), stderrs);
+    let mut s = String::new();
+    assert_eq!(416, r.unwrap().read_to_string(&mut s).await.unwrap());
+
+    let expected = "\r\0\0\0\0\0\0\0nix-archive-1\0\0\0\u{1}\0\0\0\0\0\0\0(\0\0\0\0\0\0\0\u{4}\0\0\0\0\0\0\0type\0\0\0\0\u{7}\0\0\0\0\0\0\0regular\0\u{8}\0\0\0\0\0\0\0contents+\u{1}\0\0\0\0\0\0Derive([(\"out\",\"/nix/store/4pk26vlcals7yz2qgdgz92pfy5gya7rc-nix-daemon-fixed-test-file\",\"\",\"\")],[],[],\"x86_64-linux\",\"/bin/sh\",[],[(\"builder\",\"/bin/sh\"),(\"name\",\"nix-daemon-fixed-test-file\"),(\"out\",\"/nix/store/4pk26vlcals7yz2qgdgz92pfy5gya7rc-nix-daemon-fixed-test-file\"),(\"system\",\"x86_64-linux\")])\0\0\0\0\0\u{1}\0\0\0\0\0\0\0)\0\0\0\0\0\0\0";
+    assert_eq!(expected, s);
+}
+#[tokio::test]
+async fn test_into_nar_from_path_nonexistent() {
+    init_logging();
+    let store = DaemonStore::builder()
+        .connect_unix("/nix/var/nix/daemon-socket/socket")
+        .await
+        .expect("Couldn't connect to daemon");
+    let (stderrs, r) = store.into_nar_from_path(INVALID_STORE_PATH).split().await;
+    assert_eq!(Vec::<Stderr>::new(), stderrs);
+    let mut buf = Vec::new();
+    assert_eq!(0, r.unwrap().read_to_end(&mut buf).await.unwrap());
+    assert_eq!(&[] as &[u8], &buf[..]);
 }
